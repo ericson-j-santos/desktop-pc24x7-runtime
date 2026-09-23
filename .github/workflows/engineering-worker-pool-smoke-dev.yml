@@ -1,0 +1,58 @@
+name: Engineering Worker Pool Smoke DEV
+
+on:
+  workflow_dispatch:
+    inputs:
+      worker_pool_sha:
+        description: Full immutable SHA from ericson-j-santos/engineering-worker-pool
+        required: true
+        type: string
+        default: c9b3b6ca59f2ebed663e5242d68f727373d43a6f
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engineering-worker-pool-smoke-dev
+  cancel-in-progress: false
+
+jobs:
+  smoke:
+    name: Worker Pool smoke on dedicated Desktop runtime
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 15
+    steps:
+      - name: Checkout Desktop runtime exact SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout Engineering Worker Pool immutable SHA
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ inputs.worker_pool_sha }}
+          path: external/engineering-worker-pool
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Run governed standalone Worker Pool smoke
+        shell: powershell
+        run: >
+          python scripts/engineering_worker_pool_smoke_dev.py
+          --expected-runtime-sha "${{ github.sha }}"
+          --expected-worker-pool-sha "${{ inputs.worker_pool_sha }}"
+          --worker-pool-root "external/engineering-worker-pool"
+          --correlation-id "worker-pool-runtime-${{ github.run_id }}-${{ github.run_attempt }}"
+          --output "artifacts/engineering-worker-pool-smoke/evidence.json"
+
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: engineering-worker-pool-smoke-${{ github.run_id }}
+          path: artifacts/engineering-worker-pool-smoke/*.json
+          if-no-files-found: error
+          retention-days: 30
