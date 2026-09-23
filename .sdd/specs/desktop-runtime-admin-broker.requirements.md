@@ -22,11 +22,14 @@ Somente:
 
 - `/desktop-runtime admin status`;
 - `/desktop-runtime admin recover-rdc`;
-- `/desktop-runtime admin recover-runner`.
+- `/desktop-runtime admin recover-runner`;
+- `/desktop-runtime admin recover-control-plane`;
+- `/desktop-runtime admin activate-watchdog`.
 
-`recover-control-plane` e `activate-watchdog` permanecem deliberadamente fora da
-allowlist até o watchdog do novo repositório possuir task/runtime próprios. Isso impede
-que a migração sobrescreva `\Automation\ReqSysDesktopControlPlaneWatchdog`.
+Os comandos de watchdog usam exclusivamente a task
+`\Automation\DesktopPc24x7RuntimeWatchdog` e o runtime
+`%LOCALAPPDATA%\DesktopPC24x7\ControlPlaneWatchdog`. A task legada
+`\Automation\ReqSysDesktopControlPlaneWatchdog` permanece fora do alcance deste broker.
 
 ## Runner
 
@@ -52,9 +55,10 @@ substituído ou ter suas labels alteradas por esta capacidade.
 1. compilação e pytest verdes no SHA atual;
 2. controles negativos de autorização e anti-replay verdes;
 3. testes provam repo/issue/task/runtime fixos;
-4. testes provam ausência dos comandos de watchdog ainda não isolados;
+4. testes provam identidade própria do watchdog e ausência de descoberta do runner legado;
 5. testes provam uso exclusivo do bootstrap do runner novo;
-6. CI de PR verde no HEAD exato.
+6. comandos de watchdog apontam apenas para task/runtime próprios;
+7. CI de PR verde no HEAD exato.
 
 ## Critérios de aceite runtime
 

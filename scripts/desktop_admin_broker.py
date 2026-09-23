@@ -52,6 +52,8 @@ ALLOWED_COMMANDS = {
     "/desktop-runtime admin status": "status",
     "/desktop-runtime admin recover-rdc": "recover-rdc",
     "/desktop-runtime admin recover-runner": "recover-runner",
+    "/desktop-runtime admin recover-control-plane": "recover-control-plane",
+    "/desktop-runtime admin activate-watchdog": "activate-watchdog",
 }
 
 
@@ -179,12 +181,12 @@ def watchdog_runtime_metadata() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     if not base:
         raise BrokerError("LOCALAPPDATA não definido")
-    return Path(base) / "ReqSys" / "DesktopControlPlaneWatchdog" / "metadata.json"
+    return Path(base) / "DesktopPC24x7" / "ControlPlaneWatchdog" / "metadata.json"
 
 
 def _watchdog_module(metadata: dict[str, Any]):
     path = Path(metadata["release_root"]) / "scripts" / WATCHDOG_SCRIPT
-    return _load_module(path, "reqsys_broker_watchdog")
+    return _load_module(path, "desktop_runtime_broker_watchdog")
 
 
 def _ensure_watchdog_staged(metadata: dict[str, Any]) -> tuple[Any, Path]:
@@ -192,7 +194,7 @@ def _ensure_watchdog_staged(metadata: dict[str, Any]) -> tuple[Any, Path]:
     release_root = Path(metadata["release_root"])
     staged = _load_module(
         release_root / "scripts" / WATCHDOG_SCRIPT,
-        "reqsys_broker_watchdog_stage",
+        "desktop_runtime_broker_watchdog_stage",
     )
     if not target.is_file():
         result = staged.install(
@@ -217,7 +219,7 @@ def _activate_watchdog(metadata: dict[str, Any]) -> dict[str, Any]:
     scripts = release_root / "scripts"
     sys.path.insert(0, str(scripts))
     try:
-        launcher = _load_module(scripts / WATCHDOG_UAC_SCRIPT, "reqsys_broker_watchdog_launcher")
+        launcher = _load_module(scripts / WATCHDOG_UAC_SCRIPT, "desktop_runtime_broker_watchdog_launcher")
         result = launcher.launch(
             target,
             confirm=launcher.LAUNCH_CONFIRM,
@@ -363,6 +365,10 @@ def execute_action(action: str, metadata: dict[str, Any], comment_id: int) -> di
         result = _recover_rdc(metadata, correlation_id)
     elif action == "recover-runner":
         result = _recover_runner(metadata)
+    elif action == "recover-control-plane":
+        result = _recover_control_plane(metadata)
+    elif action == "activate-watchdog":
+        result = _activate_watchdog(metadata)
     else:
         raise BrokerError("action_id não allowlisted")
     return {

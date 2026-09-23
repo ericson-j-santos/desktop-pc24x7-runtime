@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Any
 
 EXPECTED_HOST = "DESKTOP-PDQK954"
-SERVICE_NAME = "reqsys-desktop-control-plane-watchdog"
+SERVICE_NAME = "desktop-pc24x7-runtime-watchdog"
 TASK_FOLDER = r"\Automation"
-TASK_LEAF = "ReqSysDesktopControlPlaneWatchdog"
+TASK_LEAF = "DesktopPc24x7RuntimeWatchdog"
 TASK_NAME = TASK_FOLDER + "\\" + TASK_LEAF
 TASK_TRIGGER_BOOT = 8
 TASK_ACTION_EXEC = 0
@@ -38,7 +38,7 @@ TASK_LOGON_S4U = 2
 TASK_CREATE_OR_UPDATE = 6
 TASK_RUNLEVEL_LUA = 0
 TASK_INSTANCES_IGNORE_NEW = 2
-CONFIRM = "INSTALL-DESKTOP-CONTROL-PLANE-WATCHDOG"
+CONFIRM = "INSTALL-DESKTOP-PC24X7-RUNTIME-WATCHDOG"
 
 RDC_RECOVERY_CONFIRM = "RECOVER-GOVERNED-RDC"
 RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
@@ -74,7 +74,7 @@ def default_runtime_root() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         raise WatchdogError("LOCALAPPDATA não definido")
-    return Path(local) / "ReqSys" / "DesktopControlPlaneWatchdog"
+    return Path(local) / "DesktopPC24x7" / "ControlPlaneWatchdog"
 
 
 def atomic_json(path: Path, payload: dict[str, Any]) -> None:
@@ -93,24 +93,10 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _candidate_runner_homes() -> list[Path]:
-    candidates = [
-        Path(r"C:\actions-runner"),
-        Path(r"C:\dev\actions-runner"),
-        Path(r"C:\dev\github-actions-runner"),
-        Path(r"C:\dev\runner"),
-    ]
-    configured = os.environ.get("REQSYS_GITHUB_RUNNER_HOME")
-    if configured:
-        candidates.insert(0, Path(configured))
-    dev = Path(r"C:\dev")
-    if dev.is_dir():
-        try:
-            for item in dev.iterdir():
-                if item.is_dir() and "runner" in item.name.casefold():
-                    candidates.append(item)
-        except OSError:
-            return candidates
-    return candidates
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return []
+    return [Path(local) / "DesktopPC24x7" / "GitHubRunner"]
 
 
 def validate_runner_home(path: Path) -> Path:
@@ -599,7 +585,7 @@ def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, 
 
     definition = service.NewTask(0)
     definition.RegistrationInfo.Description = (
-        "ReqSys Desktop control-plane watchdog: RDC + GitHub Actions runner"
+        "Desktop PC24x7 runtime watchdog: RDC + dedicated GitHub Actions runner"
     )
     definition.Settings.Enabled = True
     definition.Settings.StartWhenAvailable = True

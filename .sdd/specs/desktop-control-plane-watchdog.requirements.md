@@ -19,18 +19,18 @@ Esta mudança corrige uma lacuna comprovada da recuperação integrada pela PR #
 1. Executar somente no host exato \`DESKTOP-PDQK954\`.
 2. Operar somente em local/DEV; produção, HML e STG ficam fora do escopo.
 3. Não depender do RDC, GitHub Actions runner, GitHub API, \`workflow_dispatch\`, WMI, SMB ou reboot para manter o watchdog ativo.
-4. Instalar uma tarefa Windows \`\\Automation\\ReqSysDesktopControlPlaneWatchdog\` com trigger \`AtStartup\`, \`StartWhenAvailable\`, instância única e reinício automático em falha.
+4. Instalar uma tarefa Windows \`\\Automation\\DesktopPc24x7RuntimeWatchdog\` com trigger \`AtStartup\`, \`StartWhenAvailable\`, instância única e reinício automático em falha.
 5. Usar logon S4U sem armazenar senha e nível de execução limitado.
 6. Manter lock local de instância única para impedir dois watchdogs concorrentes.
-7. Descobrir ou receber uma única vez o diretório do GitHub Actions runner e validar apenas a presença de \`.runner\`, \`run.cmd\` e \`bin\\Runner.Listener.exe\`; o conteúdo de \`.runner\` não pode ser lido nem registrado.
+7. Usar somente o runner dedicado em \`%LOCALAPPDATA%\\DesktopPC24x7\\GitHubRunner\`; não descobrir nem reutilizar o runner legado do ReqSys. Validar apenas a presença de \`.runner\`, \`run.cmd\` e \`bin\\Runner.Listener.exe\`; o conteúdo de \`.runner\` não pode ser lido nem registrado.
 8. Considerar o runner local saudável quando \`Runner.Listener.exe\` estiver ativo.
 9. Quando o runner estiver inativo, iniciá-lo pelo \`run.cmd\` local já configurado, sem token, segredo ou nova configuração.
 10. Considerar RDC headless saudável somente com claim V4 \`ready=true\` fresco.
 11. Quando o claim RDC estiver ausente/stale/inválido, chamar o \`pc24x7_rdc_recovery.py\` versionado com a confirmação fixa \`RECOVER-GOVERNED-RDC\`.
 12. Não aceitar task name, host, executável RDC, comando arbitrário ou segredo como entrada do ciclo de recuperação.
-13. Persistir somente estado sanitizado em \`%LOCALAPPDATA%\\ReqSys\\DesktopControlPlaneWatchdog\`.
+13. Persistir somente estado sanitizado em \`%LOCALAPPDATA%\\DesktopPC24x7\\ControlPlaneWatchdog\`.
 14. Toda evidência deve declarar \`production_touched=false\`, \`secrets_read=false\` e \`reboot_performed=false\`.
-15. A instalação exige confirmação exata \`INSTALL-DESKTOP-CONTROL-PLANE-WATCHDOG\` e SHA fonte completo.
+15. A instalação exige confirmação exata \`INSTALL-DESKTOP-PC24X7-RUNTIME-WATCHDOG\` e SHA fonte completo.
 16. A release local deve copiar somente os scripts versionados necessários; não deve depender do checkout permanecer presente.
 17. O workflow \`desktop-rdc-recovery.yml\` continua válido como fallback externo, mas sua indisponibilidade não pode interromper o watchdog local.
 18. Se o Windows recusar o registro `AtStartup + S4U` com `Access Denied`, a instalação deve preservar a release imutável e a metadata e retornar explicitamente `activation_pending=true` e `requires_uac_activation=true`; esse estado não é runtime ativo.
@@ -44,6 +44,7 @@ Esta mudança corrige uma lacuna comprovada da recuperação integrada pela PR #
 
 - host diferente de \`DESKTOP-PDQK954\` deve falhar fechado;
 - diretório de runner incompleto deve ser recusado;
+- descoberta automática fora de `%LOCALAPPDATA%\\DesktopPC24x7\\GitHubRunner` deve ser inexistente;
 - confirmação de instalação incorreta deve ser recusada;
 - claim RDC stale não pode ser interpretado como saudável;
 - ausência/falha da recuperação RDC deve deixar \`ok=false\`;

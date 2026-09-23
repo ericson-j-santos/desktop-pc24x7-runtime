@@ -49,6 +49,8 @@ def test_allowlist_is_exact_and_has_no_shell_action() -> None:
         "/desktop-runtime admin status",
         "/desktop-runtime admin recover-rdc",
         "/desktop-runtime admin recover-runner",
+        "/desktop-runtime admin recover-control-plane",
+        "/desktop-runtime admin activate-watchdog",
     }
     source = MODULE.read_text(encoding="utf-8").casefold()
     assert "shell=true" not in source
@@ -259,21 +261,30 @@ def test_runtime_broker_is_isolated_from_reqsys_control_channel(
     assert 'TASK_LEAF = "DesktopPc24x7AdminBroker"' in source
     assert 'RUNNER_BOOTSTRAP_SCRIPT = "activate_desktop_runtime_runner.py"' in source
     assert '"/reqsys admin desktop ' not in source
-    assert '"/desktop-runtime admin recover-control-plane"' not in source
-    assert '"/desktop-runtime admin activate-watchdog"' not in source
+    assert '"/desktop-runtime admin recover-control-plane"' in source
+    assert '"/desktop-runtime admin activate-watchdog"' in source
+    assert '"DesktopPC24x7" / "ControlPlaneWatchdog"' in source
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert m.default_runtime_root() == tmp_path / "DesktopPC24x7" / "AdminBroker"
 
 
-def test_unsupported_watchdog_commands_are_not_authorized() -> None:
+def test_isolated_watchdog_commands_are_authorized() -> None:
     now = datetime.now(timezone.utc)
     not_before = now - timedelta(seconds=10)
-    for body in (
-        "/desktop-runtime admin recover-control-plane",
-        "/desktop-runtime admin activate-watchdog",
-    ):
+    expected = {
+        "/desktop-runtime admin recover-control-plane": "recover-control-plane",
+        "/desktop-runtime admin activate-watchdog": "activate-watchdog",
+    }
+    for body, action in expected.items():
         assert m.authorize_comment(
             gh_comment(body=body, created=now),
             not_before=not_before,
             reference_time=now,
-        ) is None
+        ) == action
+
+
+def test_watchdog_metadata_uses_runtime_owned_path(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert m.watchdog_runtime_metadata() == (
+        tmp_path / "DesktopPC24x7" / "ControlPlaneWatchdog" / "metadata.json"
+    )

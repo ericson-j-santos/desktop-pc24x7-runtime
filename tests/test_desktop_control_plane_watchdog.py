@@ -47,6 +47,15 @@ def test_discovery_prefers_explicit_runner_home(tmp_path: Path) -> None:
     assert m.discover_runner_home(valid) == valid.resolve()
 
 
+def test_default_discovery_is_isolated_to_runtime_runner(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    expected = tmp_path / "DesktopPC24x7" / "GitHubRunner"
+    assert m._candidate_runner_homes() == [expected]
+    source = MODULE.read_text(encoding="utf-8")
+    assert "REQSYS_GITHUB_RUNNER_HOME" not in source
+    assert 'Path(r"C:\\\\actions-runner")' not in source
+
+
 def test_rdc_claim_missing_is_not_healthy(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(m, "RDC_HEADLESS_CLAIM", tmp_path / "missing.json")
     assert m.read_rdc_claim() == {"fresh": False, "reason": "claim_missing"}
@@ -356,9 +365,11 @@ def test_install_stages_release_when_uac_activation_is_required(monkeypatch, tmp
 
 def test_source_contract_is_independent_of_rdc_and_github_runner(tmp_path: Path) -> None:
     text = MODULE.read_text(encoding="utf-8")
-    assert 'TASK_LEAF = "ReqSysDesktopControlPlaneWatchdog"' in text
+    assert 'TASK_LEAF = "DesktopPc24x7RuntimeWatchdog"' in text
     assert 'TASK_TRIGGER_BOOT = 8' in text
     assert 'TASK_LOGON_S4U = 2' in text
+    assert 'SERVICE_NAME = "desktop-pc24x7-runtime-watchdog"' in text
+    assert '"DesktopPC24x7" / "ControlPlaneWatchdog"' in text
     assert 'definition.Settings.RestartCount = 999' in text
     assert "pc24x7_rdc_recovery.py" in text
     assert "Runner.Listener.exe" in text
