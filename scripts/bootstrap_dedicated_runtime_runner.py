@@ -22,6 +22,7 @@ from typing import Any
 import desktop_control_plane_watchdog as watchdog
 
 EXPECTED_HOST = "DESKTOP-PDQK954"
+EXPECTED_GITHUB_LOGIN = "ericson-j-santos"
 REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}"
 RUNNER_NAME = "DESKTOP-PDQK954-runtime"
@@ -60,14 +61,65 @@ def validate_host() -> str:
     return host
 
 
-def github_token() -> str:
-    token = os.environ.get("GH_TOKEN", "").strip()
-    if len(token) < 20:
-        raise BootstrapError("github_token_missing", "credencial governada de administração do runner ausente")
-    return token
+def find_gh() -> Path | None:
+    located = shutil.which("gh")
+    if located:
+        return Path(located)
+    candidates = (
+        Path(os.environ.get("ProgramFiles") or r"C:\\Program Files") / "GitHub CLI" / "gh.exe",
+        Path(os.environ.get("LOCALAPPDATA") or "") / "Programs" / "GitHub CLI" / "gh.exe",
+    )
+    return next((item for item in candidates if item.is_file()), None)
 
 
-def api_json(path: str, *, method: str = "GET", token: str) -> dict[str, Any]:
+def gh_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.pop("GH_TOKEN", None)
+    env.pop("GITHUB_TOKEN", None)
+    return env
+
+
+def local_gh_api_json(path: str, *, method: str = "GET") -> dict[str, Any]:
+    gh = find_gh()
+    if gh is None:
+        raise BootstrapError("github_local_auth_required", "GitHub CLI autenticado indisponível")
+    env = gh_env()
+    who = subprocess.run(
+        [str(gh), "api", "user", "--jq", ".login"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+        env=env,
+    )
+    if who.returncode != 0 or who.stdout.strip().casefold() != EXPECTED_GITHUB_LOGIN.casefold():
+        raise BootstrapError("github_local_auth_required", "sessão GitHub local do owner não validada")
+    completed = subprocess.run(
+        [str(gh), "api", "--method", method, path.lstrip("/")],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+        env=env,
+    )
+    if completed.returncode != 0:
+        raise BootstrapError("github_local_api_failed", "GitHub CLI local não autorizou o endpoint fixo")
+    try:
+        payload = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        raise BootstrapError("github_api_invalid", "resposta GitHub local inválida") from None
+    if not isinstance(payload, dict):
+        raise BootstrapError("github_api_invalid", "resposta GitHub inválida")
+    return payload
+
+
+def api_json(path: str, *, method: str = "GET", token: str | None) -> dict[str, Any]:
+    if token is None:
+        return local_gh_api_json(path, method=method)
     request = urllib.request.Request(
         f"https://api.github.com{path}",
         method=method,
@@ -90,7 +142,7 @@ def api_json(path: str, *, method: str = "GET", token: str) -> dict[str, Any]:
     return payload
 
 
-def registration_token(token: str) -> str:
+def registration_token(token: str | None) -> str:
     payload = api_json(
         f"/repos/{REPOSITORY}/actions/runners/registration-token",
         method="POST",
@@ -102,7 +154,7 @@ def registration_token(token: str) -> str:
     return value
 
 
-def registry_snapshot(token: str) -> dict[str, Any]:
+def registry_snapshot(token: str | None) -> dict[str, Any]:
     payload = api_json(f"/repos/{REPOSITORY}/actions/runners?per_page=100", token=token)
     raw = payload.get("runners")
     if not isinstance(raw, list):
@@ -226,7 +278,7 @@ def register_runner(root: Path, token: str) -> None:
         raise BootstrapError("runner_registration_failed", f"registro falhou: exit={completed.returncode}")
 
 
-def wait_online(token: str, timeout_seconds: float = 60.0) -> dict[str, Any]:
+def wait_online(token: str | None, timeout_seconds: float = 60.0) -> dict[str, Any]:
     deadline = time.monotonic() + timeout_seconds
     current = registry_snapshot(token)
     while time.monotonic() < deadline:
@@ -250,9 +302,17 @@ def bootstrap(*, source_sha: str, evidence_file: Path | None = None) -> dict[str
     host = validate_host()
     if len(source_sha) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in source_sha):
         raise BootstrapError("source_sha_invalid", "source_sha inválido")
-    token = github_token()
+    token = os.environ.get("GH_TOKEN", "").strip() or None
+    credential_mode = "actions_secret" if token else "local_gh"
     root = default_runner_home().resolve()
-    before = registry_snapshot(token)
+    try:
+        before = registry_snapshot(token)
+    except BootstrapError as exc:
+        if token is None or exc.state not in {"github_api_failed", "github_api_invalid"}:
+            raise
+        token = None
+        credential_mode = "local_gh"
+        before = registry_snapshot(None)
     local_before = runner_contract(root)
 
     if before.get("present") and not local_before:
@@ -280,6 +340,7 @@ def bootstrap(*, source_sha: str, evidence_file: Path | None = None) -> dict[str
         "runner_running": local_running,
         "registry_before": before,
         "registry_after": after,
+        "github_credential_mode": credential_mode,
         "registration_token_consumed_in_memory": not local_before,
         "registration_token_persisted": False,
         "registration_token_logged": False,
