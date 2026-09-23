@@ -1,0 +1,40 @@
+name: Dedicated Runtime Runner E2E
+
+on:
+  push:
+    branches:
+      - feat/dedicated-runtime-runner-20260923
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dedicated-runtime-runner-e2e
+  cancel-in-progress: false
+
+jobs:
+  e2e:
+    name: Pickup on dedicated Desktop runtime runner
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 10
+    steps:
+      - name: Checkout exact SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prove exact host, repository and runner
+        shell: pwsh
+        run: python scripts/dedicated_runner_e2e.py --evidence-file artifacts/dedicated-runner-e2e/evidence.json
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: dedicated-runner-e2e-${{ github.run_id }}
+          path: artifacts/dedicated-runner-e2e/evidence.json
+          if-no-files-found: error
+          retention-days: 30
