@@ -27,7 +27,7 @@ jobs:
           persist-credentials: false
 
       - name: Prove exact host, repository and runner
-        shell: pwsh
+        shell: powershell
         run: python scripts/dedicated_runner_e2e.py --evidence-file artifacts/dedicated-runner-e2e/evidence.json
 
       - name: Upload evidence
