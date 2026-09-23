@@ -165,12 +165,17 @@ def test_runtime_smoke_wraps_external_harness_without_exposing_token_path(
         smoke, "discover_worker_pool_token_file", lambda _runner: token_file
     )
 
+    observed_child_output: list[Path] = []
+
     def fake_subprocess_run(
-        command: list[str], **_kwargs: object
+        command: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[str]:
         evidence_path = Path(command[command.index("--output") + 1])
-        evidence_path.parent.mkdir(parents=True, exist_ok=True)
-        evidence_path.write_text(
+        cwd = Path(str(kwargs["cwd"]))
+        effective_path = evidence_path if evidence_path.is_absolute() else cwd / evidence_path
+        observed_child_output.append(effective_path)
+        effective_path.parent.mkdir(parents=True, exist_ok=True)
+        effective_path.write_text(
             json.dumps(
                 {
                     "result": "WORKER_POOL_SMOKE_PASSED",
@@ -202,6 +207,8 @@ def test_runtime_smoke_wraps_external_harness_without_exposing_token_path(
     )
 
     assert result["result"] == "WORKER_POOL_RUNTIME_SMOKE_PASSED"
+    assert observed_child_output == [output.with_name("worker-pool-evidence.json")]
+    assert observed_child_output[0].is_absolute()
     assert result["worker_pool_result"] == "WORKER_POOL_SMOKE_PASSED"
     assert result["independent_readback"] is True
     assert result["replay_created"] is False

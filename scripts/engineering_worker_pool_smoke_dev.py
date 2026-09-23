@@ -230,6 +230,7 @@ def run_runtime_smoke(
     if not token_file.is_file():
         raise RuntimeSmokeError("worker_pool_token_file_missing")
 
+    output = output if output.is_absolute() else (ROOT / output).resolve()
     child_evidence = output.with_name("worker-pool-evidence.json")
     command = [
         sys.executable,
