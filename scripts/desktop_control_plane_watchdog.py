@@ -251,6 +251,10 @@ def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
     run_cmd = runner_home / "run.cmd"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("a", encoding="utf-8", buffering=1)
+    child_env = os.environ.copy()
+    # GitHub Actions mata no cleanup processos que herdaram RUNNER_TRACKING_ID.
+    # O listener é um serviço persistente do host, não um processo do job.
+    child_env.pop("RUNNER_TRACKING_ID", None)
     try:
         process = subprocess.Popen(
             [str(cmd), "/d", "/s", "/c", str(run_cmd)],
@@ -260,6 +264,7 @@ def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
             stderr=subprocess.STDOUT,
             close_fds=True,
             creationflags=_creationflags(),
+            env=child_env,
         )
     finally:
         log_handle.close()
