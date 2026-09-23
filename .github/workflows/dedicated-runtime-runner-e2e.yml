@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: dedicated-runtime-runner-e2e
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   e2e:
