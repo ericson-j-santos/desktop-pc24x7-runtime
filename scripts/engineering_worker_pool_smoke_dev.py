@@ -156,6 +156,13 @@ def discover_worker_pool_token_file(
     return Path(str(mounts[0]["Source"]))
 
 
+def resolve_output_path(path: Path, base: Path | None = None) -> Path:
+    if path.is_absolute():
+        return path.resolve()
+    root = Path.cwd() if base is None else base
+    return (root / path).resolve()
+
+
 def load_evidence(path: Path) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
@@ -213,6 +220,7 @@ def run_runtime_smoke(
     if not correlation_id.strip():
         raise RuntimeSmokeError("correlation_id_invalid")
 
+    output = resolve_output_path(output)
     validate_runtime_identity(env)
 
     if git_sha(ROOT) != expected_runtime_sha:
@@ -326,7 +334,7 @@ def main() -> int:
             "deploy_executed": False,
             "reboot_executed": False,
         }
-        write_evidence(args.output, blocked)
+        write_evidence(resolve_output_path(args.output), blocked)
         print(json.dumps(blocked, ensure_ascii=False, sort_keys=True), file=sys.stderr)
         return 2
 
