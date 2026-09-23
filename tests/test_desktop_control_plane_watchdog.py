@@ -138,6 +138,7 @@ def test_start_runner_recovers_without_claiming_github_health(monkeypatch, tmp_p
         observed["cwd"] = kwargs["cwd"]
         return FakeProcess()
 
+    monkeypatch.setenv("RUNNER_TRACKING_ID", "actions-job-tracking")
     monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
     result = m.start_runner(runner_home, tmp_path / "runner.log")
     assert result["status"] == "recovered"
@@ -147,6 +148,7 @@ def test_start_runner_recovers_without_claiming_github_health(monkeypatch, tmp_p
     assert result["pickup_required"] is True
     assert observed["cwd"] == str(runner_home.resolve())
     assert "run.cmd" in " ".join(str(x) for x in observed["args"])
+    assert "RUNNER_TRACKING_ID" not in observed["env"]
 
 
 def test_existing_listener_is_process_running_not_healthy(monkeypatch, tmp_path: Path) -> None:
