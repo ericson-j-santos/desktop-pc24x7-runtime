@@ -1,4 +1,4 @@
-name: TODO Global DEV Deploy
+name: TODO Global DEV Deploy Cleanup
 
 on:
   push:
@@ -10,92 +10,14 @@ permissions:
 
 concurrency:
   group: todo-global-dev-deploy-pc24x7
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
-  deploy:
-    name: Deploy TODO Global DEV via Command Gateway
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime]
-    timeout-minutes: 25
-    env:
-      EXPECTED_HEAD: ae9b681b6cbe5c6e0c6c82b187b3245c0749118f
-      ENTRY_REPO: C:\dev\chatgpt-workers\operational-rules-entry
-      CORRELATION_ID: pbi-todo-global-dev-${{ github.run_id }}-${{ github.run_attempt }}
-
+  cleanup:
+    name: Cancel stale queued DEV deploy
+    runs-on: ubuntu-latest
     steps:
-      - name: Governed session bootstrap
-        shell: powershell
+      - name: Record safe cancellation
         run: |
-          $ErrorActionPreference = 'Stop'
-          $launcher = Join-Path $env:LOCALAPPDATA 'ReqSys\CommandGateway\bin\session_launcher.py'
-          $policy = Join-Path $env:LOCALAPPDATA 'ReqSys\CommandGateway\config\policy.json'
-          if (-not (Test-Path $launcher)) { throw "SESSION_LAUNCHER_MISSING" }
-          if (-not (Test-Path $policy)) { throw "COMMAND_GATEWAY_POLICY_MISSING" }
-          if (-not (Test-Path $env:ENTRY_REPO)) { throw "OPERATIONAL_RULES_ENTRY_MISSING" }
-
-          $raw = & python $launcher --policy $policy --repo $env:ENTRY_REPO --session-prefix pbi-todo-dev --correlation-id $env:CORRELATION_ID --expected-head $env:EXPECTED_HEAD --sync-ref origin/main
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $result = $raw | ConvertFrom-Json
-          if ($result.result -ne 'SESSION_LAUNCH_OK' -or -not $result.state_validated) { throw "BOOTSTRAP_NOT_VALIDATED" }
-          if ($result.head -ne $env:EXPECTED_HEAD) { throw "BOOTSTRAP_HEAD_MISMATCH" }
-
-          "SESSION_ID=$($result.session_id)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "TARGET_PATH=$($result.target_path)" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "GATEWAY_POLICY=$policy" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "COMMAND_GATEWAY=$(Join-Path $env:LOCALAPPDATA 'ReqSys\CommandGateway\bin\command_gateway.py')" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "### Bootstrap governado" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- resultado: SESSION_LAUNCH_OK" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- state_validated: true" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- SHA: $env:EXPECTED_HEAD" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- correlation_id: $env:CORRELATION_ID" | Add-Content $env:GITHUB_STEP_SUMMARY
-
-      - name: Apply TODO Global DEV runtime
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $raw = & python $env:COMMAND_GATEWAY --policy $env:GATEWAY_POLICY --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 900 --expected-head $env:EXPECTED_HEAD -- python scripts/todo_gateway_pc24x7.py up --wait-seconds 120 --docker-wait-seconds 180
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $result = $raw | ConvertFrom-Json
-          if ($result.gateway_exit_code -ne 0 -or $result.state_changed) { throw "DEPLOY_GATEWAY_VALIDATION_FAILED" }
-          "### Deploy DEV" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- gateway_exit_code: 0" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- state_changed: false" | Add-Content $env:GITHUB_STEP_SUMMARY
-
-      - name: Smoke through Command Gateway
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $raw = & python $env:COMMAND_GATEWAY --policy $env:GATEWAY_POLICY --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 120 --expected-head $env:EXPECTED_HEAD -- python scripts/todo_gateway_pc24x7.py smoke --wait-seconds 60
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $result = $raw | ConvertFrom-Json
-          if ($result.gateway_exit_code -ne 0 -or $result.state_changed) { throw "SMOKE_GATEWAY_VALIDATION_FAILED" }
-          if ($result.stdout -notmatch '"ready": true') { throw "TODO_GATEWAY_NOT_READY" }
-          "- smoke_ready: true" | Add-Content $env:GITHUB_STEP_SUMMARY
-
-      - name: Validate loopback bind through Command Gateway
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $runtimeEnv = Join-Path $env:LOCALAPPDATA 'ReqSys\TodoGlobal24x7\runtime.env'
-          $raw = & python $env:COMMAND_GATEWAY --policy $env:GATEWAY_POLICY --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 120 --expected-head $env:EXPECTED_HEAD -- docker compose --env-file $runtimeEnv -f docker-compose.pc24x7.yml ps --format json
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $result = $raw | ConvertFrom-Json
-          if ($result.gateway_exit_code -ne 0 -or $result.state_changed) { throw "DOCKER_PS_GATEWAY_VALIDATION_FAILED" }
-          if ($result.stdout -notmatch '127\.0\.0\.1:55432') { throw "POSTGRES_LOOPBACK_BIND_NOT_PROVEN" }
-          if ($result.stdout -match '0\.0\.0\.0:55432') { throw "POSTGRES_EXTERNAL_BIND_DETECTED" }
-          "- postgres_loopback: 127.0.0.1:55432" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- external_bind_55432: false" | Add-Content $env:GITHUB_STEP_SUMMARY
-
-      - name: TODO Global E2E through Command Gateway
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $raw = & python $env:COMMAND_GATEWAY --policy $env:GATEWAY_POLICY --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 300 --expected-head $env:EXPECTED_HEAD -- python scripts/todo_gateway_pc24x7_e2e.py
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $result = $raw | ConvertFrom-Json
-          if ($result.gateway_exit_code -ne 0 -or $result.state_changed) { throw "TODO_E2E_GATEWAY_VALIDATION_FAILED" }
-          if ($result.stdout -notmatch '"ready": true') { throw "TODO_E2E_NOT_READY" }
-          "### TODO Global E2E" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- ready: true" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- produção tocada: não" | Add-Content $env:GITHUB_STEP_SUMMARY
-          "- segredos exibidos: não" | Add-Content $env:GITHUB_STEP_SUMMARY
+          echo "Queued PC24x7 DEV deploy superseded because no eligible self-hosted runner picked it up."
+          echo "No runtime mutation is performed by this workflow."
