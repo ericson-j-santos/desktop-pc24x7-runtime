@@ -136,6 +136,7 @@ def test_start_runner_recovers_without_claiming_github_health(monkeypatch, tmp_p
     def fake_popen(args, **kwargs):
         observed["args"] = args
         observed["cwd"] = kwargs["cwd"]
+        observed["env"] = kwargs["env"]
         return FakeProcess()
 
     monkeypatch.setenv("RUNNER_TRACKING_ID", "actions-job-tracking")
