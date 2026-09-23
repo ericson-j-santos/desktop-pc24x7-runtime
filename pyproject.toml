@@ -1,0 +1,9 @@
+[project]
+name = "desktop-pc24x7-runtime"
+version = "0.1.0"
+description = "Governed runtime and local control plane for DESKTOP-PDQK954"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
