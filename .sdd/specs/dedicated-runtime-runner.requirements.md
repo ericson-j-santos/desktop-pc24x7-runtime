@@ -13,7 +13,7 @@ Registrar um segundo GitHub Actions runner no host `DESKTOP-PDQK954` exclusivame
 5. Labels adicionais fixas: `pc24x7,desktop-runtime,runtime-dev`.
 6. O runner atual do ReqSys não pode ser parado, removido, reconfigurado ou substituído.
 7. Baixar somente o runner oficial 2.337.0 com SHA-256 fixado.
-8. Usar apenas `GH_TOKEN` governado do workflow bootstrap; o token de registro é efêmero, fica somente em memória e nunca é logado/persistido.
+8. Preferir `GH_TOKEN` governado do workflow bootstrap. Se esse endpoint falhar, permitir somente fallback não interativo para a sessão local do GitHub CLI, após validar o login exato `ericson-j-santos` e remover `GH_TOKEN`/`GITHUB_TOKEN` do ambiente. O token de registro é efêmero, fica somente em memória e nunca é logado/persistido.
 9. Registro remoto preexistente sem contrato local correspondente deve falhar fechado.
 10. Replay com contrato local + registro remoto correto deve ser idempotente e não criar novo runner.
 11. Sucesso local exige `Runner.Listener.exe` do diretório dedicado em execução e API GitHub com registro `online` + labels obrigatórias.
