@@ -45,3 +45,21 @@ Não migrado ainda:
 
 A referência histórica a `#1705` na especificação migrada continua pertencendo
 ao gateway externo existente na origem até a etapa de desacoplamento desse contrato.
+
+
+## Segundo runner isolado
+
+A validação do novo repositório não pode reutilizar nem reconfigurar o runner repo-scoped
+do ReqSys. A fatia `feat/isolated-runtime-runner` introduz um segundo runner com:
+
+- repositório fixo: `ericson-j-santos/desktop-pc24x7-runtime`;
+- nome fixo: `DESKTOP-PDQK954-runtime`;
+- labels: `pc24x7,desktop-runtime`;
+- diretório fixo: `%LOCALAPPDATA%\DesktopPC24x7\GitHubRunner`;
+- sem descoberta de `C:\actions-runner`, `REQSYS_GITHUB_RUNNER_HOME` ou outros caminhos legados;
+- sem instalação/substituição da tarefa watchdog existente;
+- tokens de registro/remoção somente em memória.
+
+A ativação real do runner permanece operação administrativa e não faz parte do merge de
+código. O runner legado do ReqSys deve continuar funcionando até o E2E do runner isolado
+no SHA atual e um cutover explícito posterior.

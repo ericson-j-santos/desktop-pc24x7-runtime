@@ -183,7 +183,7 @@ def test_confirmation_is_required():
 
 def test_workflow_contract_is_fixed_to_pc24x7_desktop():
     workflow = (ROOT / ".github/workflows/desktop-rdc-recovery.yml").read_text(encoding="utf-8")
-    assert "runs-on: [self-hosted, Windows, X64, pc24x7, reqsys-dev]" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime]" in workflow
     assert "--confirm RECOVER-GOVERNED-RDC" in workflow
     assert "workflow_dispatch:" in workflow
     assert "workflow_call:" not in workflow
