@@ -1,6 +1,13 @@
 name: Engineering Worker Pool Smoke DEV
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/engineering-worker-pool-smoke-dev.yml
+      - scripts/engineering_worker_pool_smoke_dev.py
+      - .sdd/specs/engineering-worker-pool-smoke-dev.requirements.md
   workflow_dispatch:
     inputs:
       worker_pool_sha:
@@ -21,6 +28,8 @@ jobs:
     name: Worker Pool smoke on dedicated Desktop runtime
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 15
+    env:
+      WORKER_POOL_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_pool_sha || 'c9b3b6ca59f2ebed663e5242d68f727373d43a6f' }}
     steps:
       - name: Checkout Desktop runtime exact SHA
         uses: actions/checkout@v4
@@ -33,7 +42,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ericson-j-santos/engineering-worker-pool
-          ref: ${{ inputs.worker_pool_sha }}
+          ref: ${{ env.WORKER_POOL_SHA }}
           path: external/engineering-worker-pool
           fetch-depth: 1
           persist-credentials: false
@@ -43,7 +52,7 @@ jobs:
         run: >
           python scripts/engineering_worker_pool_smoke_dev.py
           --expected-runtime-sha "${{ github.sha }}"
-          --expected-worker-pool-sha "${{ inputs.worker_pool_sha }}"
+          --expected-worker-pool-sha "${{ env.WORKER_POOL_SHA }}"
           --worker-pool-root "external/engineering-worker-pool"
           --correlation-id "worker-pool-runtime-${{ github.run_id }}-${{ github.run_attempt }}"
           --output "artifacts/engineering-worker-pool-smoke/evidence.json"
