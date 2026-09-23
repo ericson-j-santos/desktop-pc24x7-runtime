@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - feat/**
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit:
+    name: Python compile and tests
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install test dependency
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2
+
+      - name: Compile
+        shell: pwsh
+        run: python -m compileall -q scripts tests
+
+      - name: Unit and negative-control tests
+        shell: pwsh
+        run: python -m pytest
