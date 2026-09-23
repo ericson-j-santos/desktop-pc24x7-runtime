@@ -22,10 +22,12 @@ def test_contract_is_fixed_and_separate_from_reqsys_runner() -> None:
     assert "Pc24x7GitHubRunner" not in str(m.default_runner_home())
 
 
-def test_github_token_is_required(monkeypatch) -> None:
-    monkeypatch.delenv("GH_TOKEN", raising=False)
-    with pytest.raises(m.BootstrapError, match="credencial governada"):
-        m.github_token()
+def test_local_auth_fallback_is_non_interactive_and_owner_bound() -> None:
+    text = MODULE.read_text(encoding="utf-8")
+    assert 'EXPECTED_GITHUB_LOGIN = "ericson-j-santos"' in text
+    assert '"auth", "login"' not in text
+    assert 'env.pop("GH_TOKEN", None)' in text
+    assert 'env.pop("GITHUB_TOKEN", None)' in text
 
 
 def test_registry_rejects_ambiguous_runner(monkeypatch) -> None:
@@ -44,7 +46,6 @@ def test_registry_rejects_ambiguous_runner(monkeypatch) -> None:
 def test_replay_is_idempotent(monkeypatch, tmp_path: Path) -> None:
     root = tmp_path / "runner"
     monkeypatch.setattr(m, "validate_host", lambda: m.EXPECTED_HOST)
-    monkeypatch.setattr(m, "github_token", lambda: "x" * 40)
     monkeypatch.setattr(m, "default_runner_home", lambda: root)
     monkeypatch.setattr(m, "runner_contract", lambda path: True)
     ready = {
@@ -66,7 +67,6 @@ def test_replay_is_idempotent(monkeypatch, tmp_path: Path) -> None:
 
 def test_remote_local_divergence_fails_closed(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(m, "validate_host", lambda: m.EXPECTED_HOST)
-    monkeypatch.setattr(m, "github_token", lambda: "x" * 40)
     monkeypatch.setattr(m, "default_runner_home", lambda: tmp_path / "runner")
     monkeypatch.setattr(m, "runner_contract", lambda path: False)
     monkeypatch.setattr(
