@@ -122,6 +122,17 @@ def test_runtime_identity_is_fail_closed() -> None:
         )
 
 
+def test_relative_output_is_resolved_against_execution_cwd(tmp_path: Path) -> None:
+    resolved = smoke.resolve_output_path(
+        Path("artifacts/engineering-worker-pool-smoke/evidence.json"),
+        base=tmp_path,
+    )
+    assert resolved.is_absolute()
+    assert resolved == (
+        tmp_path / "artifacts" / "engineering-worker-pool-smoke" / "evidence.json"
+    ).resolve()
+
+
 def test_worker_pool_evidence_requires_replay_and_independent_readback() -> None:
     payload = {
         "result": "WORKER_POOL_SMOKE_PASSED",
@@ -208,3 +219,21 @@ def test_runtime_smoke_wraps_external_harness_without_exposing_token_path(
     assert result["token_path_exposed"] is False
     assert "private-token" not in output.read_text(encoding="utf-8")
     assert "never-log-this" not in output.read_text(encoding="utf-8")
+
+
+def test_physical_workflow_requires_session_launcher_and_command_gateway() -> None:
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "engineering-worker-pool-smoke-dev.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "session_launcher.py" in workflow
+    assert "command_gateway.py" in workflow
+    assert "SESSION_LAUNCH_OK" in workflow
+    assert "state_validated" in workflow
+    assert '"--session-id"' in workflow
+    assert '"--risk", "2"' in workflow
+    assert "ae9b681b6cbe5c6e0c6c82b187b3245c0749118f" in workflow
+    assert "python scripts/engineering_worker_pool_smoke_dev.py" not in workflow
