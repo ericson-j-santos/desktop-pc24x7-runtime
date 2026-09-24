@@ -259,6 +259,24 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert "python scripts/activate_desktop_runtime_runner.py" not in workflow
 
 
+def test_ci_fails_fast_when_physical_runner_never_picks_up() -> None:
+    ci = (
+        Path(__file__).resolve().parents[1]
+        / ".github"
+        / "workflows"
+        / "ci.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "name: Physical runner queue watchdog" in ci
+    assert 'STALL_AFTER_SECONDS: "300"' in ci
+    assert "scripts/progress_watchdog.py" in ci
+    assert "actions: write" in ci
+    assert "runner_id" in ci
+    assert "cancelWorkflowRun" in ci
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in ci
+    assert "alternative_route_available: false" in ci
+
+
 
 def test_runtime_smoke_reconciles_stale_bind_on_401_then_retries(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

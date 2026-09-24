@@ -69,6 +69,11 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 28. O reparo de labels deve executar `session_launcher.py`, exigir
     `SESSION_LAUNCH_OK`/`state_validated=true` e invocar o ativador exclusivamente
     pelo Command Gateway em risco 2; execução direta do ativador é proibida.
+29. A fila do E2E físico deve aplicar o watchdog canônico de progresso material:
+    após 300 segundos sem pickup do runner, um job hospedado deve avaliar
+    `rules/progress-watchdog.md`/`scripts/progress_watchdog.py`, cancelar o run
+    físico estagnado e falhar explicitamente com `SELF_HOSTED_RUNNER_UNAVAILABLE`.
+    Polling sem mudança não reinicia a janela.
 
 ## Critérios de aceite
 
@@ -80,6 +85,9 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 - o preflight usa somente `self-hosted,Windows,X64`, valida o host exato antes
   de qualquer bootstrap/mutação e também passa por Session Launcher + Command Gateway;
 - execução obsoleta do SHA anterior não bloqueia o HEAD atual;
+- indisponibilidade do runner não mantém o CI indefinidamente em `queued`: após
+  300 segundos sem progresso material, o run físico é cancelado e o gate falha
+  fechado com evidência do watchdog canônico;
 - contrato estático comprova presença de Session Launcher + Command Gateway e
   ausência de invocação direta do adaptador;
 - bootstrap físico retorna `SESSION_LAUNCH_OK`, `state_validated=true` e HEAD
