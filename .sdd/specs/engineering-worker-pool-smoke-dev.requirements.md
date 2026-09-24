@@ -51,10 +51,14 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 22. A reconciliação deve receber o compose canônico do Worker Pool a partir do
     `cwd` da sessão ReqSys governada; compose funcional duplicado no runtime não
     é aceito.
+23. O smoke físico deve executar também em `pull_request` para `main`, mas
+    somente quando o head do PR pertence ao próprio repositório. PR de fork não
+    pode executar no runner self-hosted.
 
 ## Critérios de aceite
 
 - testes positivos e negativos verdes no CI do SHA da PR;
+- smoke físico pré-merge verde no SHA do PR para mudanças do contrato/runtime;
 - contrato estático comprova presença de Session Launcher + Command Gateway e
   ausência de invocação direta do adaptador;
 - bootstrap físico retorna `SESSION_LAUNCH_OK`, `state_validated=true` e HEAD
