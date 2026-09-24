@@ -40,3 +40,5 @@ def test_benchmark_queue_is_bounded_by_canonical_watchdog() -> None:
     assert "_rules/scripts/progress_watchdog.py" in content
     assert "cancelWorkflowRun" in content
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in content
+
+# probe: dedicated broker recovery 2026-09-24
