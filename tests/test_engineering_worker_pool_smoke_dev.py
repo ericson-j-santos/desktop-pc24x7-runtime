@@ -244,3 +244,161 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert '"--risk", "2"' in workflow
     assert "ae9b681b6cbe5c6e0c6c82b187b3245c0749118f" in workflow
     assert "python scripts/engineering_worker_pool_smoke_dev.py" not in workflow
+
+
+
+def test_runtime_smoke_reconciles_stale_bind_on_401_then_retries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    worker_root = tmp_path / "engineering-worker-pool"
+    harness = worker_root / "scripts" / "worker_pool_smoke.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text("# harness\n", encoding="utf-8")
+
+    token_file = tmp_path / "private-token"
+    token_file.write_text("x" * 48, encoding="utf-8")
+    output = tmp_path / "artifacts" / "evidence.json"
+
+    monkeypatch.setattr(
+        smoke,
+        "git_sha",
+        lambda root: RUNTIME_SHA if root == smoke.ROOT else WORKER_SHA,
+    )
+    monkeypatch.setattr(
+        smoke, "discover_worker_pool_token_file", lambda _runner: token_file
+    )
+
+    calls: list[str] = []
+    harness_attempts = 0
+
+    def fake_run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal harness_attempts
+        script_name = Path(command[1]).name
+        calls.append(script_name)
+        evidence_path = Path(command[command.index("--output") + 1])
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+
+        if script_name == "engineering_worker_pool_auth_reconcile_dev.py":
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "result": "WORKER_POOL_AUTH_RECONCILE_PASSED",
+                        "existing_token_reused": True,
+                        "token_rotated": False,
+                        "service_recreated": True,
+                        "bind_mount_resynced": True,
+                        "authenticated_readback": True,
+                        "secret_value_exposed": False,
+                        "production_touched": False,
+                        "deploy_executed": False,
+                        "reboot_executed": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        harness_attempts += 1
+        if harness_attempts == 1:
+            evidence_path.write_text(
+                json.dumps(
+                    {
+                        "result": "WORKER_POOL_SMOKE_BLOCKED",
+                        "reason": "worker_pool_http_401",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            return subprocess.CompletedProcess(command, 2, stdout="", stderr="")
+
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "result": "WORKER_POOL_SMOKE_PASSED",
+                    "expected_sha": WORKER_SHA,
+                    "lane_enabled": False,
+                    "task_state": "queued",
+                    "leased_by": None,
+                    "replay_created": False,
+                    "independent_readback": True,
+                    "secrets_exposed": False,
+                    "production_touched": False,
+                    "deploy_executed": False,
+                    "task_id": "task-after-reconcile",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(smoke.subprocess, "run", fake_run)
+
+    result = smoke.run_runtime_smoke(
+        expected_runtime_sha=RUNTIME_SHA,
+        expected_worker_pool_sha=WORKER_SHA,
+        worker_pool_root=worker_root,
+        correlation_id="reconcile-correlation",
+        output=output,
+        env={"COMPUTERNAME": smoke.EXPECTED_HOST, "RUNNER_NAME": smoke.EXPECTED_RUNNER},
+    )
+
+    assert calls == [
+        "worker_pool_smoke.py",
+        "engineering_worker_pool_auth_reconcile_dev.py",
+        "worker_pool_smoke.py",
+    ]
+    assert result["auth_reconciled"] is True
+    assert result["service_recreated"] is True
+    assert result["smoke_attempts"] == 2
+    assert result["independent_readback"] is True
+
+
+def test_runtime_smoke_does_not_reconcile_non_auth_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    worker_root = tmp_path / "engineering-worker-pool"
+    harness = worker_root / "scripts" / "worker_pool_smoke.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text("# harness\n", encoding="utf-8")
+    token_file = tmp_path / "private-token"
+    token_file.write_text("x" * 48, encoding="utf-8")
+
+    monkeypatch.setattr(
+        smoke,
+        "git_sha",
+        lambda root: RUNTIME_SHA if root == smoke.ROOT else WORKER_SHA,
+    )
+    monkeypatch.setattr(
+        smoke, "discover_worker_pool_token_file", lambda _runner: token_file
+    )
+
+    def fail_once(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if Path(command[1]).name == "engineering_worker_pool_auth_reconcile_dev.py":
+            pytest.fail("reconciliation must only run for worker_pool_http_401")
+        evidence_path = Path(command[command.index("--output") + 1])
+        evidence_path.parent.mkdir(parents=True, exist_ok=True)
+        evidence_path.write_text(
+            json.dumps(
+                {
+                    "result": "WORKER_POOL_SMOKE_BLOCKED",
+                    "reason": "worker_pool_unreachable",
+                }
+            ),
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(command, 2, stdout="", stderr="")
+
+    monkeypatch.setattr(smoke.subprocess, "run", fail_once)
+
+    with pytest.raises(smoke.RuntimeSmokeError, match="worker_pool_unreachable"):
+        smoke.run_runtime_smoke(
+            expected_runtime_sha=RUNTIME_SHA,
+            expected_worker_pool_sha=WORKER_SHA,
+            worker_pool_root=worker_root,
+            correlation_id="non-auth-correlation",
+            output=tmp_path / "artifacts" / "evidence.json",
+            env={
+                "COMPUTERNAME": smoke.EXPECTED_HOST,
+                "RUNNER_NAME": smoke.EXPECTED_RUNNER,
+            },
+        )
