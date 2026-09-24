@@ -242,8 +242,18 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert "state_validated" in workflow
     assert '"--session-id"' in workflow
     assert '"--risk", "2"' in workflow
-    assert "ae9b681b6cbe5c6e0c6c82b187b3245c0749118f" in workflow
+    assert "ac2297988651f41ab03469808e41f83496e9c58f" in workflow
     assert "python scripts/engineering_worker_pool_smoke_dev.py" not in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "name: Ensure dedicated Desktop runner labels" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime]" in workflow
+    assert "--non-interactive-auth" in workflow
+    assert "needs: prepare_runner" in workflow
+    assert workflow.count("session_launcher.py") >= 2
+    assert workflow.count("command_gateway.py") >= 2
+    assert workflow.count("- scripts/activate_desktop_runtime_runner.py") == 2
+    assert "Repair runner label contract through Command Gateway" in workflow
+    assert "python scripts/activate_desktop_runtime_runner.py" not in workflow
 
 
 
