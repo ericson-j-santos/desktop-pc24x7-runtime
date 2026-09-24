@@ -62,6 +62,10 @@ def _compose_failure_reason(stderr: str) -> str:
             ),
         ),
         (
+            "worker_pool_compose_image_reference_invalid",
+            ("invalid reference format", "invalid tag"),
+        ),
+        (
             "worker_pool_docker_permission_denied",
             ("permission denied", "access is denied"),
         ),
@@ -268,6 +272,24 @@ def _running_image(container: dict[str, Any]) -> str:
     return image
 
 
+def _compose_image_reference(container: dict[str, Any]) -> str:
+    image_id = _running_image(container)
+    digest = image_id.removeprefix("sha256:")
+    local_ref = f"desktop-pc24x7-worker-pool-recovery:sha256-{digest}"
+
+    _docker(
+        ["image", "tag", image_id, local_ref],
+        failure_reason="worker_pool_image_tag_failed",
+    )
+    readback = _docker(
+        ["image", "inspect", local_ref, "--format", "{{.Id}}"],
+        failure_reason="worker_pool_image_tag_readback_failed",
+    ).strip().lower()
+    if readback != image_id:
+        raise ReconcileError("worker_pool_image_tag_readback_mismatch")
+    return local_ref
+
+
 def _rules_sha(container: dict[str, Any]) -> str:
     for item in (container.get("Config") or {}).get("Env") or []:
         if isinstance(item, str) and item.startswith(
@@ -331,7 +353,7 @@ def _recreate_service(
     process_env = os.environ.copy()
     process_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] = str(token_path)
     process_env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] = _rules_sha(container)
-    process_env["CODEX_WORKER_POOL_RUNNING_IMAGE"] = _running_image(container)
+    process_env["CODEX_WORKER_POOL_RUNNING_IMAGE"] = _compose_image_reference(container)
 
     _docker(
         [
