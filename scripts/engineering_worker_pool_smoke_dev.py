@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
@@ -37,6 +38,16 @@ class RuntimeSmokeError(RuntimeError):
 
 
 DockerRun = Callable[[list[str]], subprocess.CompletedProcess[str]]
+ComposeRun = Callable[
+    [list[str], Path, dict[str, str]], subprocess.CompletedProcess[str]
+]
+
+
+@dataclass(frozen=True)
+class WorkerPoolRuntime:
+    container_id: str
+    token_file: Path
+    container: dict[str, Any]
 
 
 def validate_sha(value: str, reason: str) -> str:
@@ -104,9 +115,9 @@ def _has_canonical_endpoint(container: dict[str, Any]) -> bool:
     return len(exact) == 1
 
 
-def discover_worker_pool_token_file(
+def discover_worker_pool_runtime(
     docker_run: DockerRun = _docker_run,
-) -> Path:
+) -> WorkerPoolRuntime:
     containers = docker_run(
         [
             "docker",
@@ -142,9 +153,10 @@ def discover_worker_pool_token_file(
     if len(candidates) != 1:
         raise RuntimeSmokeError("worker_pool_endpoint_container_not_unique")
 
+    container = candidates[0]
     mounts = [
         mount
-        for mount in candidates[0].get("Mounts") or []
+        for mount in container.get("Mounts") or []
         if isinstance(mount, dict)
         and mount.get("Type") == "bind"
         and mount.get("Destination") == TOKEN_DESTINATION
@@ -153,7 +165,121 @@ def discover_worker_pool_token_file(
     if len(mounts) != 1:
         raise RuntimeSmokeError("worker_pool_token_mount_not_unique")
 
-    return Path(str(mounts[0]["Source"]))
+    container_id = str(container.get("Id") or "").strip()
+    if not container_id:
+        raise RuntimeSmokeError("worker_pool_container_id_missing")
+
+    return WorkerPoolRuntime(
+        container_id=container_id,
+        token_file=Path(str(mounts[0]["Source"])),
+        container=container,
+    )
+
+
+def discover_worker_pool_token_file(
+    docker_run: DockerRun = _docker_run,
+) -> Path:
+    return discover_worker_pool_runtime(docker_run).token_file
+
+
+def _docker_compose_run(
+    args: list[str],
+    cwd: Path,
+    env: dict[str, str],
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            args,
+            cwd=cwd,
+            env=env,
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeSmokeError("worker_pool_compose_recreate_failed") from exc
+
+
+def _compose_context(
+    runtime: WorkerPoolRuntime,
+) -> tuple[str, Path, tuple[Path, ...], str]:
+    labels = (runtime.container.get("Config") or {}).get("Labels") or {}
+    project = str(labels.get("com.docker.compose.project") or "").strip()
+    working_dir_raw = str(
+        labels.get("com.docker.compose.project.working_dir") or ""
+    ).strip()
+    config_files_raw = str(
+        labels.get("com.docker.compose.project.config_files") or ""
+    ).strip()
+    if not project or not working_dir_raw or not config_files_raw:
+        raise RuntimeSmokeError("worker_pool_compose_metadata_missing")
+
+    working_dir = Path(working_dir_raw)
+    config_files: list[Path] = []
+    for item in config_files_raw.split(","):
+        raw = item.strip()
+        if not raw:
+            continue
+        path = Path(raw)
+        config_files.append(path if path.is_absolute() else working_dir / path)
+    if not config_files:
+        raise RuntimeSmokeError("worker_pool_compose_config_missing")
+    if not working_dir.is_dir() or any(not path.is_file() for path in config_files):
+        raise RuntimeSmokeError("worker_pool_compose_config_unavailable")
+
+    env_rows = (runtime.container.get("Config") or {}).get("Env") or []
+    rules_values = [
+        row.split("=", 1)[1].strip()
+        for row in env_rows
+        if isinstance(row, str)
+        and row.startswith("CODEX_WORKER_POOL_EXPECTED_RULES_SHA=")
+        and row.split("=", 1)[1].strip()
+    ]
+    if len(rules_values) != 1 or not SHA40.fullmatch(rules_values[0].lower()):
+        raise RuntimeSmokeError("worker_pool_expected_rules_sha_invalid")
+
+    return project, working_dir, tuple(config_files), rules_values[0].lower()
+
+
+def repair_worker_pool_auth_bind(
+    runtime: WorkerPoolRuntime,
+    *,
+    compose_run: ComposeRun = _docker_compose_run,
+    docker_run: DockerRun = _docker_run,
+) -> WorkerPoolRuntime:
+    project, working_dir, config_files, rules_sha = _compose_context(runtime)
+
+    command = ["docker", "compose", "--project-name", project]
+    for config_file in config_files:
+        command.extend(["-f", str(config_file)])
+    command.extend(
+        [
+            "up",
+            "-d",
+            "--force-recreate",
+            "--no-deps",
+            "--no-build",
+            "--pull",
+            "never",
+            "--wait",
+            "--wait-timeout",
+            "60",
+            POOL_SERVICE,
+        ]
+    )
+
+    child_env = os.environ.copy()
+    child_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] = str(runtime.token_file)
+    child_env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] = rules_sha
+    compose_run(command, working_dir, child_env)
+
+    refreshed = discover_worker_pool_runtime(docker_run)
+    if refreshed.container_id == runtime.container_id:
+        raise RuntimeSmokeError("worker_pool_container_not_recreated")
+    if refreshed.token_file.resolve() != runtime.token_file.resolve():
+        raise RuntimeSmokeError("worker_pool_token_mount_source_changed")
+    return refreshed
 
 
 def resolve_output_path(path: Path, base: Path | None = None) -> Path:
@@ -201,6 +327,43 @@ def validate_worker_pool_evidence(
             raise RuntimeSmokeError(f"worker_pool_smoke_evidence_mismatch_{key}")
 
 
+def _run_worker_pool_harness(
+    *,
+    smoke_script: Path,
+    worker_pool_root: Path,
+    expected_worker_pool_sha: str,
+    correlation_id: str,
+    token_file: Path,
+    child_evidence: Path,
+) -> tuple[int, dict[str, Any]]:
+    command = [
+        sys.executable,
+        str(smoke_script),
+        "--expected-sha",
+        expected_worker_pool_sha,
+        "--correlation-id",
+        correlation_id,
+        "--pool-url",
+        POOL_URL,
+        "--token-file",
+        str(token_file),
+        "--output",
+        str(child_evidence),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=worker_pool_root,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeSmokeError("worker_pool_smoke_process_failed") from exc
+    return completed.returncode, load_evidence(child_evidence)
+
+
 def run_runtime_smoke(
     *,
     expected_runtime_sha: str,
@@ -210,6 +373,8 @@ def run_runtime_smoke(
     output: Path,
     env: dict[str, str] | None = None,
     docker_run: DockerRun = _docker_run,
+    compose_run: ComposeRun = _docker_compose_run,
+    repair_auth_bind: bool = False,
 ) -> dict[str, Any]:
     expected_runtime_sha = validate_sha(
         expected_runtime_sha, "expected_runtime_sha_invalid"
@@ -233,43 +398,42 @@ def run_runtime_smoke(
     if not smoke_script.is_file():
         raise RuntimeSmokeError("worker_pool_smoke_script_missing")
 
-    token_file = discover_worker_pool_token_file(docker_run)
-    if not token_file.is_file():
+    runtime = discover_worker_pool_runtime(docker_run)
+    if not runtime.token_file.is_file():
         raise RuntimeSmokeError("worker_pool_token_file_missing")
 
     output = resolve_output_path(output)
     child_evidence = output.with_name("worker-pool-evidence.json")
-    command = [
-        sys.executable,
-        str(smoke_script),
-        "--expected-sha",
-        expected_worker_pool_sha,
-        "--correlation-id",
-        correlation_id,
-        "--pool-url",
-        POOL_URL,
-        "--token-file",
-        str(token_file),
-        "--output",
-        str(child_evidence),
-    ]
+    returncode, payload = _run_worker_pool_harness(
+        smoke_script=smoke_script,
+        worker_pool_root=worker_pool_root,
+        expected_worker_pool_sha=expected_worker_pool_sha,
+        correlation_id=correlation_id,
+        token_file=runtime.token_file,
+        child_evidence=child_evidence,
+    )
 
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=worker_pool_root,
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=90,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeSmokeError("worker_pool_smoke_process_failed") from exc
-
-    payload = load_evidence(child_evidence)
-    if completed.returncode != 0:
+    auth_bind_repaired = False
+    if returncode != 0:
         reason = str(payload.get("reason") or "worker_pool_smoke_failed")
-        raise RuntimeSmokeError(reason[:160])
+        if repair_auth_bind and reason == "worker_pool_http_401":
+            runtime = repair_worker_pool_auth_bind(
+                runtime,
+                compose_run=compose_run,
+                docker_run=docker_run,
+            )
+            auth_bind_repaired = True
+            returncode, payload = _run_worker_pool_harness(
+                smoke_script=smoke_script,
+                worker_pool_root=worker_pool_root,
+                expected_worker_pool_sha=expected_worker_pool_sha,
+                correlation_id=correlation_id,
+                token_file=runtime.token_file,
+                child_evidence=child_evidence,
+            )
+        if returncode != 0:
+            reason = str(payload.get("reason") or "worker_pool_smoke_failed")
+            raise RuntimeSmokeError(reason[:160])
 
     validate_worker_pool_evidence(payload, expected_worker_pool_sha)
 
@@ -288,6 +452,7 @@ def run_runtime_smoke(
         "leased_by": payload["leased_by"],
         "replay_created": payload["replay_created"],
         "independent_readback": payload["independent_readback"],
+        "auth_bind_repaired": auth_bind_repaired,
         "token_path_exposed": False,
         "secrets_exposed": False,
         "production_touched": False,
@@ -307,6 +472,11 @@ def main() -> int:
     parser.add_argument("--worker-pool-root", type=Path, required=True)
     parser.add_argument("--correlation-id", required=True)
     parser.add_argument(
+        "--repair-auth-bind",
+        action="store_true",
+        help="Recria uma única vez o serviço DEV no mesmo Compose se o smoke retornar 401.",
+    )
+    parser.add_argument(
         "--output",
         type=Path,
         default=Path("artifacts/engineering-worker-pool-smoke/evidence.json"),
@@ -320,6 +490,7 @@ def main() -> int:
             worker_pool_root=args.worker_pool_root,
             correlation_id=args.correlation_id,
             output=args.output,
+            repair_auth_bind=args.repair_auth_bind,
         )
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0
