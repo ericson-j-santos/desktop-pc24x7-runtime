@@ -27,7 +27,7 @@ jobs:
       RULES_SHA: 5d1f603241dde37a597d2b7bdc5e07425db7b451
       TARGET_REPO: C:\\dev\\reqsys-v2-enterprise-real
       CORRELATION_ID: todo-dispatcher-physical-${{ github.run_id }}-${{ github.run_attempt }}
-      EVIDENCE_REL: artifacts\\todo-dispatcher-physical-e2e\\evidence.json
+      EVIDENCE_REL: artifacts/todo-dispatcher-physical-e2e/evidence.json
 
     steps:
       - name: Assert exact Desktop host
@@ -160,7 +160,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: todo-dispatcher-physical-e2e-${{ github.run_id }}
-          path: ${{ steps.session.outputs.target_path }}\\artifacts\\todo-dispatcher-physical-e2e\\evidence.json
+          path: ${{ steps.session.outputs.target_path }}/artifacts/todo-dispatcher-physical-e2e/evidence.json
           if-no-files-found: error
           retention-days: 30
 
