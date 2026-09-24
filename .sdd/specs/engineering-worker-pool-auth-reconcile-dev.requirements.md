@@ -27,7 +27,8 @@ host, sem rotacionar segredo e sem ampliar o escopo do runtime.
    vazio ou inválido deve bloquear.
 9. A recriação deve preservar:
    - mesmo projeto Docker Compose;
-   - mesma imagem imutável `sha256` já em execução;
+   - mesma referência local de imagem usada pelo container, validada para resolver
+     exatamente ao mesmo image ID `sha256` já em execução;
    - mesmo volume nomeado de estado;
    - mesmo arquivo host de token;
    - mesmo `CODEX_WORKER_POOL_EXPECTED_RULES_SHA`.
@@ -38,7 +39,9 @@ host, sem rotacionar segredo e sem ampliar o escopo do runtime.
     governada pelo Session Launcher e precisa passar validação de contrato antes
     da mutação.
 12. O repositório Desktop não deve duplicar o compose funcional. Ele pode manter
-    somente um override mínimo que fixe `image` para o `sha256` já em execução.
+    somente um override mínimo que fixe `image` para a referência local já usada
+    pelo container, depois de comprovar que essa referência resolve ao mesmo image
+    ID `sha256`.
 13. Após recriar, aguardar readiness com timeout limitado e exigir
     `/health=200` + `/v1/snapshot=200` autenticado.
 14. Erros Docker Compose devem ser convertidos em reason codes sanitizados
@@ -54,8 +57,9 @@ host, sem rotacionar segredo e sem ampliar o escopo do runtime.
 - token válido e runtime saudável resultam em no-op idempotente;
 - `401` + conteúdo divergente recria somente o serviço, sem rotação;
 - `401` + conteúdo igual falha fechado;
-- imagem não imutável, identidade Compose, compose canônico ou override inválido
-  bloqueiam;
+- referência local de imagem ausente, ambígua ou resolvendo para image ID
+  diferente bloqueia;
+- identidade Compose, compose canônico ou override inválido bloqueiam;
 - erros conhecidos de Compose são classificados sem vazar stderr;
 - readiness autenticado é comprovado após recriação;
 - smoke físico subsequente no mesmo SHA conclui
