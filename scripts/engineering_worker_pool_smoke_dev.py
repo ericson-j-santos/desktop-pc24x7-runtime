@@ -224,9 +224,12 @@ def run_auth_reconcile(output: Path) -> dict[str, Any]:
         raise RuntimeSmokeError("worker_pool_auth_reconcile_script_missing")
 
     evidence = output.with_name("worker-pool-auth-reconcile.json")
+    session_compose = Path.cwd() / "docker-compose.pc24x7-codex-worker-pool.yml"
     command = [
         sys.executable,
         str(AUTH_RECONCILE_SCRIPT),
+        "--compose-file",
+        str(session_compose),
         "--output",
         str(evidence),
     ]
