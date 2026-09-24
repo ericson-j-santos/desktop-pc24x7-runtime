@@ -289,7 +289,16 @@ def test_repair_auth_bind_recreates_same_compose_service_without_build_or_pull(
         container=current,
     )
 
-    refreshed_container = _container(container_id="new-container")
+    refreshed_container = _container(
+        container_id="new-container",
+        mounts=[
+            {
+                "Type": "bind",
+                "Source": str(token_file),
+                "Destination": smoke.TOKEN_DESTINATION,
+            }
+        ],
+    )
     calls: list[tuple[list[str], Path, dict[str, str]]] = []
 
     def fake_compose_run(
