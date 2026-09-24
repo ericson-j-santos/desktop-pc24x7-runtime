@@ -43,8 +43,8 @@ RUNNER_ASSET_URL = (
 )
 RUNNER_ASSET_SHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 RUNNER_NAME = "DESKTOP-PDQK954-runtime"
-RUNNER_LABELS = "pc24x7,desktop-runtime"
-REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime")
+RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev"
+REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev")
 
 DEDICATED_RUNNER_DIR = ("DesktopPC24x7", "GitHubRunner")
 
@@ -532,11 +532,14 @@ def should_restart_offline_runner(registry: dict[str, Any], local_running: bool)
     )
 
 
-def should_repair_missing_registry(registry: dict[str, Any], local_contract_present: bool) -> bool:
-    return bool(local_contract_present and not registry.get("present"))
+def should_repair_registration(registry: dict[str, Any], local_contract_present: bool) -> bool:
+    return bool(
+        local_contract_present
+        and (not registry.get("present") or not registry.get("labels_ok"))
+    )
 
 
-def repair_missing_registration(
+def repair_registration(
     root: Path,
     gh: Path,
     *,
@@ -616,8 +619,8 @@ def main() -> int:
             token_consumed = registration_performed
 
         registry = runner_registry_snapshot(gh)
-        if should_repair_missing_registry(registry, runner_contract(runner)):
-            repair_evidence = repair_missing_registration(
+        if should_repair_registration(registry, runner_contract(runner)):
+            repair_evidence = repair_registration(
                 runner,
                 gh,
                 allow_interactive_auth=not args.non_interactive_auth,

@@ -11,6 +11,16 @@ on:
       - runtime/engineering-worker-pool-running-image.override.yml
       - .sdd/specs/engineering-worker-pool-smoke-dev.requirements.md
       - .sdd/specs/engineering-worker-pool-auth-reconcile-dev.requirements.md
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/engineering-worker-pool-smoke-dev.yml
+      - scripts/engineering_worker_pool_smoke_dev.py
+      - scripts/engineering_worker_pool_auth_reconcile_dev.py
+      - runtime/engineering-worker-pool-running-image.override.yml
+      - .sdd/specs/engineering-worker-pool-smoke-dev.requirements.md
+      - .sdd/specs/engineering-worker-pool-auth-reconcile-dev.requirements.md
   workflow_dispatch:
     inputs:
       worker_pool_sha:
@@ -28,6 +38,7 @@ concurrency:
 
 jobs:
   smoke:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Worker Pool smoke on dedicated Desktop runtime
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 15
