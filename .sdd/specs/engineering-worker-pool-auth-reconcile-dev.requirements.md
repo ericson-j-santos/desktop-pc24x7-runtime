@@ -33,13 +33,20 @@ host, sem rotacionar segredo e sem ampliar o escopo do runtime.
    - mesmo `CODEX_WORKER_POOL_EXPECTED_RULES_SHA`.
 10. Recriar somente o serviço `codex-worker-pool`, com
     `--force-recreate --no-deps --no-build --pull never`.
-11. O compose de recuperação deste repositório deve ser host-specific e não
-    incorporar código do Worker Pool.
-12. Após recriar, aguardar readiness com timeout limitado e exigir
+11. O compose base deve ser exclusivamente
+    `docker-compose.pc24x7-codex-worker-pool.yml` da mesma sessão ReqSys
+    governada pelo Session Launcher e precisa passar validação de contrato antes
+    da mutação.
+12. O repositório Desktop não deve duplicar o compose funcional. Ele pode manter
+    somente um override mínimo que fixe `image` para o `sha256` já em execução.
+13. Após recriar, aguardar readiness com timeout limitado e exigir
     `/health=200` + `/v1/snapshot=200` autenticado.
-13. Evidência deve informar apenas flags sanitizadas; nunca token, caminho do
+14. Erros Docker Compose devem ser convertidos em reason codes sanitizados
+    específicos quando reconhecíveis; stderr bruto, segredo e caminho sensível
+    não podem ser publicados.
+15. Evidência deve informar apenas flags sanitizadas; nunca token, caminho do
     segredo ou conteúdo sensível.
-14. Produção, HML/STG, deploy, reboot e rotação de segredo ficam fora do escopo.
+16. Produção, HML/STG, deploy, reboot e rotação de segredo ficam fora do escopo.
 
 ## Critérios de aceite
 
@@ -47,7 +54,9 @@ host, sem rotacionar segredo e sem ampliar o escopo do runtime.
 - token válido e runtime saudável resultam em no-op idempotente;
 - `401` + conteúdo divergente recria somente o serviço, sem rotação;
 - `401` + conteúdo igual falha fechado;
-- imagem não imutável, identidade Compose ausente ou contrato inválido bloqueiam;
+- imagem não imutável, identidade Compose, compose canônico ou override inválido
+  bloqueiam;
+- erros conhecidos de Compose são classificados sem vazar stderr;
 - readiness autenticado é comprovado após recriação;
 - smoke físico subsequente no mesmo SHA conclui
   `WORKER_POOL_RUNTIME_SMOKE_PASSED`.

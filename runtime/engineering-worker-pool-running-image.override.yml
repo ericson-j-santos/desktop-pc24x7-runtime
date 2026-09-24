@@ -1,0 +1,3 @@
+services:
+  codex-worker-pool:
+    image: "${CODEX_WORKER_POOL_RUNNING_IMAGE:?configure CODEX_WORKER_POOL_RUNNING_IMAGE}"

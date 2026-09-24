@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hmac
 import json
 import os
 import re
@@ -16,7 +15,8 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 ROOT = Path(__file__).resolve().parents[1]
-COMPOSE_FILE = ROOT / "runtime" / "engineering-worker-pool-recovery.compose.yml"
+IMAGE_OVERRIDE_FILE = ROOT / "runtime" / "engineering-worker-pool-running-image.override.yml"
+CANONICAL_COMPOSE_BASENAME = "docker-compose.pc24x7-codex-worker-pool.yml"
 SERVICE = "codex-worker-pool"
 CONTAINER_PORT = "8097/tcp"
 HOST_IP = "127.0.0.1"
@@ -30,6 +30,46 @@ SHA40 = re.compile(r"^[0-9a-f]{40}$")
 
 class ReconcileError(RuntimeError):
     pass
+
+
+def _compose_failure_reason(stderr: str) -> str:
+    normalized = stderr.casefold()
+    classifications = (
+        (
+            "worker_pool_compose_image_unavailable",
+            ("no such image", "pull access denied", "unable to get image"),
+        ),
+        (
+            "worker_pool_compose_bind_source_unavailable",
+            (
+                "bind source path does not exist",
+                "invalid mount config",
+                "path is not shared",
+                "file sharing",
+            ),
+        ),
+        (
+            "worker_pool_compose_port_conflict",
+            ("port is already allocated", "address already in use"),
+        ),
+        (
+            "worker_pool_compose_configuration_invalid",
+            (
+                "required variable",
+                "is missing a value",
+                "invalid interpolation format",
+                "validating ",
+            ),
+        ),
+        (
+            "worker_pool_docker_permission_denied",
+            ("permission denied", "access is denied"),
+        ),
+    )
+    for reason, markers in classifications:
+        if any(marker in normalized for marker in markers):
+            return reason
+    return "worker_pool_service_recreate_failed"
 
 
 def _docker(
@@ -49,7 +89,12 @@ def _docker(
             cwd=ROOT,
             env=env,
         )
-    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except subprocess.CalledProcessError as exc:
+        reason = failure_reason
+        if failure_reason == "worker_pool_service_recreate_failed":
+            reason = _compose_failure_reason(exc.stderr or "")
+        raise ReconcileError(reason) from exc
+    except (OSError, subprocess.TimeoutExpired) as exc:
         raise ReconcileError(failure_reason) from exc
     return completed.stdout
 
@@ -85,7 +130,9 @@ def _canonical_context() -> tuple[str, Path, dict[str, Any]]:
             "{{.ID}}",
         ]
     )
-    ids = list(dict.fromkeys(line.strip() for line in raw_ids.splitlines() if line.strip()))
+    ids = list(
+        dict.fromkeys(line.strip() for line in raw_ids.splitlines() if line.strip())
+    )
     if not ids:
         raise ReconcileError("worker_pool_service_container_missing")
 
@@ -232,15 +279,16 @@ def _rules_sha(container: dict[str, Any]) -> str:
     raise ReconcileError("worker_pool_expected_rules_sha_not_configured")
 
 
-def _compose_contract_valid() -> bool:
+def _canonical_compose_contract_valid(path: Path) -> bool:
+    if path.name != CANONICAL_COMPOSE_BASENAME:
+        return False
     try:
-        raw = COMPOSE_FILE.read_text(encoding="utf-8")
+        raw = path.read_text(encoding="utf-8")
     except OSError:
         return False
     required = (
         "codex-worker-pool:",
-        "CODEX_WORKER_POOL_RUNNING_IMAGE",
-        "127.0.0.1:8097:8097",
+        '127.0.0.1:8097:8097',
         f"CODEX_WORKER_POOL_API_TOKEN_FILE: {TOKEN_DESTINATION}",
         "CODEX_WORKER_POOL_API_TOKEN_FILE_HOST",
         f":{TOKEN_DESTINATION}:ro",
@@ -251,9 +299,30 @@ def _compose_contract_valid() -> bool:
     return all(fragment in raw for fragment in required)
 
 
-def _recreate_service(container: dict[str, Any], token_path: Path) -> None:
-    if not COMPOSE_FILE.is_file() or not _compose_contract_valid():
-        raise ReconcileError("worker_pool_recovery_compose_invalid")
+def _image_override_contract_valid() -> bool:
+    try:
+        raw = IMAGE_OVERRIDE_FILE.read_text(encoding="utf-8")
+    except OSError:
+        return False
+    required = (
+        "codex-worker-pool:",
+        "CODEX_WORKER_POOL_RUNNING_IMAGE",
+    )
+    return all(fragment in raw for fragment in required)
+
+
+def _recreate_service(
+    container: dict[str, Any], token_path: Path, canonical_compose: Path
+) -> None:
+    canonical_compose = canonical_compose.resolve()
+    if (
+        not canonical_compose.is_file()
+        or not _canonical_compose_contract_valid(canonical_compose)
+    ):
+        raise ReconcileError("worker_pool_canonical_compose_invalid")
+    if not IMAGE_OVERRIDE_FILE.is_file() or not _image_override_contract_valid():
+        raise ReconcileError("worker_pool_image_override_invalid")
+
     labels = (container.get("Config") or {}).get("Labels") or {}
     project = str(labels.get("com.docker.compose.project") or "").strip()
     if not project:
@@ -263,15 +332,18 @@ def _recreate_service(container: dict[str, Any], token_path: Path) -> None:
     process_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] = str(token_path)
     process_env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] = _rules_sha(container)
     process_env["CODEX_WORKER_POOL_RUNNING_IMAGE"] = _running_image(container)
+
     _docker(
         [
             "compose",
             "--project-name",
             project,
             "--project-directory",
-            str(COMPOSE_FILE.parent),
+            str(canonical_compose.parent),
             "--file",
-            str(COMPOSE_FILE),
+            str(canonical_compose),
+            "--file",
+            str(IMAGE_OVERRIDE_FILE),
             "up",
             "-d",
             "--force-recreate",
@@ -300,7 +372,7 @@ def _wait_ready(token: str, attempts: int = 15) -> tuple[int, int]:
     raise ReconcileError(last_reason)
 
 
-def reconcile() -> dict[str, Any]:
+def reconcile(canonical_compose: Path) -> dict[str, Any]:
     container_id, token_path, container = _canonical_context()
     _validate_container_contract(container)
     token = _read_host_token(token_path)
@@ -328,12 +400,14 @@ def reconcile() -> dict[str, Any]:
     if _container_token_matches_host(container_id, token):
         raise ReconcileError("worker_pool_auth_process_mismatch")
 
-    _recreate_service(container, token_path)
+    _recreate_service(container, token_path, canonical_compose)
     health_status, snapshot_status = _wait_ready(token)
 
     healthy, final_reason, _, _ = _runtime_state(token)
     if not healthy:
-        raise ReconcileError(final_reason or "worker_pool_authenticated_readback_failed")
+        raise ReconcileError(
+            final_reason or "worker_pool_authenticated_readback_failed"
+        )
 
     return {
         "schema_version": "1.0.0",
@@ -364,6 +438,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(
         description="Reconcilia bind mount de auth do Worker Pool DEV sem rotacionar segredo"
     )
+    parser.add_argument("--compose-file", type=Path, required=True)
     parser.add_argument(
         "--output",
         type=Path,
@@ -371,7 +446,7 @@ def main() -> int:
     )
     args = parser.parse_args()
     try:
-        result = reconcile()
+        result = reconcile(args.compose_file)
         _write_evidence(args.output, result)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0

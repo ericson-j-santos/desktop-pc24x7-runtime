@@ -48,6 +48,9 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
     autenticada independente do runtime; qualquer outra causa deve falhar fechado.
 21. A evidência final deve registrar `auth_reconciled`, `service_recreated` e
     `smoke_attempts`, sem registrar token nem caminho sensível.
+22. A reconciliação deve receber o compose canônico do Worker Pool a partir do
+    `cwd` da sessão ReqSys governada; compose funcional duplicado no runtime não
+    é aceito.
 
 ## Critérios de aceite
 

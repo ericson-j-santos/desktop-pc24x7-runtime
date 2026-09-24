@@ -30,6 +30,33 @@ def _container() -> dict:
     }
 
 
+def _canonical_compose(tmp_path: Path) -> Path:
+    path = tmp_path / module.CANONICAL_COMPOSE_BASENAME
+    path.write_text(
+        "\n".join(
+            [
+                "services:",
+                "  codex-worker-pool:",
+                "    build:",
+                "      context: ./services/codex-worker-pool",
+                "    restart: unless-stopped",
+                '    ports: ["127.0.0.1:8097:8097"]',
+                "    environment:",
+                f"      CODEX_WORKER_POOL_API_TOKEN_FILE: {module.TOKEN_DESTINATION}",
+                "      CODEX_WORKER_POOL_EXPECTED_RULES_SHA: x",
+                "    volumes:",
+                "      - codex-worker-pool-state:/data",
+                f'      - "${{CODEX_WORKER_POOL_API_TOKEN_FILE_HOST}}:{module.TOKEN_DESTINATION}:ro"',
+                "volumes:",
+                "  codex-worker-pool-state:",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
 def test_container_token_compare_never_places_secret_in_command(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -51,10 +78,30 @@ def test_container_token_compare_never_places_secret_in_command(
     assert "exec" in command
 
 
-def test_recreate_service_is_scoped_to_existing_image_and_project(
-    monkeypatch: pytest.MonkeyPatch,
+def test_canonical_compose_contract_is_fail_closed(tmp_path: Path) -> None:
+    canonical = _canonical_compose(tmp_path)
+    assert module._canonical_compose_contract_valid(canonical) is True
+
+    wrong_name = tmp_path / "other-compose.yml"
+    wrong_name.write_text(canonical.read_text(encoding="utf-8"), encoding="utf-8")
+    assert module._canonical_compose_contract_valid(wrong_name) is False
+
+    canonical.write_text("services: {}\n", encoding="utf-8")
+    assert module._canonical_compose_contract_valid(canonical) is False
+
+
+def test_image_override_is_minimal_and_valid() -> None:
+    assert module._image_override_contract_valid() is True
+    raw = module.IMAGE_OVERRIDE_FILE.read_text(encoding="utf-8")
+    assert "CODEX_WORKER_POOL_RUNNING_IMAGE" in raw
+    assert "CODEX_WORKER_POOL_API_TOKEN_FILE_HOST" not in raw
+    assert "volumes:" not in raw
+
+
+def test_recreate_service_uses_canonical_compose_and_immutable_override(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    assert module._compose_contract_valid() is True
+    canonical = _canonical_compose(tmp_path)
     seen: list[tuple[list[str], dict[str, str] | None]] = []
 
     def fake_docker(
@@ -71,7 +118,7 @@ def test_recreate_service_is_scoped_to_existing_image_and_project(
     monkeypatch.setattr(module, "_docker", fake_docker)
     token_path = Path("C:/secure/worker-pool-token")
 
-    module._recreate_service(_container(), token_path)
+    module._recreate_service(_container(), token_path, canonical)
 
     args, env = seen[0]
     assert args[-8:] == [
@@ -84,14 +131,73 @@ def test_recreate_service_is_scoped_to_existing_image_and_project(
         "never",
         module.SERVICE,
     ]
-    assert "--project-name" in args
+    assert args.count("--file") == 2
+    first_index = args.index("--file")
+    second_index = args.index("--file", first_index + 1)
+    assert Path(args[first_index + 1]) == canonical.resolve()
+    assert Path(args[second_index + 1]) == module.IMAGE_OVERRIDE_FILE
+    assert args[args.index("--project-directory") + 1] == str(canonical.parent.resolve())
     assert args[args.index("--project-name") + 1] == "reqsys"
+
     assert env is not None
     assert env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] == str(token_path)
     assert env["CODEX_WORKER_POOL_RUNNING_IMAGE"] == "sha256:" + ("d" * 64)
     assert env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] == "a" * 40
-    assert "s" * 48 not in json.dumps(args)
-    assert "s" * 48 not in json.dumps(env)
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        (
+            "Error response from daemon: No such image: sha256:abc",
+            "worker_pool_compose_image_unavailable",
+        ),
+        (
+            "invalid mount config for type bind",
+            "worker_pool_compose_bind_source_unavailable",
+        ),
+        (
+            "Bind source path does not exist: C:/missing",
+            "worker_pool_compose_bind_source_unavailable",
+        ),
+        ("port is already allocated", "worker_pool_compose_port_conflict"),
+        (
+            "required variable CODEX_WORKER_POOL_EXPECTED_RULES_SHA is missing a value",
+            "worker_pool_compose_configuration_invalid",
+        ),
+        ("Access is denied", "worker_pool_docker_permission_denied"),
+        ("unexpected compose failure", "worker_pool_service_recreate_failed"),
+    ],
+)
+def test_compose_failure_reason_is_specific_and_sanitized(
+    stderr: str, expected: str
+) -> None:
+    assert module._compose_failure_reason(stderr) == expected
+
+
+def test_docker_uses_sanitized_compose_failure_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "secret-value-must-not-leak"
+
+    def fail(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise subprocess.CalledProcessError(
+            returncode=1,
+            cmd=["docker", "compose"],
+            stderr=f"invalid mount config for type bind: {secret}",
+        )
+
+    monkeypatch.setattr(module.subprocess, "run", fail)
+
+    with pytest.raises(
+        module.ReconcileError, match="worker_pool_compose_bind_source_unavailable"
+    ) as exc:
+        module._docker(
+            ["compose", "up"],
+            failure_reason="worker_pool_service_recreate_failed",
+        )
+
+    assert secret not in str(exc.value)
 
 
 def test_reconcile_recreates_only_when_401_and_bind_is_stale(
@@ -99,6 +205,7 @@ def test_reconcile_recreates_only_when_401_and_bind_is_stale(
 ) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("x" * 48, encoding="utf-8")
+    canonical = _canonical_compose(tmp_path)
     container = _container()
 
     monkeypatch.setattr(
@@ -114,17 +221,17 @@ def test_reconcile_recreates_only_when_401_and_bind_is_stale(
     monkeypatch.setattr(
         module, "_container_token_matches_host", lambda _container_id, _token: False
     )
-    recreated: list[Path] = []
+    recreated: list[tuple[Path, Path]] = []
     monkeypatch.setattr(
         module,
         "_recreate_service",
-        lambda _container, path: recreated.append(path),
+        lambda _container, path, compose: recreated.append((path, compose)),
     )
     monkeypatch.setattr(module, "_wait_ready", lambda _token: (200, 200))
 
-    result = module.reconcile()
+    result = module.reconcile(canonical)
 
-    assert recreated == [token_file]
+    assert recreated == [(token_file, canonical)]
     assert result["existing_token_reused"] is True
     assert result["token_rotated"] is False
     assert result["service_recreated"] is True
@@ -138,6 +245,7 @@ def test_reconcile_fails_closed_when_process_rejects_matching_token(
 ) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("x" * 48, encoding="utf-8")
+    canonical = _canonical_compose(tmp_path)
     container = _container()
 
     monkeypatch.setattr(
@@ -154,11 +262,11 @@ def test_reconcile_fails_closed_when_process_rejects_matching_token(
     monkeypatch.setattr(
         module,
         "_recreate_service",
-        lambda _container, _path: pytest.fail("must not recreate"),
+        lambda _container, _path, _compose: pytest.fail("must not recreate"),
     )
 
     with pytest.raises(module.ReconcileError, match="worker_pool_auth_process_mismatch"):
-        module.reconcile()
+        module.reconcile(canonical)
 
 
 def test_reconcile_is_idempotent_noop_when_runtime_is_healthy(
@@ -166,6 +274,7 @@ def test_reconcile_is_idempotent_noop_when_runtime_is_healthy(
 ) -> None:
     token_file = tmp_path / "token"
     token_file.write_text("x" * 48, encoding="utf-8")
+    canonical = _canonical_compose(tmp_path)
     monkeypatch.setattr(
         module, "_canonical_context", lambda: ("container-1", token_file, _container())
     )
@@ -173,10 +282,12 @@ def test_reconcile_is_idempotent_noop_when_runtime_is_healthy(
     monkeypatch.setattr(
         module,
         "_recreate_service",
-        lambda _container, _path: pytest.fail("healthy runtime must remain untouched"),
+        lambda _container, _path, _compose: pytest.fail(
+            "healthy runtime must remain untouched"
+        ),
     )
 
-    result = module.reconcile()
+    result = module.reconcile(canonical)
 
     assert result["service_recreated"] is False
     assert result["bind_mount_resynced"] is False
