@@ -7,6 +7,7 @@ on:
     paths:
       - .github/workflows/todo-dispatcher-physical-e2e.yml
       - scripts/todo_dispatcher_physical_e2e.py
+      - scripts/activate_desktop_runtime_runner.py
       - tests/test_todo_dispatcher_physical_e2e.py
       - .sdd/specs/todo-dispatcher-physical-e2e.requirements.md
   workflow_dispatch:
@@ -19,7 +20,109 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  prepare_runner:
+    name: Ensure dedicated Desktop runner labels
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 6
+    env:
+      RULES_SHA: 5d1f603241dde37a597d2b7bdc5e07425db7b451
+      TARGET_REPO: C:\\dev\\reqsys-v2-enterprise-real
+      CORRELATION_ID: todo-dispatcher-runner-labels-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout runtime exact SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert exact Desktop bootstrap host
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") {
+            throw "DESKTOP_BOOTSTRAP_HOST_MISMATCH"
+          }
+
+      - name: Checkout canonical operational rules exact SHA
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Resolve ReqSys session anchor
+        id: prepare_anchor
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'reqsys-v2-enterprise-real',
+              branch: 'main'
+            });
+            core.setOutput('sha', data.commit.sha);
+
+      - name: Bootstrap governed session for runner repair
+        id: prepare_session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\\scripts\\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\\config\\command-gateway.policy.json"
+          $anchorSha = "${{ steps.prepare_anchor.outputs.sha }}"
+          $launcherArgs = @(
+            "--policy", $policy,
+            "--repo", $env:TARGET_REPO,
+            "--session-prefix", "todo-runner-fix",
+            "--correlation-id", $env:CORRELATION_ID,
+            "--expected-head", $anchorSha,
+            "--sync-ref", "origin/main"
+          )
+          $raw = & python $launcher @launcherArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = (@($raw)[-1] | ConvertFrom-Json)
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true) {
+            throw "SESSION_LAUNCH_BLOCKED"
+          }
+          if ($data.head -ne $anchorSha) { throw "SESSION_HEAD_MISMATCH" }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Repair runner label contract through Command Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.prepare_session.outputs.target_path }}
+          SESSION_ID: ${{ steps.prepare_session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.prepare_session.outputs.anchor_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\\scripts\\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\\config\\command-gateway.policy.json"
+          $runtimeScript = Join-Path $env:GITHUB_WORKSPACE "scripts\\activate_desktop_runtime_runner.py"
+          $gatewayArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "2",
+            "--timeout", "180",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", $runtimeScript,
+            "--confirm", "ACTIVATE-DESKTOP-RUNTIME-RUNNER",
+            "--source-sha", "${{ github.sha }}",
+            "--non-interactive-auth"
+          )
+          & python $gateway @gatewayArgs
+          exit $LASTEXITCODE
+
   physical_e2e:
+    needs: prepare_runner
     name: TODO dispatcher physical E2E on Desktop
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 8
@@ -164,8 +267,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  physical_runner_watchdog:
-    name: Physical runner queue watchdog
+  prepare_runner_watchdog:
+    name: Prepare runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2
     permissions:
@@ -174,9 +277,9 @@ jobs:
     env:
       RULES_SHA: 5d1f603241dde37a597d2b7bdc5e07425db7b451
       TARGET_RUN_ID: ${{ github.run_id }}
-      TARGET_JOB_NAME: TODO dispatcher physical E2E on Desktop
+      TARGET_JOB_NAME: Ensure dedicated Desktop runner labels
       STALL_AFTER_SECONDS: "60"
-      CORRELATION_ID: todo-dispatcher-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+      CORRELATION_ID: todo-dispatcher-prepare-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
       - name: Checkout canonical progress watchdog
@@ -208,6 +311,121 @@ jobs:
               run_id: runId,
             });
             const progressAnchor = new Date(runResponse.data.created_at || Date.now());
+
+            while (true) {
+              const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+              });
+              const targetJob = jobsResponse.data.jobs.find(
+                (job) => job.name === process.env.TARGET_JOB_NAME,
+              ) || null;
+
+              if (
+                targetJob &&
+                (targetJob.status !== 'queued' || Number(targetJob.runner_id || 0) > 0)
+              ) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: String(targetJob.id),
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: targetJob.status === 'completed' ? 'completed' : 'running',
+                  last_material_progress_at: new Date().toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              const noProgressMs = Date.now() - progressAnchor.getTime();
+              if (noProgressMs >= stallMs) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: targetJob ? String(targetJob.id) : 'physical-runner-job-not-created',
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: 'queued',
+                  last_material_progress_at: progressAnchor.toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              await sleep(Math.min(15000, stallMs - noProgressMs));
+            }
+
+      - name: Evaluate canonical progress watchdog
+        id: watchdog
+        continue-on-error: true
+        shell: pwsh
+        run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
+
+      - name: Fail closed and cancel stalled physical run
+        if: steps.watchdog.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('progress-watchdog-output.json')) {
+              core.setFailed('PROGRESS_WATCHDOG_EVIDENCE_MISSING');
+              return;
+            }
+            const decision = JSON.parse(fs.readFileSync('progress-watchdog-output.json', 'utf8'));
+            if (decision.decision !== 'block') {
+              core.setFailed(`PROGRESS_WATCHDOG_INVALID_DECISION:${decision.decision || 'missing'}`);
+              return;
+            }
+            core.setFailed(
+              `SELF_HOSTED_RUNNER_UNAVAILABLE: sem progresso material por ${decision.no_progress_seconds}s`,
+            );
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.TARGET_RUN_ID),
+            });
+
+  physical_runner_watchdog:
+    needs: prepare_runner
+    name: Physical runner queue watchdog
+    runs-on: windows-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+    env:
+      RULES_SHA: 5d1f603241dde37a597d2b7bdc5e07425db7b451
+      TARGET_RUN_ID: ${{ github.run_id }}
+      TARGET_JOB_NAME: TODO dispatcher physical E2E on Desktop
+      STALL_AFTER_SECONDS: "60"
+      CORRELATION_ID: todo-dispatcher-physical-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout canonical progress watchdog
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Observe physical runner pickup
+        id: observe
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
+            const runId = Number(process.env.TARGET_RUN_ID);
+            if (!Number.isInteger(runId) || runId <= 0) {
+              core.setFailed('PHYSICAL_RUN_ID_INVALID');
+              return;
+            }
+
+            const progressAnchor = new Date();
 
             while (true) {
               const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
