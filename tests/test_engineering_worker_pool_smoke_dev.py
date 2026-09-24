@@ -270,7 +270,8 @@ def test_physical_workflow_owns_queue_watchdog_without_coupling_unit_ci() -> Non
     ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
     assert "name: Physical runner queue watchdog" in physical
-    assert 'STALL_AFTER_SECONDS: "300"' in physical
+    assert 'STALL_AFTER_SECONDS: "60"' in physical
+    assert "timeout-minutes: 2" in physical
     assert "scripts/progress_watchdog.py" in physical
     assert "actions: write" in physical
     assert "TARGET_RUN_ID: ${{ github.run_id }}" in physical
