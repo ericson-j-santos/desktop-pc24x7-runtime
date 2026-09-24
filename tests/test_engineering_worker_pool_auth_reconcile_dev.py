@@ -234,12 +234,10 @@ def test_running_image_reference_must_resolve_to_exact_image_id(
         return "sha256:" + ("d" * 64) + "\n"
 
     monkeypatch.setattr(module, "_docker", fake_docker)
-    container = _container()
-    image_id = module._running_image_id(container)
-    image_ref = module._running_image_reference(container)
-    module._verify_running_image_reference(image_ref, image_id)
 
-    assert image_ref == "reqsys-codex-worker-pool:local"
+    assert module._verified_running_image_reference(_container()) == (
+        "reqsys-codex-worker-pool:local"
+    )
     assert seen == [
         [
             "image",
@@ -251,20 +249,72 @@ def test_running_image_reference_must_resolve_to_exact_image_id(
     ]
 
 
-def test_running_image_reference_mismatch_fails_closed(
+def test_stale_running_image_reference_gets_deterministic_recovery_alias(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        module,
-        "_docker",
-        lambda *_args, **_kwargs: "sha256:" + ("e" * 64) + "\n",
-    )
+    expected_id = "sha256:" + ("d" * 64)
+    recovery_ref = f"{module.RECOVERY_IMAGE_REPOSITORY}:{'d' * 64}"
+    tagged = False
+    seen: list[list[str]] = []
+
+    def fake_docker(
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        timeout: int = 60,
+        failure_reason: str = "worker_pool_docker_command_failed",
+    ) -> str:
+        nonlocal tagged
+        seen.append(args)
+        if args[:3] == ["image", "inspect", "--format"]:
+            if args[-1] == "reqsys-codex-worker-pool:local":
+                return "sha256:" + ("e" * 64) + "\n"
+            if args[-1] == recovery_ref:
+                if not tagged:
+                    raise module.ReconcileError(
+                        "worker_pool_recovery_image_reference_missing"
+                    )
+                return expected_id + "\n"
+        if args[:2] == ["image", "tag"]:
+            assert args == ["image", "tag", expected_id, recovery_ref]
+            assert failure_reason == "worker_pool_recovery_image_tag_failed"
+            tagged = True
+            return ""
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module, "_docker", fake_docker)
+
+    assert module._verified_running_image_reference(_container()) == recovery_ref
+    assert tagged is True
+    assert seen[-1] == [
+        "image",
+        "inspect",
+        "--format",
+        "{{.Id}}",
+        recovery_ref,
+    ]
+
+
+def test_recovery_image_reference_conflict_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    recovery_ref = f"{module.RECOVERY_IMAGE_REPOSITORY}:{'d' * 64}"
+
+    def fake_docker(
+        args: list[str],
+        **_kwargs: object,
+    ) -> str:
+        if args[-1] == "reqsys-codex-worker-pool:local":
+            return "sha256:" + ("e" * 64) + "\n"
+        if args[-1] == recovery_ref:
+            return "sha256:" + ("f" * 64) + "\n"
+        raise AssertionError(args)
+
+    monkeypatch.setattr(module, "_docker", fake_docker)
     with pytest.raises(
-        module.ReconcileError, match="worker_pool_running_image_reference_mismatch"
+        module.ReconcileError, match="worker_pool_recovery_image_reference_conflict"
     ):
-        module._verify_running_image_reference(
-            "reqsys-codex-worker-pool:local", "sha256:" + ("d" * 64)
-        )
+        module._verified_running_image_reference(_container())
 
 def test_reconcile_recreates_only_when_401_and_bind_is_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
