@@ -21,14 +21,14 @@ O runtime contém somente o adaptador host-specific e o workflow de execução f
 ## Requisitos
 
 1. Antes do E2E, adquirir o runner Windows genérico no Desktop e executar, por sessão + Command Gateway, `scripts/activate_desktop_runtime_runner.py` para restaurar o contrato do runner dedicado.
-3. Executar o E2E somente no runner dedicado do Desktop:
+2. Executar o E2E somente no runner dedicado do Desktop:
    `self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev`.
-2. Validar `COMPUTERNAME=DESKTOP-PDQK954` e runner esperado.
+3. Validar `COMPUTERNAME=DESKTOP-PDQK954` e runner esperado.
 4. Fazer checkout do runtime no SHA exato da execução.
 5. Fazer checkout das regras no SHA imutável acima.
 6. Inicializar sessão com `session_launcher.py` e exigir
    `SESSION_LAUNCH_OK` + `state_validated=true`.
-7. Executar o adaptador somente por `command_gateway.py`.
+7. Executar reparo e adaptador somente por `command_gateway.py`.
 8. Instalar dependência Python somente em `.tmp` da sessão governada.
 9. Validar no harness:
    - P0 selecionado;
