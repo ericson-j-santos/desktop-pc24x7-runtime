@@ -30,10 +30,24 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 12. Falta, ambiguidade ou divergência de host, runner, SHA, container, endpoint,
     mount, arquivo, evidência ou resultado deve falhar fechado.
 13. Produção, HML/STG, deploy e reboot ficam fora do escopo.
+14. Antes do primeiro comando técnico local, o workflow deve executar o
+    `session_launcher.py` das regras canônicas fixadas por SHA e exigir
+    `SESSION_LAUNCH_OK` com `state_validated=true`.
+15. Após o bootstrap, a execução do adaptador deve ocorrer exclusivamente por
+    `command_gateway.py`, com `session_id`, `correlation_id`, HEAD da âncora
+    validado e risco 2.
+16. Invocação direta do adaptador por PowerShell/CMD/Python fora do Command
+    Gateway é evidência inválida e deve falhar no teste de contrato do workflow.
+17. O caminho de evidência repassado ao harness do Worker Pool deve ser absoluto
+    para permanecer invariável quando o harness usar `cwd` próprio.
 
 ## Critérios de aceite
 
 - testes positivos e negativos verdes no CI do SHA da PR;
+- contrato estático comprova presença de Session Launcher + Command Gateway e
+  ausência de invocação direta do adaptador;
+- bootstrap físico retorna `SESSION_LAUNCH_OK`, `state_validated=true` e HEAD
+  exato da âncora canônica;
 - workflow físico integrado na main;
 - execução no runner dedicado concluída no SHA vigente do runtime;
 - Worker Pool executado no SHA imutável informado;
