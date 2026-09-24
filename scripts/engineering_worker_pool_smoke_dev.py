@@ -254,22 +254,29 @@ def run_runtime_smoke(
         str(child_evidence),
     ]
 
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=worker_pool_root,
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=90,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeSmokeError("worker_pool_smoke_process_failed") from exc
+    completed, payload = invoke_worker_pool_harness(
+        command, worker_pool_root, child_evidence
+    )
+    auth_reconciled = False
+    service_recreated = False
+    smoke_attempts = 1
 
-    payload = load_evidence(child_evidence)
     if completed.returncode != 0:
         reason = str(payload.get("reason") or "worker_pool_smoke_failed")
-        raise RuntimeSmokeError(reason[:160])
+        if reason != "worker_pool_http_401":
+            raise RuntimeSmokeError(reason[:160])
+
+        reconcile = run_auth_reconcile(output)
+        auth_reconciled = True
+        service_recreated = reconcile.get("service_recreated") is True
+        smoke_attempts = 2
+
+        completed, payload = invoke_worker_pool_harness(
+            command, worker_pool_root, child_evidence
+        )
+        if completed.returncode != 0:
+            retry_reason = str(payload.get("reason") or "worker_pool_smoke_failed")
+            raise RuntimeSmokeError(retry_reason[:160])
 
     validate_worker_pool_evidence(payload, expected_worker_pool_sha)
 
