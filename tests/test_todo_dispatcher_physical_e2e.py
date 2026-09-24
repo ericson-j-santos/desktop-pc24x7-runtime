@@ -134,8 +134,16 @@ def test_physical_workflow_is_sha_pinned_and_governed() -> None:
     assert "DESKTOP-PDQK954" in workflow
     assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]" in workflow
     assert "TODO dispatcher physical E2E on Desktop" in workflow
+    assert "name: Ensure dedicated Desktop runner labels" in workflow
+    assert "runs-on: [self-hosted, Windows, X64]" in workflow
+    assert "Repair runner label contract through Command Gateway" in workflow
+    assert "scripts\\\\activate_desktop_runtime_runner.py" in workflow
+    assert '"--confirm", "ACTIVATE-DESKTOP-RUNTIME-RUNNER"' in workflow
+    assert '"--non-interactive-auth"' in workflow
+    assert "needs: prepare_runner" in workflow
+    assert "name: Prepare runner queue watchdog" in workflow
     assert "name: Physical runner queue watchdog" in workflow
-    assert 'STALL_AFTER_SECONDS: "60"' in workflow
+    assert workflow.count('STALL_AFTER_SECONDS: "60"') == 2
     assert "scripts/progress_watchdog.py" in workflow
     assert "cancelWorkflowRun" in workflow
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow
