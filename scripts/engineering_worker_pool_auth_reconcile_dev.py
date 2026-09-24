@@ -26,6 +26,7 @@ HEALTH_URL = "http://127.0.0.1:8097/health"
 SNAPSHOT_URL = "http://127.0.0.1:8097/v1/snapshot"
 MIN_TOKEN_LENGTH = 32
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
+RECOVERY_IMAGE_REPOSITORY = "reqsys-codex-worker-pool-recovery"
 
 
 class ReconcileError(RuntimeError):
@@ -296,13 +297,55 @@ def _running_image_reference(container: dict[str, Any]) -> str:
     return image_ref
 
 
-def _verify_running_image_reference(image_ref: str, expected_image_id: str) -> None:
-    actual = _docker(
+def _image_id_for_reference(image_ref: str, *, failure_reason: str) -> str:
+    return _docker(
         ["image", "inspect", "--format", "{{.Id}}", image_ref],
-        failure_reason="worker_pool_running_image_reference_missing",
+        failure_reason=failure_reason,
     ).strip().lower()
-    if actual != expected_image_id:
-        raise ReconcileError("worker_pool_running_image_reference_mismatch")
+
+
+def _recovery_image_reference(image_id: str) -> str:
+    digest = image_id.removeprefix("sha256:")
+    return f"{RECOVERY_IMAGE_REPOSITORY}:{digest}"
+
+
+def _verified_running_image_reference(container: dict[str, Any]) -> str:
+    image_id = _running_image_id(container)
+    image_ref = _running_image_reference(container)
+
+    try:
+        actual = _image_id_for_reference(
+            image_ref,
+            failure_reason="worker_pool_running_image_reference_missing",
+        )
+    except ReconcileError as exc:
+        if str(exc) != "worker_pool_running_image_reference_missing":
+            raise
+    else:
+        if actual == image_id:
+            return image_ref
+
+    recovery_ref = _recovery_image_reference(image_id)
+    try:
+        recovery_actual = _image_id_for_reference(
+            recovery_ref,
+            failure_reason="worker_pool_recovery_image_reference_missing",
+        )
+    except ReconcileError as exc:
+        if str(exc) != "worker_pool_recovery_image_reference_missing":
+            raise
+        _docker(
+            ["image", "tag", image_id, recovery_ref],
+            failure_reason="worker_pool_recovery_image_tag_failed",
+        )
+        recovery_actual = _image_id_for_reference(
+            recovery_ref,
+            failure_reason="worker_pool_recovery_image_reference_verify_failed",
+        )
+
+    if recovery_actual != image_id:
+        raise ReconcileError("worker_pool_recovery_image_reference_conflict")
+    return recovery_ref
 
 
 def _rules_sha(container: dict[str, Any]) -> str:
@@ -365,9 +408,7 @@ def _recreate_service(
     if not project:
         raise ReconcileError("worker_pool_compose_identity_missing")
 
-    image_id = _running_image_id(container)
-    image_ref = _running_image_reference(container)
-    _verify_running_image_reference(image_ref, image_id)
+    image_ref = _verified_running_image_reference(container)
 
     process_env = os.environ.copy()
     process_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] = str(token_path)
