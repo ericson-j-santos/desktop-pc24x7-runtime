@@ -17,9 +17,18 @@ def _completed(args: list[str], stdout: str) -> subprocess.CompletedProcess[str]
     return subprocess.CompletedProcess(args=args, returncode=0, stdout=stdout, stderr="")
 
 
-def _container(*, running: bool = True, mounts: list[dict] | None = None) -> dict:
+def _container(
+    *,
+    container_id: str = "container-one",
+    running: bool = True,
+    mounts: list[dict] | None = None,
+) -> dict:
     return {
-        "Config": {"Labels": {"com.docker.compose.service": smoke.POOL_SERVICE}},
+        "Id": container_id,
+        "Config": {
+            "Labels": {"com.docker.compose.service": smoke.POOL_SERVICE},
+            "Env": [],
+        },
         "State": {"Running": running},
         "NetworkSettings": {
             "Ports": {
@@ -172,8 +181,13 @@ def test_runtime_smoke_wraps_external_harness_without_exposing_token_path(
         return RUNTIME_SHA if root == smoke.ROOT else WORKER_SHA
 
     monkeypatch.setattr(smoke, "git_sha", fake_git_sha)
+    runtime = smoke.WorkerPoolRuntime(
+        container_id="container-one",
+        token_file=token_file,
+        container=_container(),
+    )
     monkeypatch.setattr(
-        smoke, "discover_worker_pool_token_file", lambda _runner: token_file
+        smoke, "discover_worker_pool_runtime", lambda _runner: runtime
     )
 
     observed_child_output: list[Path] = []
@@ -215,6 +229,7 @@ def test_runtime_smoke_wraps_external_harness_without_exposing_token_path(
         correlation_id="test-correlation",
         output=output,
         env={"COMPUTERNAME": smoke.EXPECTED_HOST, "RUNNER_NAME": smoke.EXPECTED_RUNNER},
+        repair_auth_bind=False,
     )
 
     assert result["result"] == "WORKER_POOL_RUNTIME_SMOKE_PASSED"
@@ -244,3 +259,235 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert '"--risk", "2"' in workflow
     assert "ae9b681b6cbe5c6e0c6c82b187b3245c0749118f" in workflow
     assert "python scripts/engineering_worker_pool_smoke_dev.py" not in workflow
+
+
+
+def test_repair_auth_bind_recreates_same_compose_service_without_build_or_pull(
+    tmp_path: Path,
+) -> None:
+    working_dir = tmp_path / "compose"
+    working_dir.mkdir()
+    compose_file = working_dir / "docker-compose.yml"
+    compose_file.write_text("services: {}\n", encoding="utf-8")
+    token_file = tmp_path / "token"
+    token_file.write_text("test-token-value", encoding="utf-8")
+
+    current = _container(container_id="old-container")
+    current["Config"]["Labels"].update(
+        {
+            "com.docker.compose.project": "reqsys",
+            "com.docker.compose.project.working_dir": str(working_dir),
+            "com.docker.compose.project.config_files": str(compose_file),
+        }
+    )
+    current["Config"]["Env"] = [
+        "CODEX_WORKER_POOL_EXPECTED_RULES_SHA=" + ("c" * 40)
+    ]
+    runtime = smoke.WorkerPoolRuntime(
+        container_id="old-container",
+        token_file=token_file,
+        container=current,
+    )
+
+    refreshed_container = _container(container_id="new-container")
+    calls: list[tuple[list[str], Path, dict[str, str]]] = []
+
+    def fake_compose_run(
+        args: list[str], cwd: Path, env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append((args, cwd, env))
+        return _completed(args, "")
+
+    def fake_docker_run(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["docker", "ps"]:
+            return _completed(args, "new-container\n")
+        return _completed(args, json.dumps([refreshed_container]))
+
+    repaired = smoke.repair_worker_pool_auth_bind(
+        runtime,
+        compose_run=fake_compose_run,
+        docker_run=fake_docker_run,
+    )
+
+    assert repaired.container_id == "new-container"
+    assert len(calls) == 1
+    args, cwd, child_env = calls[0]
+    assert cwd == working_dir
+    assert args[:5] == [
+        "docker",
+        "compose",
+        "--project-name",
+        "reqsys",
+        "-f",
+    ]
+    assert "--force-recreate" in args
+    assert "--no-deps" in args
+    assert "--no-build" in args
+    assert args[args.index("--pull") + 1] == "never"
+    assert "--wait" in args
+    assert args[-1] == smoke.POOL_SERVICE
+    assert child_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] == str(token_file)
+    assert child_env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] == "c" * 40
+
+
+def test_repair_auth_bind_fails_closed_without_compose_metadata(
+    tmp_path: Path,
+) -> None:
+    token_file = tmp_path / "token"
+    token_file.write_text("test-token-value", encoding="utf-8")
+    runtime = smoke.WorkerPoolRuntime(
+        container_id="container-one",
+        token_file=token_file,
+        container=_container(),
+    )
+
+    with pytest.raises(
+        smoke.RuntimeSmokeError, match="worker_pool_compose_metadata_missing"
+    ):
+        smoke.repair_worker_pool_auth_bind(runtime)
+
+
+def test_runtime_smoke_repairs_auth_bind_once_only_on_401(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker_root = tmp_path / "engineering-worker-pool"
+    script = worker_root / "scripts" / "worker_pool_smoke.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# test harness\n", encoding="utf-8")
+    token_file = tmp_path / "private-token"
+    token_file.write_text("test-token-value", encoding="utf-8")
+
+    old_runtime = smoke.WorkerPoolRuntime(
+        container_id="old-container",
+        token_file=token_file,
+        container=_container(container_id="old-container"),
+    )
+    new_runtime = smoke.WorkerPoolRuntime(
+        container_id="new-container",
+        token_file=token_file,
+        container=_container(container_id="new-container"),
+    )
+
+    monkeypatch.setattr(
+        smoke,
+        "git_sha",
+        lambda root: RUNTIME_SHA if root == smoke.ROOT else WORKER_SHA,
+    )
+    monkeypatch.setattr(
+        smoke, "discover_worker_pool_runtime", lambda _runner: old_runtime
+    )
+
+    repairs: list[str] = []
+
+    def fake_repair(
+        runtime: smoke.WorkerPoolRuntime,
+        *,
+        compose_run: smoke.ComposeRun,
+        docker_run: smoke.DockerRun,
+    ) -> smoke.WorkerPoolRuntime:
+        repairs.append(runtime.container_id)
+        return new_runtime
+
+    monkeypatch.setattr(smoke, "repair_worker_pool_auth_bind", fake_repair)
+
+    attempts = iter(
+        [
+            (
+                2,
+                {
+                    "result": "WORKER_POOL_SMOKE_BLOCKED",
+                    "reason": "worker_pool_http_401",
+                },
+            ),
+            (
+                0,
+                {
+                    "result": "WORKER_POOL_SMOKE_PASSED",
+                    "expected_sha": WORKER_SHA,
+                    "lane_enabled": False,
+                    "task_state": "queued",
+                    "leased_by": None,
+                    "replay_created": False,
+                    "independent_readback": True,
+                    "secrets_exposed": False,
+                    "production_touched": False,
+                    "deploy_executed": False,
+                    "task_id": "task-1",
+                },
+            ),
+        ]
+    )
+    monkeypatch.setattr(
+        smoke, "_run_worker_pool_harness", lambda **_kwargs: next(attempts)
+    )
+
+    result = smoke.run_runtime_smoke(
+        expected_runtime_sha=RUNTIME_SHA,
+        expected_worker_pool_sha=WORKER_SHA,
+        worker_pool_root=worker_root,
+        correlation_id="repair-correlation",
+        output=tmp_path / "evidence.json",
+        env={"COMPUTERNAME": smoke.EXPECTED_HOST, "RUNNER_NAME": smoke.EXPECTED_RUNNER},
+        repair_auth_bind=True,
+    )
+
+    assert repairs == ["old-container"]
+    assert result["auth_bind_repaired"] is True
+    assert result["worker_pool_result"] == "WORKER_POOL_SMOKE_PASSED"
+
+
+def test_runtime_smoke_does_not_repair_non_auth_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    worker_root = tmp_path / "engineering-worker-pool"
+    script = worker_root / "scripts" / "worker_pool_smoke.py"
+    script.parent.mkdir(parents=True)
+    script.write_text("# test harness\n", encoding="utf-8")
+    token_file = tmp_path / "private-token"
+    token_file.write_text("test-token-value", encoding="utf-8")
+    runtime = smoke.WorkerPoolRuntime(
+        container_id="container-one",
+        token_file=token_file,
+        container=_container(),
+    )
+
+    monkeypatch.setattr(
+        smoke,
+        "git_sha",
+        lambda root: RUNTIME_SHA if root == smoke.ROOT else WORKER_SHA,
+    )
+    monkeypatch.setattr(
+        smoke, "discover_worker_pool_runtime", lambda _runner: runtime
+    )
+    monkeypatch.setattr(
+        smoke,
+        "_run_worker_pool_harness",
+        lambda **_kwargs: (
+            2,
+            {
+                "result": "WORKER_POOL_SMOKE_BLOCKED",
+                "reason": "worker_pool_unreachable",
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        smoke,
+        "repair_worker_pool_auth_bind",
+        lambda *_args, **_kwargs: pytest.fail("repair must not run"),
+    )
+
+    with pytest.raises(smoke.RuntimeSmokeError, match="worker_pool_unreachable"):
+        smoke.run_runtime_smoke(
+            expected_runtime_sha=RUNTIME_SHA,
+            expected_worker_pool_sha=WORKER_SHA,
+            worker_pool_root=worker_root,
+            correlation_id="negative-control",
+            output=tmp_path / "evidence.json",
+            env={
+                "COMPUTERNAME": smoke.EXPECTED_HOST,
+                "RUNNER_NAME": smoke.EXPECTED_RUNNER,
+            },
+            repair_auth_bind=True,
+        )
