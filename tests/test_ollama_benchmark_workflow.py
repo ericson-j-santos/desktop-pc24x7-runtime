@@ -34,7 +34,8 @@ def test_benchmark_queue_is_bounded_by_canonical_watchdog() -> None:
     assert "workflow_dispatch:" in trigger_block
     assert "pull_request:" in trigger_block
     assert "physical_runner_watchdog:" in content
-    assert 'STALL_AFTER_SECONDS: "300"' in content
+    assert 'STALL_AFTER_SECONDS: "60"' in content
+    assert "timeout-minutes: 2" in content
     assert "actions: write" in content
     assert "_rules/scripts/progress_watchdog.py" in content
     assert "cancelWorkflowRun" in content
