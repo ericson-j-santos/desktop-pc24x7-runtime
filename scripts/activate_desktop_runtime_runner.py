@@ -330,6 +330,7 @@ def runner_registry_snapshot(gh: Path) -> dict[str, Any]:
     if not matches:
         return {
             "present": False,
+            "id": None,
             "status": "missing",
             "busy": False,
             "labels": [],
@@ -342,6 +343,9 @@ def runner_registry_snapshot(gh: Path) -> dict[str, Any]:
         )
 
     item = matches[0]
+    runner_id = item.get("id")
+    if not isinstance(runner_id, int) or runner_id <= 0:
+        raise ActivationError("runner_registry_invalid", "runner id inválido")
     labels_raw = item.get("labels")
     labels = sorted(
         {
@@ -354,6 +358,7 @@ def runner_registry_snapshot(gh: Path) -> dict[str, Any]:
     required = {label.casefold() for label in REQUIRED_RUNNER_LABELS}
     return {
         "present": True,
+        "id": runner_id,
         "status": str(item.get("status") or "unknown").casefold(),
         "busy": bool(item.get("busy")),
         "labels": labels,
@@ -533,10 +538,79 @@ def should_restart_offline_runner(registry: dict[str, Any], local_running: bool)
 
 
 def should_repair_registration(registry: dict[str, Any], local_contract_present: bool) -> bool:
+    return bool(local_contract_present and not registry.get("present"))
+
+
+def should_repair_labels(registry: dict[str, Any], local_contract_present: bool) -> bool:
     return bool(
         local_contract_present
-        and (not registry.get("present") or not registry.get("labels_ok"))
+        and registry.get("present")
+        and not registry.get("labels_ok")
     )
+
+
+def request_runner_labels(gh: Path, runner_id: int, labels: list[str]) -> bool:
+    cp = subprocess.run(
+        [
+            str(gh),
+            "api",
+            "--method",
+            "POST",
+            f"repos/{REPOSITORY}/actions/runners/{runner_id}/labels",
+            "--input",
+            "-",
+        ],
+        input=json.dumps({"labels": labels}),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+        check=False,
+        env=gh_env(),
+    )
+    return cp.returncode == 0
+
+
+def repair_runner_labels(
+    gh: Path,
+    registry: dict[str, Any],
+    *,
+    allow_interactive_auth: bool = True,
+) -> dict[str, Any]:
+    runner_id = registry.get("id")
+    if not registry.get("present") or not isinstance(runner_id, int) or runner_id <= 0:
+        raise ActivationError("runner_registry_invalid", "runner ausente para reparo de labels")
+
+    observed = {str(label).casefold() for label in registry.get("labels") or []}
+    missing = [
+        label
+        for label in RUNNER_LABELS.split(",")
+        if label.casefold() not in observed
+    ]
+    if not missing:
+        return {"repaired": False, "added_labels": []}
+
+    applied = request_runner_labels(gh, runner_id, missing)
+    if not applied and allow_interactive_auth:
+        refresh_repo_scope(gh)
+        if gh_active_login(gh).casefold() != EXPECTED_GITHUB_LOGIN.casefold():
+            raise ActivationError("github_account_mismatch", "conta GitHub ativa divergente")
+        applied = request_runner_labels(gh, runner_id, missing)
+    if not applied:
+        raise ActivationError(
+            "github_runner_admin_permission_required",
+            "a autenticação local não autorizou o reparo de labels do runner",
+        )
+
+    readback = runner_registry_snapshot(gh)
+    if not readback.get("labels_ok"):
+        raise ActivationError("runner_labels_mismatch", "labels do runner divergentes após reparo")
+    return {
+        "repaired": True,
+        "added_labels": missing,
+        "runner_id": runner_id,
+    }
 
 
 def repair_registration(
@@ -599,6 +673,7 @@ def main() -> int:
     token_consumed = False
     remove_token_consumed = False
     repair_evidence: dict[str, Any] | None = None
+    label_repair_evidence: dict[str, Any] | None = None
     try:
         host = validate_host()
         repo_root = args.repo_root.resolve()
@@ -619,7 +694,8 @@ def main() -> int:
             token_consumed = registration_performed
 
         registry = runner_registry_snapshot(gh)
-        if should_repair_registration(registry, runner_contract(runner)):
+        local_contract_present = runner_contract(runner)
+        if should_repair_registration(registry, local_contract_present):
             repair_evidence = repair_registration(
                 runner,
                 gh,
@@ -628,6 +704,14 @@ def main() -> int:
             registration_performed = True
             token_consumed = True
             remove_token_consumed = True
+            registry = runner_registry_snapshot(gh)
+        elif should_repair_labels(registry, local_contract_present):
+            label_repair_evidence = repair_runner_labels(
+                gh,
+                registry,
+                allow_interactive_auth=not args.non_interactive_auth,
+            )
+            registry = runner_registry_snapshot(gh)
 
         started_now = start_runner(runner)
         registry = wait_runner_registry_online(gh, timeout_seconds=8.0)
@@ -672,6 +756,12 @@ def main() -> int:
             "runner_running": local_running,
             "runner_restarted_offline": restart_evidence is not None,
             "runner_registration_repaired": repair_evidence is not None,
+            "runner_labels_repaired": bool(
+                label_repair_evidence and label_repair_evidence.get("repaired")
+            ),
+            "runner_labels_added": (
+                label_repair_evidence.get("added_labels") if label_repair_evidence else []
+            ),
             "runner_repair_previous_listener_pid": (
                 repair_evidence.get("previous_listener_pid") if repair_evidence else None
             ),
