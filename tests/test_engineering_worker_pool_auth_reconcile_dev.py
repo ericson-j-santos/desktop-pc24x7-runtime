@@ -21,7 +21,6 @@ def _container() -> dict:
     return {
         "Image": "sha256:" + ("d" * 64),
         "Config": {
-            "Image": "reqsys-codex-worker-pool:local",
             "Labels": {"com.docker.compose.project": "reqsys"},
             "Env": [
                 f"CODEX_WORKER_POOL_API_TOKEN_FILE={module.TOKEN_DESTINATION}",
@@ -105,6 +104,9 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
     canonical = _canonical_compose(tmp_path)
     seen: list[tuple[list[str], dict[str, str] | None]] = []
 
+    image_id = "sha256:" + ("d" * 64)
+    expected_ref = "desktop-pc24x7-worker-pool-recovery:sha256-" + ("d" * 64)
+
     def fake_docker(
         args: list[str],
         *,
@@ -112,10 +114,14 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
         timeout: int = 60,
         failure_reason: str = "worker_pool_docker_command_failed",
     ) -> str:
-        if args[:3] == ["image", "inspect", "--format"]:
-            assert failure_reason == "worker_pool_running_image_reference_missing"
-            assert args[-1] == "reqsys-codex-worker-pool:local"
-            return "sha256:" + ("d" * 64) + "\n"
+        if args[:2] == ["image", "tag"]:
+            assert failure_reason == "worker_pool_image_tag_failed"
+            assert args == ["image", "tag", "d" * 64, expected_ref]
+            return ""
+        if args[:2] == ["image", "inspect"]:
+            assert failure_reason == "worker_pool_image_tag_readback_failed"
+            assert args == ["image", "inspect", expected_ref, "--format", "{{.Id}}"]
+            return image_id + "\n"
         assert failure_reason == "worker_pool_service_recreate_failed"
         seen.append((args, env))
         return ""
@@ -146,7 +152,7 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
 
     assert env is not None
     assert env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] == str(token_path)
-    assert env["CODEX_WORKER_POOL_RUNNING_IMAGE"] == "reqsys-codex-worker-pool:local"
+    assert env["CODEX_WORKER_POOL_RUNNING_IMAGE"] == expected_ref
     assert env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] == "a" * 40
 
 
@@ -156,18 +162,6 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
         (
             "Error response from daemon: No such image: sha256:abc",
             "worker_pool_compose_image_unavailable",
-        ),
-        (
-            "invalid reference format",
-            "worker_pool_compose_image_reference_invalid",
-        ),
-        (
-            "invalid repository name (abc), cannot specify 64-byte hexadecimal strings",
-            "worker_pool_compose_image_reference_invalid",
-        ),
-        (
-            "unknown flag: --pull",
-            "worker_pool_compose_cli_unsupported",
         ),
         (
             "invalid mount config for type bind",
@@ -183,6 +177,10 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
             "worker_pool_compose_configuration_invalid",
         ),
         ("Access is denied", "worker_pool_docker_permission_denied"),
+        (
+            "invalid reference format",
+            "worker_pool_compose_image_reference_invalid",
+        ),
         ("unexpected compose failure", "worker_pool_service_recreate_failed"),
     ],
 )
@@ -217,11 +215,12 @@ def test_docker_uses_sanitized_compose_failure_reason(
     assert secret not in str(exc.value)
 
 
-
-def test_running_image_reference_must_resolve_to_exact_image_id(
+def test_compose_image_reference_tags_exact_image_id_and_validates_readback(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen: list[list[str]] = []
+    image_id = "sha256:" + ("e" * 64)
+    expected_ref = "desktop-pc24x7-worker-pool-recovery:sha256-" + ("e" * 64)
+    calls: list[tuple[list[str], str]] = []
 
     def fake_docker(
         args: list[str],
@@ -230,32 +229,34 @@ def test_running_image_reference_must_resolve_to_exact_image_id(
         timeout: int = 60,
         failure_reason: str = "worker_pool_docker_command_failed",
     ) -> str:
-        seen.append(args)
-        return "sha256:" + ("d" * 64) + "\n"
+        calls.append((args, failure_reason))
+        if args[:2] == ["image", "inspect"]:
+            return image_id + "\n"
+        return ""
 
     monkeypatch.setattr(module, "_docker", fake_docker)
 
-    assert module._verified_running_image_reference(_container()) == (
-        "reqsys-codex-worker-pool:local"
-    )
-    assert seen == [
-        [
-            "image",
-            "inspect",
-            "--format",
-            "{{.Id}}",
-            "reqsys-codex-worker-pool:local",
-        ]
+    container = _container()
+    container["Image"] = image_id
+    actual = module._compose_image_reference(container)
+
+    assert actual == expected_ref
+    assert calls == [
+        (
+            ["image", "tag", "e" * 64, expected_ref],
+            "worker_pool_image_tag_failed",
+        ),
+        (
+            ["image", "inspect", expected_ref, "--format", "{{.Id}}"],
+            "worker_pool_image_tag_readback_failed",
+        ),
     ]
 
 
-def test_stale_running_image_reference_gets_deterministic_recovery_alias(
+def test_compose_image_reference_fails_closed_on_readback_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    expected_id = "sha256:" + ("d" * 64)
-    recovery_ref = f"{module.RECOVERY_IMAGE_REPOSITORY}:{'d' * 64}"
-    tagged = False
-    seen: list[list[str]] = []
+    image_id = "sha256:" + ("f" * 64)
 
     def fake_docker(
         args: list[str],
@@ -264,57 +265,20 @@ def test_stale_running_image_reference_gets_deterministic_recovery_alias(
         timeout: int = 60,
         failure_reason: str = "worker_pool_docker_command_failed",
     ) -> str:
-        nonlocal tagged
-        seen.append(args)
-        if args[:3] == ["image", "inspect", "--format"]:
-            if args[-1] == "reqsys-codex-worker-pool:local":
-                return "sha256:" + ("e" * 64) + "\n"
-            if args[-1] == recovery_ref:
-                if not tagged:
-                    raise module.ReconcileError(
-                        "worker_pool_recovery_image_reference_missing"
-                    )
-                return expected_id + "\n"
-        if args[:2] == ["image", "tag"]:
-            assert args == ["image", "tag", expected_id, recovery_ref]
-            assert failure_reason == "worker_pool_recovery_image_tag_failed"
-            tagged = True
-            return ""
-        raise AssertionError(args)
+        if args[:2] == ["image", "inspect"]:
+            return "sha256:" + ("a" * 64)
+        return ""
 
     monkeypatch.setattr(module, "_docker", fake_docker)
+    container = _container()
+    container["Image"] = image_id
 
-    assert module._verified_running_image_reference(_container()) == recovery_ref
-    assert tagged is True
-    assert seen[-1] == [
-        "image",
-        "inspect",
-        "--format",
-        "{{.Id}}",
-        recovery_ref,
-    ]
-
-
-def test_recovery_image_reference_conflict_fails_closed(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    recovery_ref = f"{module.RECOVERY_IMAGE_REPOSITORY}:{'d' * 64}"
-
-    def fake_docker(
-        args: list[str],
-        **_kwargs: object,
-    ) -> str:
-        if args[-1] == "reqsys-codex-worker-pool:local":
-            return "sha256:" + ("e" * 64) + "\n"
-        if args[-1] == recovery_ref:
-            return "sha256:" + ("f" * 64) + "\n"
-        raise AssertionError(args)
-
-    monkeypatch.setattr(module, "_docker", fake_docker)
     with pytest.raises(
-        module.ReconcileError, match="worker_pool_recovery_image_reference_conflict"
+        module.ReconcileError,
+        match="worker_pool_image_tag_readback_mismatch",
     ):
-        module._verified_running_image_reference(_container())
+        module._compose_image_reference(container)
+
 
 def test_reconcile_recreates_only_when_401_and_bind_is_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

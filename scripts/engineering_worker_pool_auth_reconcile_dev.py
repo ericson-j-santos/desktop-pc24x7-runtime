@@ -26,7 +26,6 @@ HEALTH_URL = "http://127.0.0.1:8097/health"
 SNAPSHOT_URL = "http://127.0.0.1:8097/v1/snapshot"
 MIN_TOKEN_LENGTH = 32
 SHA40 = re.compile(r"^[0-9a-f]{40}$")
-RECOVERY_IMAGE_REPOSITORY = "reqsys-codex-worker-pool-recovery"
 
 
 class ReconcileError(RuntimeError):
@@ -39,22 +38,6 @@ def _compose_failure_reason(stderr: str) -> str:
         (
             "worker_pool_compose_image_unavailable",
             ("no such image", "pull access denied", "unable to get image"),
-        ),
-        (
-            "worker_pool_compose_image_reference_invalid",
-            (
-                "invalid reference format",
-                "invalid repository name",
-                "cannot specify 64-byte hexadecimal strings",
-            ),
-        ),
-        (
-            "worker_pool_compose_cli_unsupported",
-            ("unknown flag", "unknown shorthand flag"),
-        ),
-        (
-            "worker_pool_compose_container_conflict",
-            ("container name", "already in use by container"),
         ),
         (
             "worker_pool_compose_bind_source_unavailable",
@@ -77,6 +60,10 @@ def _compose_failure_reason(stderr: str) -> str:
                 "invalid interpolation format",
                 "validating ",
             ),
+        ),
+        (
+            "worker_pool_compose_image_reference_invalid",
+            ("invalid reference format", "invalid tag"),
         ),
         (
             "worker_pool_docker_permission_denied",
@@ -275,77 +262,33 @@ def _runtime_state(token: str) -> tuple[bool, str, int, int]:
     return False, reason, health_status, snapshot_status
 
 
-def _running_image_id(container: dict[str, Any]) -> str:
-    image_id = str(container.get("Image") or "").strip().lower()
-    if not image_id.startswith("sha256:"):
-        raise ReconcileError("worker_pool_running_image_id_invalid")
-    digest = image_id.removeprefix("sha256:")
+def _running_image(container: dict[str, Any]) -> str:
+    image = str(container.get("Image") or "").strip().lower()
+    if not image.startswith("sha256:"):
+        raise ReconcileError("worker_pool_running_image_invalid")
+    digest = image.removeprefix("sha256:")
     if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
-        raise ReconcileError("worker_pool_running_image_id_invalid")
-    return image_id
+        raise ReconcileError("worker_pool_running_image_invalid")
+    return image
 
 
-def _running_image_reference(container: dict[str, Any]) -> str:
-    image_ref = str((container.get("Config") or {}).get("Image") or "").strip()
-    compact = image_ref.casefold()
-    if not image_ref or any(ch.isspace() for ch in image_ref):
-        raise ReconcileError("worker_pool_running_image_reference_invalid")
-    if compact.startswith("sha256:"):
-        raise ReconcileError("worker_pool_running_image_reference_invalid")
-    if len(compact) == 64 and all(ch in "0123456789abcdef" for ch in compact):
-        raise ReconcileError("worker_pool_running_image_reference_invalid")
-    return image_ref
-
-
-def _image_id_for_reference(image_ref: str, *, failure_reason: str) -> str:
-    return _docker(
-        ["image", "inspect", "--format", "{{.Id}}", image_ref],
-        failure_reason=failure_reason,
-    ).strip().lower()
-
-
-def _recovery_image_reference(image_id: str) -> str:
+def _compose_image_reference(container: dict[str, Any]) -> str:
+    image_id = _running_image(container)
     digest = image_id.removeprefix("sha256:")
-    return f"{RECOVERY_IMAGE_REPOSITORY}:{digest}"
+    local_ref = f"desktop-pc24x7-worker-pool-recovery:sha256-{digest}"
 
-
-def _verified_running_image_reference(container: dict[str, Any]) -> str:
-    image_id = _running_image_id(container)
-    image_ref = _running_image_reference(container)
-
-    try:
-        actual = _image_id_for_reference(
-            image_ref,
-            failure_reason="worker_pool_running_image_reference_missing",
-        )
-    except ReconcileError as exc:
-        if str(exc) != "worker_pool_running_image_reference_missing":
-            raise
-    else:
-        if actual == image_id:
-            return image_ref
-
-    recovery_ref = _recovery_image_reference(image_id)
-    try:
-        recovery_actual = _image_id_for_reference(
-            recovery_ref,
-            failure_reason="worker_pool_recovery_image_reference_missing",
-        )
-    except ReconcileError as exc:
-        if str(exc) != "worker_pool_recovery_image_reference_missing":
-            raise
-        _docker(
-            ["image", "tag", image_id, recovery_ref],
-            failure_reason="worker_pool_recovery_image_tag_failed",
-        )
-        recovery_actual = _image_id_for_reference(
-            recovery_ref,
-            failure_reason="worker_pool_recovery_image_reference_verify_failed",
-        )
-
-    if recovery_actual != image_id:
-        raise ReconcileError("worker_pool_recovery_image_reference_conflict")
-    return recovery_ref
+    source_image_id = digest
+    _docker(
+        ["image", "tag", source_image_id, local_ref],
+        failure_reason="worker_pool_image_tag_failed",
+    )
+    readback = _docker(
+        ["image", "inspect", local_ref, "--format", "{{.Id}}"],
+        failure_reason="worker_pool_image_tag_readback_failed",
+    ).strip().lower()
+    if readback != image_id:
+        raise ReconcileError("worker_pool_image_tag_readback_mismatch")
+    return local_ref
 
 
 def _rules_sha(container: dict[str, Any]) -> str:
@@ -408,12 +351,10 @@ def _recreate_service(
     if not project:
         raise ReconcileError("worker_pool_compose_identity_missing")
 
-    image_ref = _verified_running_image_reference(container)
-
     process_env = os.environ.copy()
     process_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] = str(token_path)
     process_env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] = _rules_sha(container)
-    process_env["CODEX_WORKER_POOL_RUNNING_IMAGE"] = image_ref
+    process_env["CODEX_WORKER_POOL_RUNNING_IMAGE"] = _compose_image_reference(container)
 
     _docker(
         [
