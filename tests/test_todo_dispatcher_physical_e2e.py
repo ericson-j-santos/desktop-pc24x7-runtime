@@ -139,7 +139,7 @@ def test_physical_workflow_is_sha_pinned_and_governed() -> None:
     assert "scripts/progress_watchdog.py" in workflow
     assert "cancelWorkflowRun" in workflow
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow
-    assert "artifacts\\todo-dispatcher-physical-e2e\\evidence.json" in workflow
+    assert "artifacts/todo-dispatcher-physical-e2e/evidence.json" in workflow
     assert "push:" in workflow
     assert "- main" in workflow
     assert "python scripts/todo_dispatcher_physical_e2e.py" not in workflow
