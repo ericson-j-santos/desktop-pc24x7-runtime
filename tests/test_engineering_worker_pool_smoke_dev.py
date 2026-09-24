@@ -244,6 +244,11 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert '"--risk", "2"' in workflow
     assert "ae9b681b6cbe5c6e0c6c82b187b3245c0749118f" in workflow
     assert "python scripts/engineering_worker_pool_smoke_dev.py" not in workflow
+    assert "cancel-in-progress: true" in workflow
+    assert "name: Ensure dedicated Desktop runner labels" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime]" in workflow
+    assert "--non-interactive-auth" in workflow
+    assert "needs: prepare_runner" in workflow
 
 
 

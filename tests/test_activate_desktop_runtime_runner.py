@@ -90,11 +90,49 @@ def test_noninteractive_mode_fails_closed_before_browser_auth() -> None:
     assert "if not allow_interactive:" in text
 
 
-def test_registration_repair_policy_detects_missing_or_label_mismatch() -> None:
-    assert m.should_repair_registration({"present": False, "labels_ok": False}, True) is True
-    assert m.should_repair_registration({"present": True, "labels_ok": False}, True) is True
-    assert m.should_repair_registration({"present": True, "labels_ok": True}, True) is False
-    assert m.should_repair_registration({"present": False, "labels_ok": False}, False) is False
+def test_registration_and_label_repair_policies_are_separated() -> None:
+    missing = {"present": False, "labels_ok": False}
+    drifted = {"present": True, "labels_ok": False}
+    healthy = {"present": True, "labels_ok": True}
+
+    assert m.should_repair_registration(missing, True) is True
+    assert m.should_repair_registration(drifted, True) is False
+    assert m.should_repair_labels(drifted, True) is True
+    assert m.should_repair_labels(healthy, True) is False
+    assert m.should_repair_labels(drifted, False) is False
+
+
+def test_label_repair_adds_only_missing_custom_label_without_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, list[str]]] = []
+    registry = {
+        "present": True,
+        "id": 42,
+        "labels": ["self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime"],
+        "labels_ok": False,
+    }
+
+    monkeypatch.setattr(
+        m,
+        "request_runner_labels",
+        lambda gh, runner_id, labels: calls.append((runner_id, labels)) or True,
+    )
+    monkeypatch.setattr(
+        m,
+        "runner_registry_snapshot",
+        lambda gh: {
+            **registry,
+            "labels": [*registry["labels"], "runtime-dev"],
+            "labels_ok": True,
+        },
+    )
+
+    result = m.repair_runner_labels(Path("gh"), registry, allow_interactive_auth=False)
+
+    assert result["repaired"] is True
+    assert result["added_labels"] == ["runtime-dev"]
+    assert calls == [(42, ["runtime-dev"])]
 
 
 def test_registration_token_failure_does_not_mutate_runner(

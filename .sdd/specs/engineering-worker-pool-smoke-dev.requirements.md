@@ -57,12 +57,21 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 24. O ativador canônico do runner deve registrar e validar a mesma label
     `runtime-dev` exigida pelo workflow; registro presente com labels divergentes
     deve ser reparado antes de declarar `runtime_active`.
+25. Drift de labels em runner já registrado deve ser corrigido in-place pela API
+    de labels, sem parar/re-registrar o listener durante um job ativo.
+26. O workflow deve executar um preflight no conjunto estável de labels
+    `self-hosted,Windows,X64,pc24x7,desktop-runtime` antes do smoke que exige
+    `runtime-dev`.
+27. Nova revisão do PR deve cancelar execução física obsoleta do SHA anterior para
+    impedir fila indefinida por `concurrency` e validar somente o HEAD vigente.
 
 ## Critérios de aceite
 
 - testes positivos e negativos verdes no CI do SHA da PR;
 - smoke físico pré-merge verde no SHA do PR para mudanças do contrato/runtime;
 - ativação/reparo do runner comprova `runtime-dev` no registro antes do smoke;
+- drift de `runtime-dev` é reparado sem reiniciar o runner e o smoke depende do preflight;
+- execução obsoleta do SHA anterior não bloqueia o HEAD atual;
 - contrato estático comprova presença de Session Launcher + Command Gateway e
   ausência de invocação direta do adaptador;
 - bootstrap físico retorna `SESSION_LAUNCH_OK`, `state_validated=true` e HEAD
