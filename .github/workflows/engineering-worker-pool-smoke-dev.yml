@@ -7,7 +7,10 @@ on:
     paths:
       - .github/workflows/engineering-worker-pool-smoke-dev.yml
       - scripts/engineering_worker_pool_smoke_dev.py
+      - scripts/engineering_worker_pool_auth_reconcile_dev.py
+      - runtime/engineering-worker-pool-recovery.compose.yml
       - .sdd/specs/engineering-worker-pool-smoke-dev.requirements.md
+      - .sdd/specs/engineering-worker-pool-auth-reconcile-dev.requirements.md
   workflow_dispatch:
     inputs:
       worker_pool_sha:
