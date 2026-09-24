@@ -42,7 +42,7 @@ jobs:
   prepare_runner:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Ensure dedicated Desktop runner labels
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime]
+    runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 10
     env:
       RULES_SHA: ac2297988651f41ab03469808e41f83496e9c58f
@@ -55,6 +55,13 @@ jobs:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Assert exact Desktop bootstrap host
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") {
+            throw "DESKTOP_BOOTSTRAP_HOST_MISMATCH"
+          }
 
       - name: Checkout canonical operational rules exact SHA
         uses: actions/checkout@v4

@@ -59,9 +59,11 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
     deve ser reparado antes de declarar `runtime_active`.
 25. Drift de labels em runner já registrado deve ser corrigido in-place pela API
     de labels, sem parar/re-registrar o listener durante um job ativo.
-26. O workflow deve executar um preflight no conjunto estável de labels
-    `self-hosted,Windows,X64,pc24x7,desktop-runtime` antes do smoke que exige
-    `runtime-dev`.
+26. O job de preflight que repara o runner deve ser elegível somente pelas labels
+    automáticas imutáveis `self-hosted,Windows,X64`; nenhuma label customizada
+    que ele próprio possa reparar (`pc24x7`, `desktop-runtime`, `runtime-dev`)
+    pode ser requisito de agendamento. Antes de Session Launcher/Gateway, o job
+    deve validar `COMPUTERNAME=DESKTOP-PDQK954` e falhar fechado em outro host.
 27. Nova revisão do PR deve cancelar execução física obsoleta do SHA anterior para
     impedir fila indefinida por `concurrency` e validar somente o HEAD vigente.
 28. O reparo de labels deve executar `session_launcher.py`, exigir
@@ -73,8 +75,10 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 - testes positivos e negativos verdes no CI do SHA da PR;
 - smoke físico pré-merge verde no SHA do PR para mudanças do contrato/runtime;
 - ativação/reparo do runner comprova `runtime-dev` no registro antes do smoke;
-- drift de `runtime-dev` é reparado sem reiniciar o runner e o smoke depende do preflight;
-- o preflight de reparo de labels também passa por Session Launcher + Command Gateway;
+- drift de labels customizadas é reparável sem reiniciar o runner e sem bloquear o
+  próprio preflight por dependência circular de labels;
+- o preflight usa somente `self-hosted,Windows,X64`, valida o host exato antes
+  de qualquer bootstrap/mutação e também passa por Session Launcher + Command Gateway;
 - execução obsoleta do SHA anterior não bloqueia o HEAD atual;
 - contrato estático comprova presença de Session Launcher + Command Gateway e
   ausência de invocação direta do adaptador;
