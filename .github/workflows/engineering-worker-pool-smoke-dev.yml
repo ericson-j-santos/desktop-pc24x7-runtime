@@ -128,6 +128,7 @@ jobs:
             "--expected-worker-pool-sha", $env:WORKER_POOL_SHA,
             "--worker-pool-root", $workerRoot,
             "--correlation-id", $env:CORRELATION_ID,
+            "--repair-auth-bind",
             "--output", $env:EVIDENCE_REL
           )
           & python $gateway @gatewayArgs
