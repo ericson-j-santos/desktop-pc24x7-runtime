@@ -385,3 +385,118 @@ jobs:
               repo: context.repo.repo,
               run_id: Number(process.env.TARGET_RUN_ID),
             });
+
+  physical_runner_watchdog:
+    needs: prepare_runner
+    name: Physical runner queue watchdog
+    runs-on: windows-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+    env:
+      RULES_SHA: 5d1f603241dde37a597d2b7bdc5e07425db7b451
+      TARGET_RUN_ID: ${{ github.run_id }}
+      TARGET_JOB_NAME: TODO dispatcher physical E2E on Desktop
+      STALL_AFTER_SECONDS: "60"
+      CORRELATION_ID: todo-dispatcher-physical-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout canonical progress watchdog
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Observe physical runner pickup
+        id: observe
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
+            const runId = Number(process.env.TARGET_RUN_ID);
+            if (!Number.isInteger(runId) || runId <= 0) {
+              core.setFailed('PHYSICAL_RUN_ID_INVALID');
+              return;
+            }
+
+            const progressAnchor = new Date();
+
+            while (true) {
+              const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+              });
+              const targetJob = jobsResponse.data.jobs.find(
+                (job) => job.name === process.env.TARGET_JOB_NAME,
+              ) || null;
+
+              if (
+                targetJob &&
+                (targetJob.status !== 'queued' || Number(targetJob.runner_id || 0) > 0)
+              ) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: String(targetJob.id),
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: targetJob.status === 'completed' ? 'completed' : 'running',
+                  last_material_progress_at: new Date().toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              const noProgressMs = Date.now() - progressAnchor.getTime();
+              if (noProgressMs >= stallMs) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: targetJob ? String(targetJob.id) : 'physical-runner-job-not-created',
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: 'queued',
+                  last_material_progress_at: progressAnchor.toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              await sleep(Math.min(15000, stallMs - noProgressMs));
+            }
+
+      - name: Evaluate canonical progress watchdog
+        id: watchdog
+        continue-on-error: true
+        shell: pwsh
+        run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
+
+      - name: Fail closed and cancel stalled physical run
+        if: steps.watchdog.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('progress-watchdog-output.json')) {
+              core.setFailed('PROGRESS_WATCHDOG_EVIDENCE_MISSING');
+              return;
+            }
+            const decision = JSON.parse(fs.readFileSync('progress-watchdog-output.json', 'utf8'));
+            if (decision.decision !== 'block') {
+              core.setFailed(`PROGRESS_WATCHDOG_INVALID_DECISION:${decision.decision || 'missing'}`);
+              return;
+            }
+            core.setFailed(
+              `SELF_HOSTED_RUNNER_UNAVAILABLE: sem progresso material por ${decision.no_progress_seconds}s`,
+            );
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.TARGET_RUN_ID),
+            });
