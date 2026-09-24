@@ -85,9 +85,10 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 - o preflight usa somente `self-hosted,Windows,X64`, valida o host exato antes
   de qualquer bootstrap/mutação e também passa por Session Launcher + Command Gateway;
 - execução obsoleta do SHA anterior não bloqueia o HEAD atual;
-- indisponibilidade do runner não mantém o CI indefinidamente em `queued`: após
-  300 segundos sem progresso material, o run físico é cancelado e o gate falha
-  fechado com evidência do watchdog canônico;
+- indisponibilidade do runner não torna o workflow de CI hospedado vermelho nem
+  mantém o E2E físico indefinidamente em `queued`: o watchdog pertence ao próprio
+  workflow físico e, após 300 segundos sem progresso material, cancela esse run e
+  mantém o gate físico não aprovado com evidência canônica;
 - contrato estático comprova presença de Session Launcher + Command Gateway e
   ausência de invocação direta do adaptador;
 - bootstrap físico retorna `SESSION_LAUNCH_OK`, `state_validated=true` e HEAD
