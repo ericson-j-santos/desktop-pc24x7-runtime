@@ -1,18 +1,14 @@
 name: Ollama Local Benchmark DEV
 
 on:
-  push:
-    branches:
-      - chore/ollama-local-benchmark-20260924
-    paths:
-      - .github/workflows/ollama-local-benchmark-dev.yml
-      - scripts/ollama_local_benchmark.py
   pull_request:
     branches:
       - main
     paths:
       - .github/workflows/ollama-local-benchmark-dev.yml
       - scripts/ollama_local_benchmark.py
+      - tests/test_ollama_benchmark_workflow.py
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -23,11 +19,12 @@ concurrency:
 
 jobs:
   benchmark:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Benchmark local Ollama on Desktop PC24x7
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 8
     env:
-      RULES_SHA: ac2297988651f41ab03469808e41f83496e9c58f
+      RULES_SHA: 5af7b5ab6e31c24744176abd774855168c55953f
       TARGET_REPO: C:\\dev\\reqsys-v2-enterprise-real
       MODEL: gemma4:26b-q8-code
       CORRELATION_ID: ollama-local-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
@@ -123,3 +120,124 @@ jobs:
           )
           & python $gateway @gatewayArgs
           exit $LASTEXITCODE
+
+  physical_runner_watchdog:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Physical runner queue watchdog
+    runs-on: windows-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+      contents: read
+    env:
+      RULES_SHA: 5af7b5ab6e31c24744176abd774855168c55953f
+      TARGET_RUN_ID: ${{ github.run_id }}
+      TARGET_JOB_NAME: Benchmark local Ollama on Desktop PC24x7
+      STALL_AFTER_SECONDS: "300"
+      CORRELATION_ID: ollama-benchmark-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout canonical progress watchdog
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Observe physical runner pickup
+        id: observe
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
+            const runId = Number(process.env.TARGET_RUN_ID);
+            if (!Number.isInteger(runId) || runId <= 0) {
+              core.setFailed('PHYSICAL_RUN_ID_INVALID');
+              return;
+            }
+
+            const runResponse = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            const progressAnchor = new Date(runResponse.data.created_at || Date.now());
+
+            while (true) {
+              const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+              });
+              const targetJob = jobsResponse.data.jobs.find(
+                (job) => job.name === process.env.TARGET_JOB_NAME,
+              ) || null;
+
+              if (
+                targetJob &&
+                (targetJob.status !== 'queued' || Number(targetJob.runner_id || 0) > 0)
+              ) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: String(targetJob.id),
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: targetJob.status === 'completed' ? 'completed' : 'running',
+                  last_material_progress_at: new Date().toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              const noProgressMs = Date.now() - progressAnchor.getTime();
+              if (noProgressMs >= stallMs) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: targetJob ? String(targetJob.id) : 'physical-runner-job-not-created',
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: 'queued',
+                  last_material_progress_at: progressAnchor.toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              await sleep(Math.min(15000, stallMs - noProgressMs));
+            }
+
+      - name: Evaluate canonical progress watchdog
+        id: watchdog
+        continue-on-error: true
+        shell: pwsh
+        run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
+
+      - name: Fail closed and cancel stalled physical run
+        if: steps.watchdog.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('progress-watchdog-output.json')) {
+              core.setFailed('PROGRESS_WATCHDOG_EVIDENCE_MISSING');
+              return;
+            }
+            const decision = JSON.parse(fs.readFileSync('progress-watchdog-output.json', 'utf8'));
+            if (decision.decision !== 'block') {
+              core.setFailed(`PROGRESS_WATCHDOG_INVALID_DECISION:${decision.decision || 'missing'}`);
+              return;
+            }
+
+            core.setFailed(
+              `SELF_HOSTED_RUNNER_UNAVAILABLE: sem progresso material por ${decision.no_progress_seconds}s`,
+            );
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.TARGET_RUN_ID),
+            });
