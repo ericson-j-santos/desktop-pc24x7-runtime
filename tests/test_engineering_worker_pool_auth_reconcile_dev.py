@@ -104,6 +104,9 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
     canonical = _canonical_compose(tmp_path)
     seen: list[tuple[list[str], dict[str, str] | None]] = []
 
+    image_id = "sha256:" + ("d" * 64)
+    expected_ref = "desktop-pc24x7-worker-pool-recovery:sha256-" + ("d" * 64)
+
     def fake_docker(
         args: list[str],
         *,
@@ -111,6 +114,14 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
         timeout: int = 60,
         failure_reason: str = "worker_pool_docker_command_failed",
     ) -> str:
+        if args[:2] == ["image", "tag"]:
+            assert failure_reason == "worker_pool_image_tag_failed"
+            assert args == ["image", "tag", image_id, expected_ref]
+            return ""
+        if args[:2] == ["image", "inspect"]:
+            assert failure_reason == "worker_pool_image_tag_readback_failed"
+            assert args == ["image", "inspect", expected_ref, "--format", "{{.Id}}"]
+            return image_id + "\n"
         assert failure_reason == "worker_pool_service_recreate_failed"
         seen.append((args, env))
         return ""
@@ -141,7 +152,7 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
 
     assert env is not None
     assert env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] == str(token_path)
-    assert env["CODEX_WORKER_POOL_RUNNING_IMAGE"] == "sha256:" + ("d" * 64)
+    assert env["CODEX_WORKER_POOL_RUNNING_IMAGE"] == expected_ref
     assert env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] == "a" * 40
 
 
@@ -166,6 +177,10 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
             "worker_pool_compose_configuration_invalid",
         ),
         ("Access is denied", "worker_pool_docker_permission_denied"),
+        (
+            "invalid reference format",
+            "worker_pool_compose_image_reference_invalid",
+        ),
         ("unexpected compose failure", "worker_pool_service_recreate_failed"),
     ],
 )
@@ -198,6 +213,71 @@ def test_docker_uses_sanitized_compose_failure_reason(
         )
 
     assert secret not in str(exc.value)
+
+
+def test_compose_image_reference_tags_exact_image_id_and_validates_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_id = "sha256:" + ("e" * 64)
+    expected_ref = "desktop-pc24x7-worker-pool-recovery:sha256-" + ("e" * 64)
+    calls: list[tuple[list[str], str]] = []
+
+    def fake_docker(
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        timeout: int = 60,
+        failure_reason: str = "worker_pool_docker_command_failed",
+    ) -> str:
+        calls.append((args, failure_reason))
+        if args[:2] == ["image", "inspect"]:
+            return image_id + "\n"
+        return ""
+
+    monkeypatch.setattr(module, "_docker", fake_docker)
+
+    container = _container()
+    container["Image"] = image_id
+    actual = module._compose_image_reference(container)
+
+    assert actual == expected_ref
+    assert calls == [
+        (
+            ["image", "tag", image_id, expected_ref],
+            "worker_pool_image_tag_failed",
+        ),
+        (
+            ["image", "inspect", expected_ref, "--format", "{{.Id}}"],
+            "worker_pool_image_tag_readback_failed",
+        ),
+    ]
+
+
+def test_compose_image_reference_fails_closed_on_readback_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_id = "sha256:" + ("f" * 64)
+
+    def fake_docker(
+        args: list[str],
+        *,
+        env: dict[str, str] | None = None,
+        timeout: int = 60,
+        failure_reason: str = "worker_pool_docker_command_failed",
+    ) -> str:
+        if args[:2] == ["image", "inspect"]:
+            return "sha256:" + ("a" * 64)
+        return ""
+
+    monkeypatch.setattr(module, "_docker", fake_docker)
+    container = _container()
+    container["Image"] = image_id
+
+    with pytest.raises(
+        module.ReconcileError,
+        match="worker_pool_image_tag_readback_mismatch",
+    ):
+        module._compose_image_reference(container)
 
 
 def test_reconcile_recreates_only_when_401_and_bind_is_stale(
