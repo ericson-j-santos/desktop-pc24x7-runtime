@@ -20,26 +20,27 @@ O runtime contém somente o adaptador host-specific e o workflow de execução f
 
 ## Requisitos
 
-1. Executar somente no runner dedicado do Desktop:
+1. Antes do E2E, adquirir o runner Windows genérico no Desktop e executar, por sessão + Command Gateway, `scripts/activate_desktop_runtime_runner.py` para restaurar o contrato do runner dedicado.
+3. Executar o E2E somente no runner dedicado do Desktop:
    `self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev`.
 2. Validar `COMPUTERNAME=DESKTOP-PDQK954` e runner esperado.
-3. Fazer checkout do runtime no SHA exato da execução.
-4. Fazer checkout das regras no SHA imutável acima.
-5. Inicializar sessão com `session_launcher.py` e exigir
+4. Fazer checkout do runtime no SHA exato da execução.
+5. Fazer checkout das regras no SHA imutável acima.
+6. Inicializar sessão com `session_launcher.py` e exigir
    `SESSION_LAUNCH_OK` + `state_validated=true`.
-6. Executar o adaptador somente por `command_gateway.py`.
-7. Instalar dependência Python somente em `.tmp` da sessão governada.
-8. Validar no harness:
+7. Executar o adaptador somente por `command_gateway.py`.
+8. Instalar dependência Python somente em `.tmp` da sessão governada.
+9. Validar no harness:
    - P0 selecionado;
    - P2 não despachado no mesmo ciclo;
    - uma única continuação para o caso positivo;
    - replay sem nova continuação;
    - controle negativo sem continuação;
    - leitura independente do evento e da continuação.
-9. Publicar artifact sanitizado sem token, segredo ou caminho de credencial.
-10. Não executar deploy, produção, reboot ou mudança administrativa.
-11. Se o runner não adquirir o job em 60 segundos, usar o watchdog canônico,
-    falhar fechado e cancelar a execução estagnada.
+10. Publicar artifact sanitizado sem token, segredo ou caminho de credencial.
+11. Não executar deploy, produção, reboot ou mudança administrativa.
+12. Usar watchdog canônico de 60 segundos para a aquisição do runner genérico de reparo.
+13. Após o reparo, usar um segundo watchdog de 60 segundos para a aquisição do runner dedicado; falhar fechado e cancelar a execução estagnada.
 
 ## Critério de aceite
 
