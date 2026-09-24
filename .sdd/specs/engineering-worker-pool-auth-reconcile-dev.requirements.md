@@ -41,7 +41,9 @@ host, sem rotacionar segredo e sem ampliar o escopo do runtime.
     somente um override mínimo de `image`. Para compatibilidade com Docker
     Compose, o image ID `sha256` já em execução deve receber um tag local
     determinístico e esse tag só pode ser usado após readback comprovar que ele
-    resolve exatamente para o mesmo image ID.
+    resolve exatamente para o mesmo image ID. A origem passada a `docker image tag`
+    deve usar o ID hexadecimal sem o prefixo `sha256:`, mantendo o image ID
+    completo como valor de readback/validação.
 13. Após recriar, aguardar readiness com timeout limitado e exigir
     `/health=200` + `/v1/snapshot=200` autenticado.
 14. Erros Docker Compose devem ser convertidos em reason codes sanitizados
