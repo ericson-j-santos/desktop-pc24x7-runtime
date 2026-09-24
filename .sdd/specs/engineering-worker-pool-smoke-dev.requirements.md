@@ -40,6 +40,14 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
     Gateway é evidência inválida e deve falhar no teste de contrato do workflow.
 17. O caminho de evidência repassado ao harness do Worker Pool deve ser absoluto
     para permanecer invariável quando o harness usar `cwd` próprio.
+18. Se e somente se o harness retornar `worker_pool_http_401`, o adaptador deve
+    executar a reconciliação de autenticação DEV do runtime e repetir o smoke uma vez.
+19. A reconciliação não pode criar, substituir ou rotacionar segredo; somente um
+    stale bind comprovado por comparação host/container pode recriar o serviço.
+20. Após a reconciliação, a repetição do smoke só pode ocorrer após leitura
+    autenticada independente do runtime; qualquer outra causa deve falhar fechado.
+21. A evidência final deve registrar `auth_reconciled`, `service_recreated` e
+    `smoke_attempts`, sem registrar token nem caminho sensível.
 
 ## Critérios de aceite
 
@@ -52,6 +60,8 @@ genérica do Worker Pool e adaptação host-specific do Desktop.
 - execução no runner dedicado concluída no SHA vigente do runtime;
 - Worker Pool executado no SHA imutável informado;
 - artifact sanitizado contém os dois SHAs, correlation_id e resultado terminal;
+- em `401` por stale bind, a recuperação preserva o mesmo token/imagem/volume,
+  comprova leitura autenticada e o smoke é repetido no mesmo SHA;
 - `secrets_exposed=false`, `token_path_exposed=false`,
   `production_touched=false`, `deploy_executed=false` e
   `reboot_executed=false`;

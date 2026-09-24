@@ -30,6 +30,7 @@ POOL_HOST_IP = "127.0.0.1"
 POOL_HOST_PORT = "8097"
 POOL_CONTAINER_PORT = "8097/tcp"
 TOKEN_DESTINATION = "/run/secrets/codex_worker_pool_api_token"
+AUTH_RECONCILE_SCRIPT = ROOT / "scripts" / "engineering_worker_pool_auth_reconcile_dev.py"
 
 
 class RuntimeSmokeError(RuntimeError):
@@ -201,6 +202,69 @@ def validate_worker_pool_evidence(
             raise RuntimeSmokeError(f"worker_pool_smoke_evidence_mismatch_{key}")
 
 
+def invoke_worker_pool_harness(
+    command: list[str], worker_pool_root: Path, child_evidence: Path
+) -> tuple[subprocess.CompletedProcess[str], dict[str, Any]]:
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=worker_pool_root,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=90,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeSmokeError("worker_pool_smoke_process_failed") from exc
+    return completed, load_evidence(child_evidence)
+
+
+def run_auth_reconcile(output: Path) -> dict[str, Any]:
+    if not AUTH_RECONCILE_SCRIPT.is_file():
+        raise RuntimeSmokeError("worker_pool_auth_reconcile_script_missing")
+
+    evidence = output.with_name("worker-pool-auth-reconcile.json")
+    command = [
+        sys.executable,
+        str(AUTH_RECONCILE_SCRIPT),
+        "--output",
+        str(evidence),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=150,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeSmokeError("worker_pool_auth_reconcile_process_failed") from exc
+
+    payload = load_evidence(evidence)
+    if completed.returncode != 0:
+        reason = str(payload.get("reason") or "worker_pool_auth_reconcile_failed")
+        raise RuntimeSmokeError(reason[:160])
+
+    expected = {
+        "result": "WORKER_POOL_AUTH_RECONCILE_PASSED",
+        "existing_token_reused": True,
+        "token_rotated": False,
+        "authenticated_readback": True,
+        "secret_value_exposed": False,
+        "production_touched": False,
+        "deploy_executed": False,
+        "reboot_executed": False,
+    }
+    for key, value in expected.items():
+        if payload.get(key) != value:
+            raise RuntimeSmokeError(
+                f"worker_pool_auth_reconcile_evidence_mismatch_{key}"
+            )
+    return payload
+
+
 def run_runtime_smoke(
     *,
     expected_runtime_sha: str,
@@ -254,22 +318,29 @@ def run_runtime_smoke(
         str(child_evidence),
     ]
 
-    try:
-        completed = subprocess.run(
-            command,
-            cwd=worker_pool_root,
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=90,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        raise RuntimeSmokeError("worker_pool_smoke_process_failed") from exc
+    completed, payload = invoke_worker_pool_harness(
+        command, worker_pool_root, child_evidence
+    )
+    auth_reconciled = False
+    service_recreated = False
+    smoke_attempts = 1
 
-    payload = load_evidence(child_evidence)
     if completed.returncode != 0:
         reason = str(payload.get("reason") or "worker_pool_smoke_failed")
-        raise RuntimeSmokeError(reason[:160])
+        if reason != "worker_pool_http_401":
+            raise RuntimeSmokeError(reason[:160])
+
+        reconcile = run_auth_reconcile(output)
+        auth_reconciled = True
+        service_recreated = reconcile.get("service_recreated") is True
+        smoke_attempts = 2
+
+        completed, payload = invoke_worker_pool_harness(
+            command, worker_pool_root, child_evidence
+        )
+        if completed.returncode != 0:
+            retry_reason = str(payload.get("reason") or "worker_pool_smoke_failed")
+            raise RuntimeSmokeError(retry_reason[:160])
 
     validate_worker_pool_evidence(payload, expected_worker_pool_sha)
 
@@ -288,6 +359,9 @@ def run_runtime_smoke(
         "leased_by": payload["leased_by"],
         "replay_created": payload["replay_created"],
         "independent_readback": payload["independent_readback"],
+        "auth_reconciled": auth_reconciled,
+        "service_recreated": service_recreated,
+        "smoke_attempts": smoke_attempts,
         "token_path_exposed": False,
         "secrets_exposed": False,
         "production_touched": False,
