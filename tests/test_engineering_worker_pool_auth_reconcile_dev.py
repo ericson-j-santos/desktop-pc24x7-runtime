@@ -116,7 +116,7 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
     ) -> str:
         if args[:2] == ["image", "tag"]:
             assert failure_reason == "worker_pool_image_tag_failed"
-            assert args == ["image", "tag", image_id, expected_ref]
+            assert args == ["image", "tag", "d" * 64, expected_ref]
             return ""
         if args[:2] == ["image", "inspect"]:
             assert failure_reason == "worker_pool_image_tag_readback_failed"
@@ -243,7 +243,7 @@ def test_compose_image_reference_tags_exact_image_id_and_validates_readback(
     assert actual == expected_ref
     assert calls == [
         (
-            ["image", "tag", image_id, expected_ref],
+            ["image", "tag", "e" * 64, expected_ref],
             "worker_pool_image_tag_failed",
         ),
         (

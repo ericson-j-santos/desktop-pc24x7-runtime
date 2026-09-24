@@ -277,8 +277,9 @@ def _compose_image_reference(container: dict[str, Any]) -> str:
     digest = image_id.removeprefix("sha256:")
     local_ref = f"desktop-pc24x7-worker-pool-recovery:sha256-{digest}"
 
+    source_image_id = digest
     _docker(
-        ["image", "tag", image_id, local_ref],
+        ["image", "tag", source_image_id, local_ref],
         failure_reason="worker_pool_image_tag_failed",
     )
     readback = _docker(
