@@ -259,22 +259,29 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert "python scripts/activate_desktop_runtime_runner.py" not in workflow
 
 
-def test_ci_fails_fast_when_physical_runner_never_picks_up() -> None:
-    ci = (
-        Path(__file__).resolve().parents[1]
+def test_physical_workflow_owns_queue_watchdog_without_coupling_unit_ci() -> None:
+    root = Path(__file__).resolve().parents[1]
+    physical = (
+        root
         / ".github"
         / "workflows"
-        / "ci.yml"
+        / "engineering-worker-pool-smoke-dev.yml"
     ).read_text(encoding="utf-8")
+    ci = (root / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
 
-    assert "name: Physical runner queue watchdog" in ci
-    assert 'STALL_AFTER_SECONDS: "300"' in ci
-    assert "scripts/progress_watchdog.py" in ci
-    assert "actions: write" in ci
-    assert "runner_id" in ci
-    assert "cancelWorkflowRun" in ci
-    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in ci
-    assert "alternative_route_available: false" in ci
+    assert "name: Physical runner queue watchdog" in physical
+    assert 'STALL_AFTER_SECONDS: "300"' in physical
+    assert "scripts/progress_watchdog.py" in physical
+    assert "actions: write" in physical
+    assert "TARGET_RUN_ID: ${{ github.run_id }}" in physical
+    assert "getWorkflowRun" in physical
+    assert "listJobsForWorkflowRun" in physical
+    assert "runner_id" in physical
+    assert "cancelWorkflowRun" in physical
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in physical
+    assert "alternative_route_available: false" in physical
+    assert "name: Physical runner queue watchdog" not in ci
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" not in ci
 
 
 
