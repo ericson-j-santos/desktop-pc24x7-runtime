@@ -411,3 +411,50 @@ def test_stop_runner_terminates_only_exact_governed_listener(monkeypatch, tmp_pa
     assert result["stopped"] is True
     assert result["previous_listener_pid"] == 7777
     assert result["termination_scope"] == "exact_runner_home"
+
+
+def test_cycle_recovers_runner_even_when_rdc_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runner_home = make_runner_home(tmp_path)
+    release = tmp_path / "release"
+    scripts = release / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / m.RDC_RECOVERY_SCRIPT).write_text("# stub\n", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m, "validate_runner_home", lambda path: runner_home)
+    monkeypatch.setattr(
+        m,
+        "start_runner",
+        lambda *args, **kwargs: {
+            "status": "recovered",
+            "started": True,
+            "pickup_required": True,
+        },
+    )
+    monkeypatch.setattr(
+        m,
+        "recover_rdc",
+        lambda **kwargs: (_ for _ in ()).throw(m.WatchdogError("rdc_unavailable")),
+    )
+
+    payload = m.cycle(
+        {
+            "runtime_root": str(runtime),
+            "release_root": str(release),
+            "runner_home": str(runner_home),
+            "python_executable": "python",
+            "source_sha": "a" * 40,
+        }
+    )
+
+    assert payload["runner_recovery_ok"] is True
+    assert payload["github_runner"]["status"] == "recovered"
+    assert payload["rdc_recovery_ok"] is False
+    assert payload["rdc"]["status"] == "failed"
+    assert payload["partial"] is True
+    assert payload["github_pickup_required"] is True
+    assert payload["ok"] is False
