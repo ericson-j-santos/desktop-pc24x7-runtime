@@ -146,6 +146,7 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
         m.WATCHDOG_UAC_SCRIPT,
         m.RDC_RECOVERY_SCRIPT,
         m.RUNNER_BOOTSTRAP_SCRIPT,
+        m.READBACK_SCRIPT,
     ):
         (scripts / name).write_text("# stub\n", encoding="utf-8")
     runtime = tmp_path / "runtime"
@@ -288,3 +289,187 @@ def test_watchdog_metadata_uses_runtime_owned_path(monkeypatch, tmp_path: Path) 
     assert m.watchdog_runtime_metadata() == (
         tmp_path / "DesktopPC24x7" / "ControlPlaneWatchdog" / "metadata.json"
     )
+
+
+def test_recover_runner_accepts_local_listener_partial_until_independent_pickup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    release = tmp_path / "release"
+    scripts = release / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / m.RUNNER_BOOTSTRAP_SCRIPT).write_text("# stub\n", encoding="utf-8")
+    payload = {
+        "ok": False,
+        "state": "listener_running_pickup_required",
+        "local_recovery_ok": True,
+        "github_pickup_required": True,
+        "github_pickup_proven": False,
+        "runner_running": True,
+        "runner_registry_present": None,
+        "runner_registry_status": "unknown",
+        "runner_registry_labels_ok": None,
+        "runner_registered_now": False,
+        "runner_started_now": True,
+    }
+    monkeypatch.setattr(
+        m.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv,
+            3,
+            stdout=json.dumps(payload) + "\n",
+            stderr="",
+        ),
+    )
+
+    result = m._recover_runner(
+        {
+            "release_root": str(release),
+            "source_sha": "a" * 40,
+        }
+    )
+
+    assert result["bootstrap_state"] == "listener_running_pickup_required"
+    assert result["local_recovery_ok"] is True
+    assert result["github_pickup_required"] is True
+    assert result["github_pickup_proven"] is False
+    assert result["runner_running"] is True
+
+
+def test_recover_control_plane_recovers_runner_without_uac_or_rdc_dependency(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "watchdog"
+    runtime.mkdir()
+    metadata_path = runtime / "metadata.json"
+    metadata_path.write_text(
+        json.dumps(
+            {
+                "runtime_root": str(runtime),
+                "release_root": str(tmp_path / "release"),
+                "runner_home": str(tmp_path / "runner"),
+                "python_executable": "python",
+                "source_sha": "a" * 40,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(m, "watchdog_runtime_metadata", lambda: metadata_path)
+
+    class FakeWatchdog:
+        @staticmethod
+        def cycle(installed):
+            return {
+                "runner_recovery_ok": True,
+                "rdc_recovery_ok": False,
+                "github_runner": {
+                    "status": "recovered",
+                    "started": True,
+                },
+            }
+
+        @staticmethod
+        def task_status():
+            return {
+                "exists": False,
+                "trigger_at_startup": False,
+            }
+
+    monkeypatch.setattr(m, "_watchdog_module", lambda installed: FakeWatchdog)
+    monkeypatch.setattr(
+        m,
+        "_activate_watchdog",
+        lambda metadata: (_ for _ in ()).throw(
+            AssertionError("UAC path must not run")
+        ),
+    )
+
+    result = m._recover_control_plane({"release_root": str(tmp_path)})
+
+    assert result["local_recovery_ok"] is True
+    assert result["github_pickup_required"] is True
+    assert result["github_pickup_proven"] is False
+    assert result["cycle"]["github_runner"]["status"] == "recovered"
+    assert result["activation"]["status"] == "persistence_pending"
+
+
+def test_process_once_publishes_sanitized_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "runtime_root": str(tmp_path),
+        "release_root": str(tmp_path / "release"),
+        "source_sha": "a" * 40,
+        "not_before": (now - timedelta(seconds=30)).isoformat(),
+    }
+    comment = gh_comment(comment_id=301, body="/desktop-runtime admin status", created=now)
+    monkeypatch.setattr(m, "fetch_comments", lambda since: [comment])
+    monkeypatch.setattr(
+        m,
+        "execute_action",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "result": {"handler": "status"},
+        },
+    )
+    published = []
+    monkeypatch.setattr(
+        m,
+        "_publish_readback",
+        lambda meta, accepted: published.append(dict(accepted))
+        or {
+            "published": True,
+            "channel": "ntfy",
+            "authoritative": False,
+        },
+    )
+
+    result = m.process_once(metadata, reference_time=now)
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert result["commands_accepted"] == 1
+    assert published[0]["comment_id"] == 301
+    assert published[0]["status"] == "completed"
+    assert state["readback"]["published"] is True
+    assert state["readback"]["authoritative"] is False
+
+
+def test_failed_command_state_does_not_persist_raw_exception_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "runtime_root": str(tmp_path),
+        "release_root": str(tmp_path / "release"),
+        "source_sha": "a" * 40,
+        "not_before": (now - timedelta(seconds=30)).isoformat(),
+    }
+    comment = gh_comment(comment_id=302, body="/desktop-runtime admin status", created=now)
+    monkeypatch.setattr(m, "fetch_comments", lambda since: [comment])
+    monkeypatch.setattr(
+        m,
+        "execute_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            RuntimeError("sensitive detail must not persist")
+        ),
+    )
+    monkeypatch.setattr(
+        m,
+        "_publish_readback",
+        lambda meta, accepted: {
+            "published": False,
+            "authoritative": False,
+        },
+    )
+
+    m.process_once(metadata, reference_time=now)
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert state["accepted"]["status"] == "failed"
+    assert state["accepted"]["error_code"] == "RuntimeError"
+    assert "sensitive detail" not in json.dumps(state)

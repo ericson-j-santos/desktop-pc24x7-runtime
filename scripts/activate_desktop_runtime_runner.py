@@ -656,6 +656,47 @@ def resolve_source_sha(repo_root: Path, explicit: str | None) -> str:
     return value.lower()
 
 
+def _base_result(
+    *,
+    host: str,
+    runner: Path,
+    source_sha: str,
+    state: str,
+    local_running: bool,
+    started_now: bool,
+    registration_performed: bool,
+    token_consumed: bool,
+    remove_token_consumed: bool,
+) -> dict[str, Any]:
+    return {
+        "ok": False,
+        "state": state,
+        "host": host,
+        "runner_home": str(runner),
+        "runner_version": RUNNER_VERSION,
+        "runner_name": RUNNER_NAME,
+        "runner_labels": RUNNER_LABELS,
+        "runner_registered_now": registration_performed,
+        "runner_started_now": started_now,
+        "runner_running": local_running,
+        "local_recovery_ok": local_running,
+        "github_pickup_required": local_running,
+        "github_pickup_proven": False,
+        "runner_scope": REPOSITORY,
+        "legacy_reqsys_runner_preserved": True,
+        "watchdog_task_changed": False,
+        "source_sha": source_sha,
+        "rdc_required": False,
+        "production_touched": False,
+        "registration_token_consumed_in_memory": token_consumed,
+        "remove_token_consumed_in_memory": remove_token_consumed,
+        "registration_token_persisted": False,
+        "registration_token_logged": False,
+        "remove_token_persisted": False,
+        "remove_token_logged": False,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--confirm", required=True)
@@ -674,16 +715,75 @@ def main() -> int:
     remove_token_consumed = False
     repair_evidence: dict[str, Any] | None = None
     label_repair_evidence: dict[str, Any] | None = None
+    restart_evidence: dict[str, Any] | None = None
     try:
         host = validate_host()
         repo_root = args.repo_root.resolve()
         source_sha = resolve_source_sha(repo_root, args.source_sha)
 
-        gh = ensure_gh()
-        ensure_gh_auth(gh, allow_interactive=not args.non_interactive_auth)
-
+        # Existing registered runners are recoverable without GitHub CLI auth.
+        # Their own .runner credentials are sufficient to start the listener;
+        # GitHub pickup remains the independent final gate.
         runner = discover_runner(args.runner_home)
-        if runner is None:
+        started_now = False
+        local_running = False
+        gh: Path | None = None
+
+        if runner is not None:
+            started_now = start_runner(runner)
+            local_running = runner_running(runner)
+            if not local_running:
+                result = _base_result(
+                    host=host,
+                    runner=runner,
+                    source_sha=source_sha,
+                    state="runner_process_not_running",
+                    local_running=False,
+                    started_now=started_now,
+                    registration_performed=False,
+                    token_consumed=False,
+                    remove_token_consumed=False,
+                )
+                emit(result)
+                return 4
+
+            try:
+                gh = ensure_gh()
+                ensure_gh_auth(
+                    gh,
+                    allow_interactive=not args.non_interactive_auth,
+                )
+            except ActivationError as exc:
+                result = _base_result(
+                    host=host,
+                    runner=runner,
+                    source_sha=source_sha,
+                    state="listener_running_pickup_required",
+                    local_running=True,
+                    started_now=started_now,
+                    registration_performed=False,
+                    token_consumed=False,
+                    remove_token_consumed=False,
+                )
+                result.update(
+                    {
+                        "github_registry_checked": False,
+                        "github_registry_error_state": exc.state,
+                        "runner_registry_present": None,
+                        "runner_registry_status": "unknown",
+                        "runner_registry_busy": None,
+                        "runner_registry_labels": [],
+                        "runner_registry_labels_ok": None,
+                    }
+                )
+                emit(result)
+                return 3
+        else:
+            gh = ensure_gh()
+            ensure_gh_auth(
+                gh,
+                allow_interactive=not args.non_interactive_auth,
+            )
             runner = (args.runner_home or default_runner_home()).resolve()
             ensure_runner_binaries(runner)
             registration_performed = register_runner(
@@ -692,6 +792,12 @@ def main() -> int:
                 allow_interactive_auth=not args.non_interactive_auth,
             )
             token_consumed = registration_performed
+
+        if gh is None:
+            raise ActivationError(
+                "github_registry_unavailable",
+                "GitHub registry client unavailable",
+            )
 
         registry = runner_registry_snapshot(gh)
         local_contract_present = runner_contract(runner)
@@ -705,6 +811,7 @@ def main() -> int:
             token_consumed = True
             remove_token_consumed = True
             registry = runner_registry_snapshot(gh)
+            local_running = False
         elif should_repair_labels(registry, local_contract_present):
             label_repair_evidence = repair_runner_labels(
                 gh,
@@ -713,10 +820,11 @@ def main() -> int:
             )
             registry = runner_registry_snapshot(gh)
 
-        started_now = start_runner(runner)
+        if not local_running:
+            started_now = start_runner(runner) or started_now
+            local_running = runner_running(runner)
+
         registry = wait_runner_registry_online(gh, timeout_seconds=8.0)
-        local_running = runner_running(runner)
-        restart_evidence: dict[str, Any] | None = None
 
         if should_restart_offline_runner(registry, local_running):
             restart_evidence = restart_runner(runner)
@@ -743,129 +851,137 @@ def main() -> int:
             state = "runtime_active"
 
         runtime_ok = state == "runtime_active"
-        result = {
-            "ok": runtime_ok,
-            "state": state,
-            "host": host,
-            "runner_home": str(runner),
-            "runner_version": RUNNER_VERSION,
-            "runner_name": RUNNER_NAME,
-            "runner_labels": RUNNER_LABELS,
-            "runner_registered_now": registration_performed,
-            "runner_started_now": started_now,
-            "runner_running": local_running,
-            "runner_restarted_offline": restart_evidence is not None,
-            "runner_registration_repaired": repair_evidence is not None,
-            "runner_labels_repaired": bool(
-                label_repair_evidence and label_repair_evidence.get("repaired")
-            ),
-            "runner_labels_added": (
-                label_repair_evidence.get("added_labels") if label_repair_evidence else []
-            ),
-            "runner_repair_previous_listener_pid": (
-                repair_evidence.get("previous_listener_pid") if repair_evidence else None
-            ),
-            "runner_restart_previous_listener_pid": (
-                restart_evidence.get("previous_listener_pid") if restart_evidence else None
-            ),
-            "runner_registry_present": bool(registry.get("present")),
-            "runner_registry_status": str(registry.get("status") or "unknown"),
-            "runner_registry_busy": bool(registry.get("busy")),
-            "runner_registry_labels": registry.get("labels") or [],
-            "runner_registry_labels_ok": bool(registry.get("labels_ok")),
-            "runner_scope": REPOSITORY,
-            "legacy_reqsys_runner_preserved": True,
-            "watchdog_task_changed": False,
-            "source_sha": source_sha,
-            "rdc_required": False,
-            "production_touched": False,
-            "registration_token_consumed_in_memory": token_consumed,
-            "remove_token_consumed_in_memory": remove_token_consumed,
-            "registration_token_persisted": False,
-            "registration_token_logged": False,
-            "remove_token_persisted": False,
-            "remove_token_logged": False,
-        }
+        result = _base_result(
+            host=host,
+            runner=runner,
+            source_sha=source_sha,
+            state=state,
+            local_running=local_running,
+            started_now=started_now,
+            registration_performed=registration_performed,
+            token_consumed=token_consumed,
+            remove_token_consumed=remove_token_consumed,
+        )
+        result.update(
+            {
+                "ok": runtime_ok,
+                "local_recovery_ok": local_running,
+                "github_registry_checked": True,
+                "github_pickup_required": not runtime_ok,
+                "github_pickup_proven": False,
+                "runner_restarted_offline": restart_evidence is not None,
+                "runner_registration_repaired": repair_evidence is not None,
+                "runner_labels_repaired": bool(
+                    label_repair_evidence and label_repair_evidence.get("repaired")
+                ),
+                "runner_labels_added": (
+                    label_repair_evidence.get("added_labels")
+                    if label_repair_evidence
+                    else []
+                ),
+                "runner_repair_previous_listener_pid": (
+                    repair_evidence.get("previous_listener_pid")
+                    if repair_evidence
+                    else None
+                ),
+                "runner_restart_previous_listener_pid": (
+                    restart_evidence.get("previous_listener_pid")
+                    if restart_evidence
+                    else None
+                ),
+                "runner_registry_present": bool(registry.get("present")),
+                "runner_registry_status": str(registry.get("status") or "unknown"),
+                "runner_registry_busy": bool(registry.get("busy")),
+                "runner_registry_labels": registry.get("labels") or [],
+                "runner_registry_labels_ok": bool(registry.get("labels_ok")),
+            }
+        )
         emit(result)
         return 0 if runtime_ok else 3
     except ActivationError as exc:
-        emit({
-            "ok": False,
-            "state": exc.state,
-            "error": str(exc)[:1000],
-            "rdc_required": False,
-            "production_touched": False,
-            "registration_token_consumed_in_memory": token_consumed,
-            "remove_token_consumed_in_memory": remove_token_consumed,
-            "registration_token_persisted": False,
-            "registration_token_logged": False,
-            "remove_token_persisted": False,
-            "remove_token_logged": False,
-        })
+        emit(
+            {
+                "ok": False,
+                "state": exc.state,
+                "error_code": exc.state,
+                "rdc_required": False,
+                "production_touched": False,
+                "registration_token_consumed_in_memory": token_consumed,
+                "remove_token_consumed_in_memory": remove_token_consumed,
+                "registration_token_persisted": False,
+                "registration_token_logged": False,
+                "remove_token_persisted": False,
+                "remove_token_logged": False,
+            }
+        )
         return 4
-    except subprocess.TimeoutExpired as exc:
-        emit({
-            "ok": False,
-            "state": "command_timeout",
-            "error": str(exc)[:1000],
-            "error_type": type(exc).__name__,
-            "rdc_required": False,
-            "production_touched": False,
-            "registration_token_consumed_in_memory": token_consumed,
-            "remove_token_consumed_in_memory": remove_token_consumed,
-            "registration_token_persisted": False,
-            "registration_token_logged": False,
-            "remove_token_persisted": False,
-            "remove_token_logged": False,
-        })
+    except subprocess.TimeoutExpired:
+        emit(
+            {
+                "ok": False,
+                "state": "command_timeout",
+                "error_code": "command_timeout",
+                "rdc_required": False,
+                "production_touched": False,
+                "registration_token_consumed_in_memory": token_consumed,
+                "remove_token_consumed_in_memory": remove_token_consumed,
+                "registration_token_persisted": False,
+                "registration_token_logged": False,
+                "remove_token_persisted": False,
+                "remove_token_logged": False,
+            }
+        )
         return 4
-    except urllib.error.URLError as exc:
-        emit({
-            "ok": False,
-            "state": "network_error",
-            "error": str(exc.reason)[:1000],
-            "error_type": type(exc).__name__,
-            "rdc_required": False,
-            "production_touched": False,
-            "registration_token_consumed_in_memory": token_consumed,
-            "remove_token_consumed_in_memory": remove_token_consumed,
-            "registration_token_persisted": False,
-            "registration_token_logged": False,
-            "remove_token_persisted": False,
-            "remove_token_logged": False,
-        })
+    except urllib.error.URLError:
+        emit(
+            {
+                "ok": False,
+                "state": "network_error",
+                "error_code": "network_error",
+                "rdc_required": False,
+                "production_touched": False,
+                "registration_token_consumed_in_memory": token_consumed,
+                "remove_token_consumed_in_memory": remove_token_consumed,
+                "registration_token_persisted": False,
+                "registration_token_logged": False,
+                "remove_token_persisted": False,
+                "remove_token_logged": False,
+            }
+        )
         return 4
-    except OSError as exc:
-        emit({
-            "ok": False,
-            "state": "os_error",
-            "error": str(exc)[:1000],
-            "error_type": type(exc).__name__,
-            "rdc_required": False,
-            "production_touched": False,
-            "registration_token_consumed_in_memory": token_consumed,
-            "remove_token_consumed_in_memory": remove_token_consumed,
-            "registration_token_persisted": False,
-            "registration_token_logged": False,
-            "remove_token_persisted": False,
-            "remove_token_logged": False,
-        })
+    except OSError:
+        emit(
+            {
+                "ok": False,
+                "state": "os_error",
+                "error_code": "os_error",
+                "rdc_required": False,
+                "production_touched": False,
+                "registration_token_consumed_in_memory": token_consumed,
+                "remove_token_consumed_in_memory": remove_token_consumed,
+                "registration_token_persisted": False,
+                "registration_token_logged": False,
+                "remove_token_persisted": False,
+                "remove_token_logged": False,
+            }
+        )
         return 4
-    except Exception as exc:
-        emit({
-            "ok": False,
-            "state": "unexpected_error",
-            "error": str(exc)[:1000],
-            "error_type": type(exc).__name__,
-            "rdc_required": False,
-            "production_touched": False,
-            "registration_token_consumed_in_memory": token_consumed,
-            "remove_token_consumed_in_memory": remove_token_consumed,
-            "registration_token_persisted": False,
-            "registration_token_logged": False,
-            "remove_token_persisted": False,
-            "remove_token_logged": False,
-        })
+    except Exception:
+        emit(
+            {
+                "ok": False,
+                "state": "unexpected_error",
+                "error_code": "unexpected_error",
+                "rdc_required": False,
+                "production_touched": False,
+                "registration_token_consumed_in_memory": token_consumed,
+                "remove_token_consumed_in_memory": remove_token_consumed,
+                "registration_token_persisted": False,
+                "registration_token_logged": False,
+                "remove_token_persisted": False,
+                "remove_token_logged": False,
+            }
+        )
         return 2
 
 

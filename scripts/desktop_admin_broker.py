@@ -47,6 +47,7 @@ WATCHDOG_SCRIPT = "desktop_control_plane_watchdog.py"
 WATCHDOG_UAC_SCRIPT = "desktop_control_plane_watchdog_uac_launcher.py"
 RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
 RUNNER_BOOTSTRAP_SCRIPT = "activate_desktop_runtime_runner.py"
+READBACK_SCRIPT = "desktop_admin_broker_readback.py"
 
 ALLOWED_COMMANDS = {
     "/desktop-runtime admin status": "status",
@@ -189,6 +190,28 @@ def _watchdog_module(metadata: dict[str, Any]):
     return _load_module(path, "desktop_runtime_broker_watchdog")
 
 
+def _readback_module(metadata: dict[str, Any]):
+    path = Path(metadata["release_root"]) / "scripts" / READBACK_SCRIPT
+    return _load_module(path, "desktop_runtime_broker_readback")
+
+
+def _publish_readback(metadata: dict[str, Any], accepted: dict[str, Any]) -> dict[str, Any]:
+    try:
+        module = _readback_module(metadata)
+        return module.publish_readback(
+            accepted=accepted,
+            source_sha=validate_sha(str(metadata["source_sha"])),
+            host=EXPECTED_HOST,
+        )
+    except Exception:
+        return {
+            "published": False,
+            "channel": "ntfy",
+            "authoritative": False,
+            "error_code": "readback_publish_failed",
+        }
+
+
 def _ensure_watchdog_staged(metadata: dict[str, Any]) -> tuple[Any, Path]:
     target = watchdog_runtime_metadata()
     release_root = Path(metadata["release_root"])
@@ -281,16 +304,26 @@ def _recover_runner(metadata: dict[str, Any]) -> dict[str, Any]:
     if not payload:
         raise BrokerError("runner_bootstrap_evidence_missing")
     state = str(payload.get("state") or "unknown")[:120]
-    if completed.returncode != 0 or payload.get("ok") is not True:
+    local_recovery_ok = (
+        payload.get("local_recovery_ok") is True
+        and payload.get("runner_running") is True
+        and payload.get("github_pickup_required") is True
+    )
+    full_success = completed.returncode == 0 and payload.get("ok") is True
+    bounded_partial = completed.returncode in {0, 3} and local_recovery_ok
+    if not (full_success or bounded_partial):
         raise BrokerError(f"runner_bootstrap_failed:{state}")
 
     return {
         "handler": "recover-runner",
         "bootstrap_state": state,
         "runner_running": bool(payload.get("runner_running")),
-        "runner_registry_present": bool(payload.get("runner_registry_present")),
+        "local_recovery_ok": bool(payload.get("local_recovery_ok")),
+        "github_pickup_required": bool(payload.get("github_pickup_required")),
+        "github_pickup_proven": False,
+        "runner_registry_present": payload.get("runner_registry_present"),
         "runner_registry_status": str(payload.get("runner_registry_status") or "unknown")[:40],
-        "runner_registry_labels_ok": bool(payload.get("runner_registry_labels_ok")),
+        "runner_registry_labels_ok": payload.get("runner_registry_labels_ok"),
         "runner_registered_now": bool(payload.get("runner_registered_now")),
         "runner_started_now": bool(payload.get("runner_started_now")),
     }
@@ -330,15 +363,61 @@ def _recover_rdc(metadata: dict[str, Any], correlation_id: str) -> dict[str, Any
 
 
 def _recover_control_plane(metadata: dict[str, Any]) -> dict[str, Any]:
-    activation = _activate_watchdog(metadata)
     target = watchdog_runtime_metadata()
+    if not target.is_file():
+        raise BrokerError("watchdog_metadata_missing")
     installed = json.loads(target.read_text(encoding="utf-8"))
     watchdog = _watchdog_module(installed)
+
+    # Recover the runner first through the already-installed runtime. Persistence
+    # of the watchdog must not block immediate runner recovery and must not
+    # trigger GUI/UAC from this command path.
     cycle = watchdog.cycle(installed)
+    runner_ok = (
+        cycle.get("runner_recovery_ok") is True
+        or (cycle.get("github_runner") or {}).get("status")
+        in {"recovered", "process_running"}
+    )
+    if not runner_ok:
+        raise BrokerError("runner_recovery_failed")
+
+    task = watchdog.task_status()
+    task_ready = (
+        task.get("exists") is True
+        and task.get("trigger_at_startup") is True
+        and str(task.get("logon_type") or "").casefold() == "s4u"
+    )
+    if task_ready:
+        try:
+            start = watchdog.run_watchdog_task()
+            activation = {
+                "ok": True,
+                "status": "already_ready",
+                "task": task,
+                "start": start,
+            }
+        except Exception:
+            activation = {
+                "ok": False,
+                "status": "persistence_start_failed",
+                "error_code": "watchdog_task_start_failed",
+                "task": task,
+            }
+    else:
+        activation = {
+            "ok": False,
+            "status": "persistence_pending",
+            "error_code": "watchdog_task_not_headless_ready",
+            "task": task,
+        }
+
     return {
         "handler": "recover-control-plane",
         "activation": activation,
         "cycle": cycle,
+        "github_pickup_required": True,
+        "github_pickup_proven": False,
+        "local_recovery_ok": True,
     }
 
 
@@ -445,9 +524,11 @@ def process_once(metadata: dict[str, Any], *, reference_time: datetime | None = 
                 "comment_id": comment_id,
                 "action": action,
                 "status": "failed",
-                "error": str(exc)[:1000],
-                "error_type": type(exc).__name__,
+                "error_code": type(exc).__name__,
             }
+        state["observed_at"] = now_iso()
+        atomic_json(state_path(metadata), state)
+        state["readback"] = _publish_readback(metadata, state["accepted"])
         state["observed_at"] = now_iso()
         atomic_json(state_path(metadata), state)
         accepted += 1
@@ -590,6 +671,7 @@ def _copy_release(source_root: Path, release_root: Path) -> None:
         WATCHDOG_UAC_SCRIPT,
         RDC_RECOVERY_SCRIPT,
         RUNNER_BOOTSTRAP_SCRIPT,
+        READBACK_SCRIPT,
     ):
         source = source_root / "scripts" / name
         if not source.is_file():
