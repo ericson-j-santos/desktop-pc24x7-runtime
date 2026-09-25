@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -164,3 +166,58 @@ def test_registration_token_failure_does_not_mutate_runner(
         )
     assert exc.value.state == "github_runner_admin_permission_required"
     assert events == ["remove_token", "registration_token"]
+
+
+def test_existing_runner_starts_before_github_auth_and_requires_pickup(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runner = tmp_path / "runner"
+    (runner / "bin").mkdir(parents=True)
+    for relative in ("config.cmd", "run.cmd", ".runner"):
+        (runner / relative).write_text("stub", encoding="utf-8")
+    (runner / "bin" / "Runner.Listener.exe").write_bytes(b"stub")
+
+    monkeypatch.setattr(m, "validate_host", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m, "resolve_source_sha", lambda *args, **kwargs: "a" * 40)
+    monkeypatch.setattr(m, "discover_runner", lambda explicit=None: runner)
+    monkeypatch.setattr(m, "start_runner", lambda root: True)
+    monkeypatch.setattr(m, "runner_running", lambda root: True)
+    monkeypatch.setattr(
+        m,
+        "ensure_gh",
+        lambda: (_ for _ in ()).throw(
+            m.ActivationError("github_auth_required", "blocked")
+        ),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            str(SCRIPT),
+            "--confirm",
+            m.CONFIRM,
+            "--source-sha",
+            "a" * 40,
+            "--non-interactive-auth",
+        ],
+    )
+
+    code = m.main()
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+    assert code == 3
+    assert payload["ok"] is False
+    assert payload["state"] == "listener_running_pickup_required"
+    assert payload["local_recovery_ok"] is True
+    assert payload["runner_running"] is True
+    assert payload["github_registry_checked"] is False
+    assert payload["github_pickup_required"] is True
+    assert payload["github_pickup_proven"] is False
+
+
+def test_failure_output_does_not_emit_raw_exception_text() -> None:
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert '"error": str(exc)' not in text
+    assert '"error": str(exc.reason)' not in text
