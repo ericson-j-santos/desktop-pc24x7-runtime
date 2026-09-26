@@ -60,7 +60,7 @@ def test_runner_version_preflight_accepts_current_minimum(
     assert result["minimum_supported_runner_version"] == "2.337.0"
     assert result["runner_version_supported"] is True
     assert observed["args"][-1] == "--version"
-    assert observed["kwargs"]["shell"] if "shell" in observed["kwargs"] else True
+    assert "shell" not in observed["kwargs"]
 
 
 def test_runner_version_preflight_rejects_stale_runner(
