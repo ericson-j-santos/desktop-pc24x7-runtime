@@ -48,6 +48,8 @@ RDC_CLAIM_MAX_AGE_SECONDS = 20.0
 
 RUNNER_PROCESS = "Runner.Listener.exe"
 RUNNER_REQUIRED = ((".runner",), ("run.cmd",), ("bin", "Runner.Listener.exe"))
+MIN_SUPPORTED_RUNNER_VERSION = "2.337.0"
+MIN_SUPPORTED_RUNNER_VERSION_PARTS = (2, 337, 0)
 DEFAULT_WATCH_SECONDS = 30
 RUNNER_START_TIMEOUT_SECONDS = 30
 RDC_RECOVERY_TIMEOUT_SECONDS = 60
@@ -105,6 +107,42 @@ def validate_runner_home(path: Path) -> Path:
     if missing:
         raise WatchdogError("runner_home inválido; arquivos ausentes: " + ", ".join(missing))
     return resolved
+
+
+def _parse_runner_version(value: str) -> tuple[int, int, int]:
+    raw = str(value or "").strip()
+    parts = raw.split(".")
+    if len(parts) != 3 or any(not part.isdigit() for part in parts):
+        raise WatchdogError("runner_version_invalid")
+    return tuple(int(part) for part in parts)
+
+
+def inspect_runner_version(runner_home: Path) -> dict[str, Any]:
+    root = validate_runner_home(runner_home)
+    listener = root / "bin" / RUNNER_PROCESS
+    completed = subprocess.run(
+        [str(listener), "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise WatchdogError(f"runner_version_unreadable:exit={completed.returncode}")
+    observed = completed.stdout.strip()
+    observed_parts = _parse_runner_version(observed)
+    if observed_parts < MIN_SUPPORTED_RUNNER_VERSION_PARTS:
+        raise WatchdogError(
+            "runner_version_unsupported:"
+            f"{observed}:minimum={MIN_SUPPORTED_RUNNER_VERSION}"
+        )
+    return {
+        "runner_version": observed,
+        "minimum_supported_runner_version": MIN_SUPPORTED_RUNNER_VERSION,
+        "runner_version_supported": True,
+    }
 
 
 def discover_runner_home(explicit: Path | None = None) -> Path:
@@ -236,6 +274,7 @@ def _creationflags() -> int:
 
 def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
     runner_home = validate_runner_home(runner_home)
+    version_info = inspect_runner_version(runner_home)
     snapshot = runner_process_snapshot(runner_home)
     if snapshot["matching_pids"]:
         return {
@@ -244,6 +283,7 @@ def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
             "listener_pid": snapshot["matching_pids"][0],
             "github_connectivity_verified": False,
             "pickup_required": True,
+            **version_info,
         }
 
     system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
@@ -280,6 +320,7 @@ def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
                 "listener_pid": current["matching_pids"][0],
                 "github_connectivity_verified": False,
                 "pickup_required": True,
+                **version_info,
             }
         if process.poll() is not None:
             raise WatchdogError(f"runner terminou durante startup: exit={process.returncode}")
@@ -406,10 +447,17 @@ def recover_rdc(*, python_executable: Path, recovery_script: Path, evidence_path
 
 
 def _component_failure(component: str, exc: Exception) -> dict[str, Any]:
+    message = str(exc)
+    known_runner_codes = {
+        "runner_version_invalid",
+        "runner_version_unreadable",
+        "runner_version_unsupported",
+    }
+    prefix = message.split(":", 1)[0]
     return {
         "status": "failed",
         "component": component,
-        "error_code": type(exc).__name__,
+        "error_code": prefix if prefix in known_runner_codes else type(exc).__name__,
         "recovered": False,
     }
 

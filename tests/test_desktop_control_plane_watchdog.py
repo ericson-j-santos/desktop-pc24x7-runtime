@@ -42,6 +42,64 @@ def test_runner_home_requires_local_runner_contract(tmp_path: Path) -> None:
     assert m.validate_runner_home(valid) == valid.resolve()
 
 
+def test_runner_version_preflight_accepts_current_minimum(
+    monkeypatch, tmp_path: Path
+) -> None:
+    runner_home = make_runner_home(tmp_path)
+    observed: dict[str, object] = {}
+
+    def fake_run(args, **kwargs):
+        observed["args"] = args
+        observed["kwargs"] = kwargs
+        return subprocess.CompletedProcess(args, 0, stdout="2.337.0\n", stderr="")
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    result = m.inspect_runner_version(runner_home)
+
+    assert result["runner_version"] == "2.337.0"
+    assert result["minimum_supported_runner_version"] == "2.337.0"
+    assert result["runner_version_supported"] is True
+    assert observed["args"][-1] == "--version"
+    assert "shell" not in observed["kwargs"]
+
+
+def test_runner_version_preflight_rejects_stale_runner(
+    monkeypatch, tmp_path: Path
+) -> None:
+    runner_home = make_runner_home(tmp_path)
+    monkeypatch.setattr(
+        m.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess.CompletedProcess(
+            args, 0, stdout="2.336.0\n", stderr=""
+        ),
+    )
+    with pytest.raises(m.WatchdogError, match="runner_version_unsupported"):
+        m.inspect_runner_version(runner_home)
+
+
+def test_start_runner_rejects_unsupported_version_before_process_probe(
+    monkeypatch, tmp_path: Path
+) -> None:
+    runner_home = make_runner_home(tmp_path)
+    monkeypatch.setattr(
+        m,
+        "inspect_runner_version",
+        lambda runner: (_ for _ in ()).throw(
+            m.WatchdogError("runner_version_unsupported:2.336.0:minimum=2.337.0")
+        ),
+    )
+    monkeypatch.setattr(
+        m,
+        "runner_process_snapshot",
+        lambda runner: (_ for _ in ()).throw(
+            AssertionError("process probe must not run for unsupported version")
+        ),
+    )
+    with pytest.raises(m.WatchdogError, match="runner_version_unsupported"):
+        m.start_runner(runner_home, tmp_path / "runner.log")
+
+
 def test_discovery_prefers_explicit_runner_home(tmp_path: Path) -> None:
     valid = make_runner_home(tmp_path)
     assert m.discover_runner_home(valid) == valid.resolve()
@@ -117,6 +175,15 @@ def test_recover_rdc_uses_governed_local_script(monkeypatch, tmp_path: Path) -> 
 
 def test_start_runner_recovers_without_claiming_github_health(monkeypatch, tmp_path: Path) -> None:
     runner_home = make_runner_home(tmp_path)
+    monkeypatch.setattr(
+        m,
+        "inspect_runner_version",
+        lambda runner: {
+            "runner_version": "2.337.0",
+            "minimum_supported_runner_version": "2.337.0",
+            "runner_version_supported": True,
+        },
+    )
     states = iter([
         {"matching_pids": [], "unresolved_pids": [], "observed": []},
         {"matching_pids": [4321], "unresolved_pids": [], "observed": []},
@@ -154,6 +221,15 @@ def test_start_runner_recovers_without_claiming_github_health(monkeypatch, tmp_p
 
 def test_existing_listener_is_process_running_not_healthy(monkeypatch, tmp_path: Path) -> None:
     runner_home = make_runner_home(tmp_path)
+    monkeypatch.setattr(
+        m,
+        "inspect_runner_version",
+        lambda runner: {
+            "runner_version": "2.337.0",
+            "minimum_supported_runner_version": "2.337.0",
+            "runner_version_supported": True,
+        },
+    )
     monkeypatch.setattr(
         m,
         "runner_process_snapshot",
