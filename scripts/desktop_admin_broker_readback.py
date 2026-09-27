@@ -117,7 +117,7 @@ def publish_readback(
         data=body,
         method="POST",
         headers={
-            "Content-Type": "application/json",
+            "Content-Type": "text/plain; charset=utf-8",
             "Title": "desktop-runtime-readback",
             "Tags": "computer",
             "User-Agent": "Desktop-PC24x7-Runtime-Broker-Readback/1.0",
