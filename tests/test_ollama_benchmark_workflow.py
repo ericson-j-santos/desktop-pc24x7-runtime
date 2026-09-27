@@ -40,3 +40,9 @@ def test_benchmark_queue_is_bounded_by_canonical_watchdog() -> None:
     assert "_rules/scripts/progress_watchdog.py" in content
     assert "cancelWorkflowRun" in content
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in content
+
+
+def test_benchmark_requires_agentic_context_gate() -> None:
+    content = workflow_text()
+    assert 'MIN_CONTEXT: "64000"' in content
+    assert '"--min-context", $env:MIN_CONTEXT' in content
