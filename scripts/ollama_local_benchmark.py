@@ -83,12 +83,26 @@ def loaded_models() -> list[dict[str, Any]]:
                 "name": str(item.get("name") or ""),
                 "size_bytes": int(item.get("size") or 0),
                 "size_vram_bytes": int(item.get("size_vram") or 0),
+                "context_length": int(item.get("context_length") or 0),
             }
         )
     return result
 
 
-def direct_generate(model: str, sentinel: str, timeout: int) -> CallResult:
+def context_gate(
+    loaded: list[dict[str, Any]], model: str, min_context: int
+) -> tuple[bool, int | None]:
+    for item in loaded:
+        if item.get("name") != model:
+            continue
+        context_length = int(item.get("context_length") or 0)
+        return context_length >= min_context, context_length
+    return False, None
+
+
+def direct_generate(
+    model: str, sentinel: str, timeout: int, min_context: int
+) -> CallResult:
     started = time.perf_counter()
     try:
         data = http_json(
@@ -98,7 +112,7 @@ def direct_generate(model: str, sentinel: str, timeout: int) -> CallResult:
                 "prompt": f"Responda somente com {sentinel}. Sem explicação.",
                 "stream": False,
                 "keep_alive": "5m",
-                "options": {"temperature": 0},
+                "options": {"temperature": 0, "num_ctx": min_context},
             },
             timeout=timeout,
         )
@@ -172,6 +186,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default="gemma4:26b-q8-code")
     parser.add_argument("--timeout", type=int, default=150)
+    parser.add_argument("--min-context", type=int, default=64000)
     parser.add_argument("--correlation-id", required=True)
     args = parser.parse_args()
 
@@ -179,6 +194,7 @@ def main() -> int:
     evidence: dict[str, Any] = {
         "correlation_id": args.correlation_id,
         "requested_model": args.model,
+        "min_context": args.min_context,
         "direct_endpoint": "127.0.0.1:11434",
         "gateway_endpoint": "127.0.0.1:8008",
         "cloud_called": False,
@@ -201,13 +217,22 @@ def main() -> int:
         print(json.dumps(evidence, ensure_ascii=True, sort_keys=True))
         return 4
 
-    direct = direct_generate(args.model, sentinel, args.timeout)
+    direct = direct_generate(args.model, sentinel, args.timeout, args.min_context)
     evidence["direct"] = asdict(direct)
 
+    context_ok = False
+    observed_context: int | None = None
     try:
-        evidence["loaded_after_direct"] = loaded_models()
+        loaded_after_direct = loaded_models()
+        evidence["loaded_after_direct"] = loaded_after_direct
+        context_ok, observed_context = context_gate(
+            loaded_after_direct, args.model, args.min_context
+        )
     except RuntimeError as exc:
         evidence["loaded_after_direct_error"] = str(exc)
+
+    evidence["context_ok"] = context_ok
+    evidence["observed_context"] = observed_context
 
     gateway = gateway_generate(args.model, sentinel, args.timeout, args.correlation_id)
     evidence["gateway"] = asdict(gateway)
@@ -218,8 +243,14 @@ def main() -> int:
         and gateway.ok
         and gateway.sentinel_ok
         and gateway.model == args.model
+        and context_ok
     )
-    evidence["state"] = "validated" if evidence["ok"] else "validation_failed"
+    if evidence["ok"]:
+        evidence["state"] = "validated"
+    elif not context_ok:
+        evidence["state"] = "context_requirement_failed"
+    else:
+        evidence["state"] = "validation_failed"
     print(json.dumps(evidence, ensure_ascii=True, sort_keys=True))
     return 0 if evidence["ok"] else 5
 

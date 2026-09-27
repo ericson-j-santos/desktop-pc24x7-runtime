@@ -24,9 +24,10 @@ jobs:
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 8
     env:
-      RULES_SHA: 5af7b5ab6e31c24744176abd774855168c55953f
+      RULES_SHA: 881d9ca2f8e77025edb7298b22981109c567a730
       TARGET_REPO: C:\\dev\\reqsys-v2-enterprise-real
       MODEL: gemma4:26b-q8-code
+      MIN_CONTEXT: "64000"
       CORRELATION_ID: ollama-local-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -115,6 +116,7 @@ jobs:
             "--",
             "python", $benchmark,
             "--model", $env:MODEL,
+            "--min-context", $env:MIN_CONTEXT,
             "--timeout", "150",
             "--correlation-id", $env:CORRELATION_ID
           )
@@ -130,7 +132,7 @@ jobs:
       actions: write
       contents: read
     env:
-      RULES_SHA: 5af7b5ab6e31c24744176abd774855168c55953f
+      RULES_SHA: 881d9ca2f8e77025edb7298b22981109c567a730
       TARGET_RUN_ID: ${{ github.run_id }}
       TARGET_JOB_NAME: Benchmark local Ollama on Desktop PC24x7
       STALL_AFTER_SECONDS: "60"
