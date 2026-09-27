@@ -19,15 +19,54 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  contract:
+    name: Validate probe contract on hosted runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install targeted test dependency
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2
+
+      - name: Compile capability probe
+        run: python -m py_compile scripts/noteri_desktop_orchestrator_capabilities_probe.py
+
+      - name: Run positive and negative contract controls
+        run: python -m pytest tests/test_noteri_desktop_orchestrator_capabilities_probe.py -q
+
+      - name: Record physical E2E policy
+        if: github.event_name != 'workflow_dispatch'
+        run: |
+          {
+            echo "### Physical E2E not executed"
+            echo ""
+            echo "Automatic branch validation covers only the probe contract."
+            echo "The Noteri -> Desktop physical probe is intentionally manual because GitHub can keep an unavailable self-hosted runner queued for up to 24 hours."
+            echo "A manual workflow_dispatch on this exact SHA is still required for physical E2E evidence."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   probe:
     name: Read Desktop Orchestrator capabilities from Noteri
+    if: github.event_name == 'workflow_dispatch'
+    needs: contract
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
     env:
       RULES_SHA: 881d9ca2f8e77025edb7298b22981109c567a730
       TARGET_REPO: ${{ github.workspace }}
       CORRELATION_ID: desktop-orchestrator-capabilities-${{ github.run_id }}-${{ github.run_attempt }}
-      EVIDENCE_REL: artifacts\noteri-desktop-orchestrator-capabilities\evidence.json
+      EVIDENCE_REL: artifacts\\noteri-desktop-orchestrator-capabilities\\evidence.json
 
     steps:
       - name: Checkout immutable source SHA
@@ -134,6 +173,6 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: noteri-desktop-orchestrator-capabilities-${{ github.run_id }}
-          path: ${{ steps.session.outputs.target_path }}\artifacts\noteri-desktop-orchestrator-capabilities\evidence.json
+          path: ${{ steps.session.outputs.target_path }}\\artifacts\\noteri-desktop-orchestrator-capabilities\\evidence.json
           if-no-files-found: warn
           retention-days: 30
