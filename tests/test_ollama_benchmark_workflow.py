@@ -52,3 +52,9 @@ def test_benchmark_uses_current_canonical_operational_rules() -> None:
     content = workflow_text()
     assert "881d9ca2f8e77025edb7298b22981109c567a730" in content
     assert "5af7b5ab6e31c24744176abd774855168c55953f" not in content
+
+
+def test_benchmark_watchdog_uses_current_attempt_clock() -> None:
+    content = workflow_text()
+    assert "const progressAnchor = new Date();" in content
+    assert "runResponse.data.created_at" not in content
