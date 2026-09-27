@@ -1,0 +1,75 @@
+name: Desktop Admin Broker Readback Probe
+
+on:
+  push:
+    branches:
+      - "fix/admin-broker-readback-probe-*"
+    paths:
+      - "scripts/desktop_admin_broker_readback.py"
+      - "scripts/desktop_admin_broker_readback_probe.py"
+      - "tests/test_desktop_admin_broker_readback.py"
+      - "tests/test_desktop_admin_broker_readback_probe.py"
+      - ".sdd/specs/desktop-admin-broker-readback-probe.requirements.md"
+      - ".github/workflows/desktop-admin-broker-readback-probe.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-admin-broker-readback-probe-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Validate readback contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install targeted test dependency
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2
+
+      - name: Compile targeted scripts
+        run: |
+          python -m py_compile scripts/desktop_admin_broker_readback.py
+          python -m py_compile scripts/desktop_admin_broker_readback_probe.py
+
+      - name: Run targeted positive and negative controls
+        run: |
+          python -m pytest             tests/test_desktop_admin_broker_readback.py             tests/test_desktop_admin_broker_readback_probe.py -q
+
+  live-probe:
+    name: Read latest broker diagnostic
+    needs: contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Probe fixed ntfy readback
+        run: |
+          python scripts/desktop_admin_broker_readback_probe.py             --evidence-file artifacts/desktop-admin-broker-readback/evidence.json             --max-age-seconds 900             --timeout-seconds 10
+
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-admin-broker-readback-${{ github.run_id }}
+          path: artifacts/desktop-admin-broker-readback/evidence.json
+          if-no-files-found: error
+          retention-days: 30
