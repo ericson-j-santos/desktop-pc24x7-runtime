@@ -30,3 +30,10 @@ do runner do Desktop, Noteri, RDC, GUI ou shell remoto.
   funcional;
 - ausência/falha do readback permanece estado bloqueado e não dispara retry de
   recovery automaticamente.
+
+## Revalidação operacional 2026-09-27
+
+- comando diagnóstico somente leitura: `/desktop-runtime admin status`;
+- comment_id: `5861008835`;
+- objetivo: provar se o Admin Broker residente pós-PR #29 publica readback consumível antes de qualquer recovery adicional;
+- nenhuma mutação de runner, watchdog, Orchestrator, produção ou host é autorizada por esta sonda.
