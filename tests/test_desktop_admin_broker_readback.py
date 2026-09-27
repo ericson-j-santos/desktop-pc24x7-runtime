@@ -100,3 +100,45 @@ def test_transport_failure_is_non_authoritative(monkeypatch: pytest.MonkeyPatch)
     assert result["published"] is False
     assert result["authoritative"] is False
     assert result["error_code"] == "readback_transport_unavailable"
+
+
+
+def test_publish_uses_plain_text_topic_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured = {}
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    def fake_urlopen(request, timeout):
+        captured["request"] = request
+        captured["timeout"] = timeout
+        return Response()
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", fake_urlopen)
+    result = m.publish_readback(
+        accepted={
+            "comment_id": 901,
+            "action": "status",
+            "status": "completed",
+            "outcome": {"result": {"handler": "status"}},
+        },
+        source_sha="d" * 40,
+        host=m.EXPECTED_HOST,
+        timeout_seconds=3,
+    )
+
+    request = captured["request"]
+    payload = json.loads(request.data.decode("utf-8"))
+    assert request.full_url == m.ENDPOINT
+    assert request.headers["Content-type"] == "text/plain; charset=utf-8"
+    assert payload["comment_id"] == 901
+    assert payload["trust"] == "diagnostic_only"
+    assert payload["authoritative_success"] is False
+    assert result["published"] is True
+    assert result["authoritative"] is False
