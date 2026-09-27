@@ -1,0 +1,43 @@
+name: Dedicated Runtime Runner Recovery Canary
+
+on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - .github/workflows/dedicated-runtime-runner-recovery-canary.yml
+      - scripts/dedicated_runner_e2e.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dedicated-runtime-runner-recovery-canary-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  pickup:
+    name: Prove recovered dedicated Desktop runner
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 6
+    steps:
+      - name: Checkout exact PR SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Prove exact physical runner identity
+        shell: powershell
+        run: |
+          python scripts/dedicated_runner_e2e.py --evidence-file artifacts/dedicated-runner-recovery-canary/evidence.json
+
+      - name: Upload sanitized evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dedicated-runner-recovery-canary-${{ github.run_id }}
+          path: artifacts/dedicated-runner-recovery-canary/evidence.json
+          if-no-files-found: error
+          retention-days: 7
