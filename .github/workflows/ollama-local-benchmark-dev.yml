@@ -8,6 +8,7 @@ on:
       - .github/workflows/ollama-local-benchmark-dev.yml
       - scripts/ollama_local_benchmark.py
       - tests/test_ollama_benchmark_workflow.py
+      - tests/test_ollama_local_benchmark.py
   workflow_dispatch:
 
 permissions:
@@ -24,10 +25,11 @@ jobs:
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 8
     env:
-      RULES_SHA: 881d9ca2f8e77025edb7298b22981109c567a730
+      RULES_SHA: 10d2489e8cac3770d1c07fac4ccfece0a0112269
       TARGET_REPO: C:\\dev\\reqsys-v2-enterprise-real
       MODEL: gemma4:26b-q8-code
-      MIN_CONTEXT: "64000"
+      CONTEXTS: "8192,32768,64000"
+      REPETITIONS: "3"
       CORRELATION_ID: ollama-local-benchmark-${{ github.run_id }}-${{ github.run_attempt }}
 
     steps:
@@ -93,7 +95,7 @@ jobs:
           "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
           Write-Host "SESSION_LAUNCH_OK head=$($data.head) correlation_id=$env:CORRELATION_ID"
 
-      - name: Run local Ollama benchmark through Command Gateway
+      - name: Run reproducible local Ollama benchmark through Command Gateway
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
@@ -111,12 +113,13 @@ jobs:
             "--cwd", $env:TARGET_PATH,
             "--session-id", $env:SESSION_ID,
             "--risk", "1",
-            "--timeout", "330",
+            "--timeout", "420",
             "--expected-head", $env:ANCHOR_SHA,
             "--",
             "python", $benchmark,
             "--model", $env:MODEL,
-            "--min-context", $env:MIN_CONTEXT,
+            "--contexts", $env:CONTEXTS,
+            "--repetitions", $env:REPETITIONS,
             "--timeout", "150",
             "--correlation-id", $env:CORRELATION_ID
           )
@@ -132,7 +135,7 @@ jobs:
       actions: write
       contents: read
     env:
-      RULES_SHA: 881d9ca2f8e77025edb7298b22981109c567a730
+      RULES_SHA: 10d2489e8cac3770d1c07fac4ccfece0a0112269
       TARGET_RUN_ID: ${{ github.run_id }}
       TARGET_JOB_NAME: Benchmark local Ollama on Desktop PC24x7
       STALL_AFTER_SECONDS: "60"
