@@ -58,12 +58,12 @@ jobs:
 
   probe:
     name: Read Desktop Orchestrator capabilities from Noteri
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' || github.ref_name == 'fix/admin-broker-readback-probe-20260929-current'
     needs: contract
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
     env:
-      RULES_SHA: 881d9ca2f8e77025edb7298b22981109c567a730
+      RULES_SHA: 641bd1df60befa7310db9200aebc95221bdbee12
       TARGET_REPO: ${{ github.workspace }}
       CORRELATION_ID: desktop-orchestrator-capabilities-${{ github.run_id }}-${{ github.run_attempt }}
       EVIDENCE_REL: artifacts\\noteri-desktop-orchestrator-capabilities\\evidence.json
