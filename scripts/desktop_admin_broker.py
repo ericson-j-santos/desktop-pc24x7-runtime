@@ -40,6 +40,8 @@ TASK_LOGON_S4U = 2
 TASK_CREATE_OR_UPDATE = 6
 TASK_RUNLEVEL_HIGHEST = 1
 TASK_INSTANCES_IGNORE_NEW = 2
+USER_RUN_KEY = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+USER_RUN_VALUE = "DesktopPc24x7AdminBroker"
 INSTALL_CONFIRM = "INSTALL-DESKTOP-ADMIN-BROKER"
 DEFAULT_POLL_SECONDS = 90
 MAX_COMMENT_AGE_SECONDS = 300
@@ -573,6 +575,88 @@ def _scheduler():
     return service
 
 
+def register_user_autostart(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    """Registra fallback per-user fixo e sem privilégio administrativo."""
+    require_windows_desktop()
+    try:
+        import winreg
+    except ImportError as exc:
+        raise BrokerError("winreg_unavailable") from exc
+
+    command = subprocess.list2cmdline(
+        [str(python_executable.resolve()), str(launcher.resolve())]
+    )
+    access = winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
+    try:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            USER_RUN_KEY,
+            0,
+            access,
+        ) as key:
+            winreg.SetValueEx(key, USER_RUN_VALUE, 0, winreg.REG_SZ, command)
+            observed, value_type = winreg.QueryValueEx(key, USER_RUN_VALUE)
+    except OSError as exc:
+        raise BrokerError("user_autostart_registration_failed") from exc
+    if value_type != winreg.REG_SZ or str(observed) != command:
+        raise BrokerError("user_autostart_readback_mismatch")
+    return {
+        "ok": True,
+        "mode": "HKCU_RUN_AT_LOGON",
+        "value_name": USER_RUN_VALUE,
+        "readback_verified": True,
+        "requires_admin": False,
+    }
+
+
+def remove_user_autostart() -> dict[str, Any]:
+    """Remove o fallback depois que AtStartup + S4U estiver disponível."""
+    require_windows_desktop()
+    try:
+        import winreg
+    except ImportError as exc:
+        raise BrokerError("winreg_unavailable") from exc
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            USER_RUN_KEY,
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            try:
+                winreg.DeleteValue(key, USER_RUN_VALUE)
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise BrokerError("user_autostart_remove_failed") from exc
+    return {"ok": True, "removed": True}
+
+
+def start_user_broker(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    """Solicita início imediato por argv fixo, sem declarar sucesso funcional."""
+    require_windows_desktop()
+    flags = 0
+    if os.name == "nt":
+        flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        flags |= int(getattr(subprocess, "DETACHED_PROCESS", 0))
+    process = subprocess.Popen(
+        [str(python_executable.resolve()), str(launcher.resolve())],
+        cwd=launcher.parent,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        creationflags=flags,
+    )
+    return {
+        "requested": True,
+        "pid": int(process.pid),
+        "functional_success_proven": False,
+    }
+
+
 def register_task(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
     require_windows_desktop()
     service = _scheduler()
@@ -756,10 +840,12 @@ def load_installed_metadata(metadata_path: Path, *, require_current_release: boo
 
 def register_task_from_metadata(metadata_path: Path) -> dict[str, Any]:
     installation = load_installed_metadata(metadata_path, require_current_release=True)
-    return register_task(
+    result = register_task(
         python_executable=installation["python_executable"],
         launcher=installation["launcher"],
     )
+    remove_user_autostart()
+    return result
 
 
 def install(
@@ -809,6 +895,8 @@ def install(
     runtime.mkdir(parents=True, exist_ok=True)
     atomic_json(metadata_path, metadata)
     activation_pending = False
+    user_autostart = None
+    started = None
     try:
         task = register_task(python_executable=python_executable.resolve(), launcher=launcher)
     except BrokerError as exc:
@@ -816,14 +904,23 @@ def install(
             raise
         activation_pending = True
         task = {"exists": False, "error": "access_denied"}
+        user_autostart = register_user_autostart(
+            python_executable=python_executable.resolve(),
+            launcher=launcher,
+        )
+        started = start_user_broker(
+            python_executable=python_executable.resolve(),
+            launcher=launcher,
+        )
         metadata.update(
             {
                 "activation_pending": True,
                 "requires_uac_activation": True,
+                "fallback_persistence": user_autostart,
+                "fallback_start_requested": True,
             }
         )
         atomic_json(metadata_path, metadata)
-    started = None
     if not activation_pending:
         started = run_task()
     return {
@@ -831,7 +928,9 @@ def install(
         "activation_pending": activation_pending,
         "requires_uac_activation": activation_pending,
         "task": task,
+        "user_autostart": user_autostart,
         "start": started,
+        "functional_success_proven": False if activation_pending else None,
         "metadata_path": str(metadata_path),
         "activation_launcher": str(activation_launcher),
     }

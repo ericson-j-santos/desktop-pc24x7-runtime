@@ -48,7 +48,14 @@ substituído ou ter suas labels alteradas por esta capacidade.
 - nenhuma entrada pode fornecer shell, caminho, host, executável, repo, labels ou token;
 - token de runner nunca é persistido/logado;
 - sem listener inbound, reboot, shutdown, produção, deploy, force-push ou RBAC amplo;
-- instalação da tarefa elevada não faz parte desta PR e exige autorização administrativa explícita.
+- quando AtStartup + S4U não puder ser registrado sem elevação, o broker pode
+  registrar fallback estrito em `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`,
+  com valor fixo `DesktopPc24x7AdminBroker`, readback exato e início imediato
+  por argv fixo com `shell=False`;
+- esse fallback é somente canal de recuperação local/DEV e não satisfaz o
+  critério final AtStartup + S4U + highest;
+- a elevação da tarefa AtStartup + S4U continua exigindo autorização
+  administrativa explícita; quando concluída, o fallback HKCU deve ser removido.
 
 ## Critérios de aceite de código
 
@@ -58,7 +65,9 @@ substituído ou ter suas labels alteradas por esta capacidade.
 4. testes provam identidade própria do watchdog e ausência de descoberta do runner legado;
 5. testes provam uso exclusivo do bootstrap do runner novo;
 6. comandos de watchdog apontam apenas para task/runtime próprios;
-7. CI de PR verde no HEAD exato.
+7. fallback não administrativo usa somente HKCU do usuário corrente, comando
+   fixo e `shell=False`, sem tratar criação de processo como sucesso funcional;
+8. CI de PR verde no HEAD exato.
 
 ## Critérios de aceite runtime
 
