@@ -39,7 +39,9 @@ TASK_ACTION_EXEC = 0
 TASK_LOGON_S4U = 2
 TASK_CREATE_OR_UPDATE = 6
 TASK_RUNLEVEL_HIGHEST = 1
-TASK_INSTANCES_IGNORE_NEW = 2\nUSER_RUN_KEY = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"\nUSER_RUN_VALUE = "DesktopPc24x7AdminBroker"
+TASK_INSTANCES_IGNORE_NEW = 2
+USER_RUN_KEY = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
+USER_RUN_VALUE = "DesktopPc24x7AdminBroker"
 INSTALL_CONFIRM = "INSTALL-DESKTOP-ADMIN-BROKER"
 DEFAULT_POLL_SECONDS = 90
 MAX_COMMENT_AGE_SECONDS = 300
@@ -655,7 +657,8 @@ def start_user_broker(*, python_executable: Path, launcher: Path) -> dict[str, A
     }
 
 
-def register_task(*, python_executable: Path, launcher: Path) -> dict[str, Any]:\n    require_windows_desktop()
+def register_task(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    require_windows_desktop()
     service = _scheduler()
     try:
         folder = service.GetFolder(TASK_FOLDER)
