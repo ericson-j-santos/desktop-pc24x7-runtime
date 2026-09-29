@@ -30,3 +30,6 @@ do runner do Desktop, Noteri, RDC, GUI ou shell remoto.
   funcional;
 - ausência/falha do readback permanece estado bloqueado e não dispara retry de
   recovery automaticamente.
+
+
+<!-- Diagnostic trigger 2026-09-29: fresh hosted readback probe against current main baseline. -->
