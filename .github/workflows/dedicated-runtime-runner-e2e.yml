@@ -1,40 +1,259 @@
 name: Dedicated Runtime Runner E2E
 
 on:
-  push:
-    branches:
-      - feat/dedicated-runtime-runner-20260923
   workflow_dispatch:
 
 permissions:
   contents: read
 
 concurrency:
-  group: dedicated-runtime-runner-e2e
+  group: dedicated-runtime-runner-e2e-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  resolve_rules:
+    name: Resolve canonical operational rules
+    runs-on: windows-latest
+    timeout-minutes: 2
+    outputs:
+      rules_sha: ${{ steps.rules.outputs.sha }}
+    steps:
+      - name: Resolve main SHA and require rules 1.6.9+
+        id: rules
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              branch: 'main',
+            });
+            const sha = branch.data.commit.sha;
+            const readme = await github.rest.repos.getContent({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              path: 'README.md',
+              ref: sha,
+            });
+            const text = Buffer.from(readme.data.content, 'base64').toString('utf8');
+            const match = text.match(/^Versão:\s*(\d+)\.(\d+)\.(\d+)\s*$/m);
+            if (!match) {
+              core.setFailed('RULES_VERSION_UNREADABLE');
+              return;
+            }
+            const observed = match.slice(1).map(Number);
+            const required = [1, 6, 9];
+            const sufficient = observed[0] > required[0]
+              || (observed[0] === required[0] && observed[1] > required[1])
+              || (observed[0] === required[0] && observed[1] === required[1] && observed[2] >= required[2]);
+            if (!sufficient) {
+              core.setFailed(`RULES_1_6_9_REQUIRED:observed=${observed.join('.')}`);
+              return;
+            }
+            core.setOutput('sha', sha);
+
   e2e:
+    needs: resolve_rules
     name: Pickup on dedicated Desktop runtime runner
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 10
+    env:
+      RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
+      CORRELATION_ID: dedicated-runner-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_REL: artifacts/dedicated-runner-e2e/evidence.json
     steps:
-      - name: Checkout exact SHA
-        uses: actions/checkout@v4
+      - name: Checkout exact runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Prove exact host, repository and runner
-        shell: powershell
-        run: python scripts/dedicated_runner_e2e.py --evidence-file artifacts/dedicated-runner-e2e/evidence.json
+      - name: Checkout canonical operational rules exact SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
 
-      - name: Upload evidence
-        if: always()
+      - name: Bootstrap governed session and runner version preflight
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $anchorSha = "${{ github.sha }}"
+          $syncRef = "origin/$env:GITHUB_REF_NAME"
+          $launcherArgs = @(
+            "--policy", $policy,
+            "--repo", $env:GITHUB_WORKSPACE,
+            "--session-prefix", "desktop-runner",
+            "--correlation-id", $env:CORRELATION_ID,
+            "--expected-head", $anchorSha,
+            "--sync-ref", $syncRef,
+            "--require-runner-version-preflight"
+          )
+          $raw = & python $launcher @launcherArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = @($raw)[-1] | ConvertFrom-Json
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true) {
+            throw "SESSION_LAUNCH_BLOCKED"
+          }
+          if ($data.head -ne $anchorSha) { throw "SESSION_HEAD_MISMATCH" }
+          if ($null -eq $data.runner_version_preflight -or $data.runner_version_preflight.ok -ne $true) {
+            throw "RUNNER_VERSION_PREFLIGHT_BLOCKED"
+          }
+          if ([string]::IsNullOrWhiteSpace([string]$data.runner_version_preflight.installed_version)) {
+            throw "RUNNER_VERSION_EVIDENCE_MISSING"
+          }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
+          "runner_version=$($data.runner_version_preflight.installed_version)" | Add-Content $env:GITHUB_OUTPUT
+          "RUNNER_VERSION_OBSERVED=$($data.runner_version_preflight.installed_version)" | Add-Content $env:GITHUB_ENV
+          "RUNNER_REGISTRATION_SUPPORTED=$($data.runner_version_preflight.registration_supported.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
+          "RUNNER_RUNTIME_SUPPORTED=$($data.runner_version_preflight.runtime_supported_now.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
+          "RUNNER_DEPRECATION_API_STATUS=$($data.runner_version_preflight.deprecation_api_status)" | Add-Content $env:GITHUB_ENV
+
+      - name: Prove exact host, repository, runner and version through Command Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\dedicated_runner_e2e.py"
+          $gatewayArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "1",
+            "--timeout", "60",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", $script,
+            "--evidence-file", $env:EVIDENCE_REL
+          )
+          & python $gateway @gatewayArgs
+          exit $LASTEXITCODE
+
+      - name: Upload sanitized evidence
+        if: always() && steps.session.outputs.target_path != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dedicated-runner-e2e-${{ github.run_id }}
-          path: artifacts/dedicated-runner-e2e/evidence.json
+          path: ${{ steps.session.outputs.target_path }}/artifacts/dedicated-runner-e2e/evidence.json
           if-no-files-found: error
           retention-days: 30
+
+  queue_watchdog:
+    needs: resolve_rules
+    name: Dedicated runner queue watchdog
+    runs-on: windows-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+    env:
+      RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
+      TARGET_RUN_ID: ${{ github.run_id }}
+      TARGET_JOB_NAME: Pickup on dedicated Desktop runtime runner
+      STALL_AFTER_SECONDS: "60"
+      CORRELATION_ID: dedicated-runner-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout canonical progress watchdog
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Observe dedicated runner pickup
+        id: observe
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
+            const runId = Number(process.env.TARGET_RUN_ID);
+            const run = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            const anchor = new Date(run.data.created_at || Date.now());
+            while (true) {
+              const response = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+              });
+              const job = response.data.jobs.find((item) => item.name === process.env.TARGET_JOB_NAME) || null;
+              if (job && (job.status !== 'queued' || Number(job.runner_id || 0) > 0)) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: String(job.id),
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: job.status === 'completed' ? 'completed' : 'running',
+                  last_material_progress_at: new Date().toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+              const noProgressMs = Date.now() - anchor.getTime();
+              if (noProgressMs >= stallMs) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: job ? String(job.id) : 'dedicated-runner-job-not-created',
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: 'queued',
+                  last_material_progress_at: anchor.toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+              await sleep(Math.min(15000, stallMs - noProgressMs));
+            }
+
+      - name: Evaluate canonical progress watchdog
+        id: watchdog
+        continue-on-error: true
+        shell: pwsh
+        run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
+
+      - name: Fail closed and cancel stalled canary
+        if: steps.watchdog.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('progress-watchdog-output.json')) {
+              core.setFailed('PROGRESS_WATCHDOG_EVIDENCE_MISSING');
+              return;
+            }
+            const decision = JSON.parse(fs.readFileSync('progress-watchdog-output.json', 'utf8'));
+            if (decision.decision !== 'block') {
+              core.setFailed(`PROGRESS_WATCHDOG_INVALID_DECISION:${decision.decision || 'missing'}`);
+              return;
+            }
+            core.setFailed(`SELF_HOSTED_RUNNER_UNAVAILABLE:${decision.no_progress_seconds}s`);
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.TARGET_RUN_ID),
+            });
+
