@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """Prova E2E independente do runner dedicado do Desktop Runtime."""
 from __future__ import annotations
+
 import argparse
 import json
 import os
+import re
 import socket
 from pathlib import Path
 
 EXPECTED_HOST = "DESKTOP-PDQK954"
 EXPECTED_REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
 EXPECTED_RUNNER = "DESKTOP-PDQK954-runtime"
+VERSION_RE = re.compile(r"^\d+\.\d+\.\d+$")
+SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def env_true(name: str) -> bool:
+    return os.environ.get(name, "").strip().casefold() == "true"
 
 
 def build_evidence() -> dict:
@@ -19,13 +27,24 @@ def build_evidence() -> dict:
     runner_os = os.environ.get("RUNNER_OS", "")
     runner_arch = os.environ.get("RUNNER_ARCH", "")
     sha = os.environ.get("GITHUB_SHA", "")
+    rules_sha = os.environ.get("RULES_SHA", "")
+    runner_version = os.environ.get("RUNNER_VERSION_OBSERVED", "").strip()
+    registration_supported = env_true("RUNNER_REGISTRATION_SUPPORTED")
+    runtime_supported_now = env_true("RUNNER_RUNTIME_SUPPORTED")
+    deprecation_api_status = os.environ.get("RUNNER_DEPRECATION_API_STATUS", "").strip()
+
     ok = (
         host.casefold() == EXPECTED_HOST.casefold()
         and repo == EXPECTED_REPOSITORY
         and runner == EXPECTED_RUNNER
         and runner_os.casefold() == "windows"
         and runner_arch.casefold() == "x64"
-        and len(sha) == 40
+        and SHA_RE.fullmatch(sha) is not None
+        and SHA_RE.fullmatch(rules_sha) is not None
+        and VERSION_RE.fullmatch(runner_version) is not None
+        and registration_supported
+        and runtime_supported_now
+        and bool(deprecation_api_status)
     )
     return {
         "ok": ok,
@@ -35,6 +54,11 @@ def build_evidence() -> dict:
         "runner_os": runner_os,
         "runner_arch": runner_arch,
         "source_sha": sha,
+        "rules_sha": rules_sha,
+        "runner_version": runner_version,
+        "runner_registration_supported": registration_supported,
+        "runner_runtime_supported_now": runtime_supported_now,
+        "runner_deprecation_api_status": deprecation_api_status,
         "production_touched": False,
         "secrets_read": False,
         "reboot_performed": False,
@@ -47,7 +71,10 @@ def main() -> int:
     args = parser.parse_args()
     evidence = build_evidence()
     args.evidence_file.parent.mkdir(parents=True, exist_ok=True)
-    args.evidence_file.write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    args.evidence_file.write_text(
+        json.dumps(evidence, sort_keys=True, indent=2) + "\n",
+        encoding="utf-8",
+    )
     print(json.dumps(evidence, sort_keys=True))
     return 0 if evidence["ok"] else 3
 
