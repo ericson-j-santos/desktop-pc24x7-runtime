@@ -158,6 +158,25 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
         "register_task",
         lambda **kwargs: (_ for _ in ()).throw(m.BrokerError("task_scheduler_access_denied")),
     )
+    monkeypatch.setattr(
+        m,
+        "register_user_autostart",
+        lambda **kwargs: {
+            "ok": True,
+            "mode": "HKCU_RUN_AT_LOGON",
+            "readback_verified": True,
+            "requires_admin": False,
+        },
+    )
+    monkeypatch.setattr(
+        m,
+        "start_user_broker",
+        lambda **kwargs: {
+            "requested": True,
+            "pid": 4321,
+            "functional_success_proven": False,
+        },
+    )
     result = m.install(
         source,
         source_sha="a" * 40,
@@ -169,8 +188,15 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
     assert result["ok"] is True
     assert result["activation_pending"] is True
     assert result["requires_uac_activation"] is True
+    assert result["user_autostart"]["mode"] == "HKCU_RUN_AT_LOGON"
+    assert result["user_autostart"]["readback_verified"] is True
+    assert result["start"]["requested"] is True
+    assert result["functional_success_proven"] is False
     metadata = json.loads((runtime / "metadata.json").read_text(encoding="utf-8"))
     assert metadata["activation_pending"] is True
+    assert metadata["fallback_persistence"]["mode"] == "HKCU_RUN_AT_LOGON"
+    assert metadata["fallback_persistence"]["readback_verified"] is True
+    assert metadata["fallback_start_requested"] is True
     assert (runtime / "releases" / ("a" * 40) / "scripts" / "desktop_admin_broker.py").is_file()
     assert (runtime / "releases" / ("a" * 40) / "scripts" / "desktop_admin_broker_uac_launcher.py").is_file()
     activation = runtime / "Activate-Desktop-Admin-Broker.cmd"
@@ -473,3 +499,89 @@ def test_failed_command_state_does_not_persist_raw_exception_text(
     assert state["accepted"]["status"] == "failed"
     assert state["accepted"]["error_code"] == "RuntimeError"
     assert "sensitive detail" not in json.dumps(state)
+
+
+def test_user_autostart_is_hkcu_fixed_readback_and_no_shell(monkeypatch, tmp_path: Path) -> None:
+    class FakeKey:
+        def __enter__(self):
+            return self
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    class FakeWinreg:
+        HKEY_CURRENT_USER = object()
+        KEY_SET_VALUE = 1
+        KEY_QUERY_VALUE = 2
+        REG_SZ = 1
+
+        def __init__(self):
+            self.value = None
+
+        def CreateKeyEx(self, root, path, reserved, access):
+            assert root is self.HKEY_CURRENT_USER
+            assert path == m.USER_RUN_KEY
+            assert access == self.KEY_SET_VALUE | self.KEY_QUERY_VALUE
+            return FakeKey()
+
+        def SetValueEx(self, key, name, reserved, kind, value):
+            assert name == m.USER_RUN_VALUE
+            assert kind == self.REG_SZ
+            self.value = value
+
+        def QueryValueEx(self, key, name):
+            assert name == m.USER_RUN_VALUE
+            return self.value, self.REG_SZ
+
+    fake = FakeWinreg()
+    monkeypatch.setitem(m.sys.modules, "winreg", fake)
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    python = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    python.write_text("", encoding="utf-8")
+    launcher.write_text("", encoding="utf-8")
+
+    result = m.register_user_autostart(
+        python_executable=python,
+        launcher=launcher,
+    )
+
+    assert result["mode"] == "HKCU_RUN_AT_LOGON"
+    assert result["readback_verified"] is True
+    assert result["requires_admin"] is False
+    assert str(python.resolve()) in fake.value
+    assert str(launcher.resolve()) in fake.value
+    source = MODULE.read_text(encoding="utf-8").casefold()
+    assert "hkey_local_machine" not in source
+    assert "shell=true" not in source
+
+
+def test_user_broker_start_is_fixed_argv_and_not_functional_success(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = []
+
+    class Proc:
+        pid = 9876
+
+    def fake_popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return Proc()
+
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(m.os, "name", "nt")
+    python = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    python.write_text("", encoding="utf-8")
+    launcher.write_text("", encoding="utf-8")
+
+    result = m.start_user_broker(
+        python_executable=python,
+        launcher=launcher,
+    )
+
+    assert result["requested"] is True
+    assert result["functional_success_proven"] is False
+    argv, kwargs = calls[0]
+    assert argv == [str(python.resolve()), str(launcher.resolve())]
+    assert kwargs["shell"] is False
