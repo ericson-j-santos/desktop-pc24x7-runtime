@@ -42,16 +42,18 @@ def test_benchmark_queue_is_bounded_by_canonical_watchdog() -> None:
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in content
 
 
-def test_benchmark_requires_agentic_context_gate() -> None:
+def test_benchmark_executes_context_ladder_and_repetition_gate() -> None:
     content = workflow_text()
-    assert 'MIN_CONTEXT: "64000"' in content
-    assert '"--min-context", $env:MIN_CONTEXT' in content
+    assert 'CONTEXTS: "8192,32768,64000"' in content
+    assert 'REPETITIONS: "3"' in content
+    assert '"--contexts", $env:CONTEXTS' in content
+    assert '"--repetitions", $env:REPETITIONS' in content
 
 
 def test_benchmark_uses_current_canonical_operational_rules() -> None:
     content = workflow_text()
-    assert "881d9ca2f8e77025edb7298b22981109c567a730" in content
-    assert "5af7b5ab6e31c24744176abd774855168c55953f" not in content
+    assert "10d2489e8cac3770d1c07fac4ccfece0a0112269" in content
+    assert "881d9ca2f8e77025edb7298b22981109c567a730" not in content
 
 
 def test_benchmark_watchdog_uses_current_attempt_clock() -> None:
