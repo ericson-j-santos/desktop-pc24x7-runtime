@@ -29,7 +29,7 @@ on:
         description: Full immutable SHA from ericson-j-santos/engineering-worker-pool
         required: true
         type: string
-        default: c9b3b6ca59f2ebed663e5242d68f727373d43a6f
+        default: 6ea8b4bb2ab69727f13ecda53aadc7ef4b919eb7
 
 permissions:
   contents: read
@@ -148,7 +148,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 15
     env:
-      WORKER_POOL_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_pool_sha || 'c9b3b6ca59f2ebed663e5242d68f727373d43a6f' }}
+      WORKER_POOL_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_pool_sha || '6ea8b4bb2ab69727f13ecda53aadc7ef4b919eb7' }}
       RULES_SHA: ac2297988651f41ab03469808e41f83496e9c58f
       TARGET_REPO: C:\dev\reqsys-v2-enterprise-real
       CORRELATION_ID: worker-pool-runtime-${{ github.run_id }}-${{ github.run_attempt }}
