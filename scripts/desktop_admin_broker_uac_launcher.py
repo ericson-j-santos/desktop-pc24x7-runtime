@@ -99,13 +99,22 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
     validate_launcher(host=socket.gethostname(), platform=os.name, confirm=confirm)
     installation = load_installation(metadata_path)
 
-    current = broker.task_status()
-    if task_ready(current):
-        return {"ok": True, "mode": "already_ready", **finalize(installation)}
+    persisted_task = installation["metadata"].get("admin_task") or {}
+    if (
+        installation["metadata"].get("admin_channel_ready") is True
+        and task_ready(persisted_task)
+    ):
+        return {
+            "ok": True,
+            "mode": "already_ready",
+            "task": persisted_task,
+            "start": installation["metadata"].get("admin_task_start") or {},
+            "metadata": installation["metadata"],
+        }
 
     if is_admin():
-        broker.register_task_from_metadata(installation["metadata_path"])
-        return {"ok": True, "mode": "already_elevated", **finalize(installation)}
+        result = broker.register_task_from_metadata(installation["metadata_path"])
+        return {"ok": True, "mode": "already_elevated", **result}
 
     rc = shell_execute_runas(
         installation["python_executable"],
@@ -117,8 +126,20 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
 
     deadline = time.monotonic() + max(5, min(timeout_seconds, 120))
     while time.monotonic() < deadline:
-        if task_ready(broker.task_status()):
-            return {"ok": True, "mode": "uac", **finalize(installation)}
+        refreshed = broker.load_installed_metadata(
+            installation["metadata_path"],
+            require_current_release=False,
+        )
+        metadata = refreshed["metadata"]
+        task = metadata.get("admin_task") or {}
+        if metadata.get("admin_channel_ready") is True and task_ready(task):
+            return {
+                "ok": True,
+                "mode": "uac",
+                "task": task,
+                "start": metadata.get("admin_task_start") or {},
+                "metadata": metadata,
+            }
         time.sleep(1.0)
     return {"ok": False, "mode": "uac", "result": "UAC_APPROVAL_OR_PROVISIONING_PENDING"}
 
