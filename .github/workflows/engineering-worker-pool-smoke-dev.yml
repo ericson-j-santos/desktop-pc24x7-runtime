@@ -148,6 +148,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 15
     env:
+      # Worker Pool autonomous reconciler integrated at main via PR #12.
       WORKER_POOL_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_pool_sha || '6ea8b4bb2ab69727f13ecda53aadc7ef4b919eb7' }}
       RULES_SHA: ac2297988651f41ab03469808e41f83496e9c58f
       TARGET_REPO: C:\dev\reqsys-v2-enterprise-real
