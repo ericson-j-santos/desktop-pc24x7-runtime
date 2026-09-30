@@ -45,8 +45,8 @@ TASK_INSTANCES_IGNORE_NEW = 2
 USER_RUN_KEY = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 USER_RUN_VALUE = "DesktopPc24x7AdminBroker"
 INSTALL_CONFIRM = "INSTALL-DESKTOP-ADMIN-BROKER"
-DEFAULT_POLL_SECONDS = 90
-MAX_COMMENT_AGE_SECONDS = 300
+DEFAULT_POLL_SECONDS = 300
+MAX_COMMENT_AGE_SECONDS = 1800
 WATCHDOG_SCRIPT = "desktop_control_plane_watchdog.py"
 WATCHDOG_UAC_SCRIPT = "desktop_control_plane_watchdog_uac_launcher.py"
 RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
@@ -621,11 +621,18 @@ def process_once(metadata: dict[str, Any], *, reference_time: datetime | None = 
                 "outcome": outcome,
             }
         except Exception as exc:
+            error_code = type(exc).__name__
+            if isinstance(exc, BrokerError):
+                controlled = str(exc).strip()
+                if controlled and len(controlled) <= 120 and all(
+                    ch.isalnum() or ch in "_:-" for ch in controlled
+                ):
+                    error_code = controlled
             state["accepted"] = {
                 "comment_id": comment_id,
                 "action": action,
                 "status": "failed",
-                "error_code": type(exc).__name__,
+                "error_code": error_code,
             }
         state["observed_at"] = now_iso()
         atomic_json(state_path(metadata), state)
@@ -950,12 +957,34 @@ def load_installed_metadata(metadata_path: Path, *, require_current_release: boo
 
 def register_task_from_metadata(metadata_path: Path) -> dict[str, Any]:
     installation = load_installed_metadata(metadata_path, require_current_release=True)
-    result = register_task(
+    register_task(
         python_executable=installation["python_executable"],
         launcher=installation["launcher"],
     )
+    observed = task_status()
+    ready = (
+        observed.get("exists") is True
+        and observed.get("trigger_at_startup") is True
+        and str(observed.get("logon_type") or "").casefold() == "s4u"
+        and str(observed.get("run_level") or "").casefold() == "highest"
+    )
+    if not ready:
+        raise BrokerError("task_registration_readback_failed")
+    started = run_task()
+    metadata = dict(installation["metadata"])
+    metadata.update(
+        {
+            "activation_pending": False,
+            "requires_uac_activation": False,
+            "admin_channel_ready": True,
+            "admin_task": observed,
+            "admin_task_start": started,
+            "uac_activated_at": now_iso(),
+        }
+    )
+    atomic_json(installation["metadata_path"], metadata)
     remove_user_autostart()
-    return result
+    return {"ok": True, "task": observed, "start": started, "metadata_updated": True}
 
 
 def install(
