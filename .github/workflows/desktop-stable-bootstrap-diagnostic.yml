@@ -1,0 +1,170 @@
+name: Desktop Stable Bootstrap Diagnostic
+
+on:
+  push:
+    branches:
+      - "fix/admin-broker-readback-probe-live-20260929-2315"
+    paths:
+      - "scripts/desktop_stable_bootstrap_executor.py"
+      - "tests/test_desktop_stable_bootstrap_executor.py"
+      - ".sdd/specs/desktop-stable-bootstrap-executor.requirements.md"
+      - ".sdd/specs/desktop-stable-bootstrap-executor.spec.json"
+      - ".github/workflows/desktop-stable-bootstrap-diagnostic.yml"
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: desktop-stable-bootstrap-diagnostic
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Validate fixed bootstrap executor contract
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout exact diagnostic SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Validate Python and targeted tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          python -m py_compile scripts/desktop_stable_bootstrap_executor.py
+          python -m pip install --disable-pip-version-check pytest==8.4.2
+          python -m pytest tests/test_desktop_stable_bootstrap_executor.py -q
+
+  execute:
+    needs: contract
+    name: Execute confirmed stable bootstrap on Desktop
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 8
+    env:
+      RULES_SHA: 2e8aa9912dd453b9f1d7bc4bdee588a40a85e729
+      CORRELATION_ID: desktop-stable-bootstrap-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_REL: artifacts/desktop-stable-bootstrap/evidence.json
+    steps:
+      - name: Checkout exact diagnostic SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Assert exact physical host
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") {
+            throw "UNEXPECTED_HOST:$env:COMPUTERNAME"
+          }
+
+      - name: Checkout canonical operational rules exact SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap governed session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $launcherArgs = @(
+            "--policy", $policy,
+            "--repo", $env:GITHUB_WORKSPACE,
+            "--session-prefix", "desktop-stable-bootstrap",
+            "--correlation-id", $env:CORRELATION_ID,
+            "--expected-head", "${{ github.sha }}",
+            "--sync-ref", "origin/${{ github.ref_name }}",
+            "--require-runner-version-preflight"
+          )
+          $raw = & python $launcher @launcherArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = @($raw)[-1] | ConvertFrom-Json
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true) {
+            throw "SESSION_LAUNCH_BLOCKED"
+          }
+          if ($data.head -ne "${{ github.sha }}") { throw "SESSION_HEAD_MISMATCH" }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Execute fixed adapter through Command Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $adapter = Join-Path $env:TARGET_PATH "scripts\desktop_stable_bootstrap_executor.py"
+          $gatewayArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "2",
+            "--timeout", "240",
+            "--expected-head", "${{ github.sha }}",
+            "--",
+            "python", $adapter,
+            "--confirm", "EXECUTE-CONFIRMED-DESKTOP-STABLE-BOOTSTRAP",
+            "--evidence-file", $env:EVIDENCE_REL
+          )
+          & python $gateway @gatewayArgs
+          exit $LASTEXITCODE
+
+      - name: Upload sanitized execution evidence
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-stable-bootstrap-${{ github.run_id }}
+          path: ${{ steps.session.outputs.target_path }}/artifacts/desktop-stable-bootstrap/evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
+  queue_watchdog:
+    needs: contract
+    name: Desktop bootstrap pickup watchdog
+    runs-on: windows-latest
+    timeout-minutes: 3
+    steps:
+      - name: Cancel if dedicated runner does not pick up
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const deadline = Date.now() + 75000;
+            while (Date.now() < deadline) {
+              const response = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: context.runId,
+                per_page: 100,
+              });
+              const job = response.data.jobs.find(
+                (item) => item.name === "Execute confirmed stable bootstrap on Desktop"
+              );
+              if (job && (job.status !== "queued" || Number(job.runner_id || 0) > 0)) {
+                core.info(`pickup observed: status=${job.status} runner_id=${job.runner_id || 0}`);
+                return;
+              }
+              await sleep(10000);
+            }
+            core.setFailed("DEDICATED_DESKTOP_RUNNER_PICKUP_TIMEOUT");
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: context.runId,
+            });
