@@ -12,9 +12,11 @@ Canal outbound-only:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
+import shutil
 import socket
 import subprocess
 import sys
@@ -50,6 +52,7 @@ WATCHDOG_UAC_SCRIPT = "desktop_control_plane_watchdog_uac_launcher.py"
 RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
 RUNNER_BOOTSTRAP_SCRIPT = "activate_desktop_runtime_runner.py"
 READBACK_SCRIPT = "desktop_admin_broker_readback.py"
+PERSISTED_PYTHON_DIR = "python-runtime"
 
 ALLOWED_COMMANDS = {
     "/desktop-runtime admin status": "status",
@@ -108,6 +111,102 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _probe_python_version(python_executable: Path) -> str:
+    completed = subprocess.run(
+        [str(python_executable), "--version"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=15,
+        check=False,
+    )
+    observed = (completed.stdout or completed.stderr or "").strip()
+    if completed.returncode != 0 or not observed.startswith("Python "):
+        raise BrokerError("python_runtime_probe_failed")
+    return observed.removeprefix("Python ").strip()
+
+
+def _python_source_root(python_executable: Path) -> Path:
+    executable = python_executable.resolve()
+    if not executable.is_file():
+        raise BrokerError("python_executable_missing")
+    root = executable.parent
+    if (root / "pyvenv.cfg").is_file() or (root.parent / "pyvenv.cfg").is_file():
+        raise BrokerError("python_virtualenv_not_persistable")
+    runtime_markers = (
+        root / "python3.dll",
+        root / "python312.dll",
+        root / "python312.zip",
+        root / "Lib",
+    )
+    if not any(path.exists() for path in runtime_markers):
+        raise BrokerError("python_runtime_source_incomplete")
+    return root
+
+
+def stage_persistent_python(
+    python_executable: Path,
+    runtime_root: Path,
+) -> dict[str, Any]:
+    source_executable = python_executable.resolve()
+    source_root = _python_source_root(source_executable)
+    source_hash = _sha256_file(source_executable)
+    version = _probe_python_version(source_executable)
+
+    destination_root = (
+        runtime_root.resolve()
+        / PERSISTED_PYTHON_DIR
+        / source_hash[:16]
+    )
+    destination_executable = destination_root / source_executable.name
+    reused = destination_root.is_dir()
+
+    if not reused:
+        destination_root.parent.mkdir(parents=True, exist_ok=True)
+        staging = destination_root.with_name(
+            destination_root.name + f".tmp-{os.getpid()}"
+        )
+        if staging.exists():
+            shutil.rmtree(staging)
+        try:
+            shutil.copytree(source_root, staging, symlinks=False)
+            staged_executable = staging / source_executable.name
+            if not staged_executable.is_file():
+                raise BrokerError("persisted_python_executable_missing")
+            if _sha256_file(staged_executable) != source_hash:
+                raise BrokerError("persisted_python_hash_mismatch")
+            if _probe_python_version(staged_executable) != version:
+                raise BrokerError("persisted_python_version_mismatch")
+            os.replace(staging, destination_root)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+
+    if not destination_executable.is_file():
+        raise BrokerError("persisted_python_executable_missing")
+    if _sha256_file(destination_executable) != source_hash:
+        raise BrokerError("persisted_python_hash_mismatch")
+    if _probe_python_version(destination_executable) != version:
+        raise BrokerError("persisted_python_version_mismatch")
+
+    return {
+        "python_executable": destination_executable.resolve(),
+        "runtime_root": destination_root.resolve(),
+        "version": version,
+        "executable_sha256": source_hash,
+        "reused": reused,
+    }
 
 
 def parse_github_time(value: str) -> datetime:
@@ -635,24 +734,35 @@ def remove_user_autostart() -> dict[str, Any]:
 
 
 def start_user_broker(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
-    """Solicita início imediato por argv fixo, sem declarar sucesso funcional."""
+    """Inicia o fallback fixo e rejeita processo que morre imediatamente."""
     require_windows_desktop()
+    python_path = python_executable.resolve()
+    launcher_path = launcher.resolve()
+    if not python_path.is_file():
+        raise BrokerError("persisted_python_executable_missing")
+    if not launcher_path.is_file():
+        raise BrokerError("broker_launcher_missing")
     flags = 0
     if os.name == "nt":
         flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
         flags |= int(getattr(subprocess, "DETACHED_PROCESS", 0))
     process = subprocess.Popen(
-        [str(python_executable.resolve()), str(launcher.resolve())],
-        cwd=launcher.parent,
+        [str(python_path), str(launcher_path)],
+        cwd=launcher_path.parent,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         shell=False,
         creationflags=flags,
     )
+    time.sleep(1.0)
+    exit_code = process.poll()
+    if exit_code is not None:
+        raise BrokerError("user_broker_start_failed")
     return {
         "requested": True,
         "pid": int(process.pid),
+        "startup_survived": True,
         "functional_success_proven": False,
     }
 
@@ -862,6 +972,12 @@ def install(
     host = require_windows_desktop()
     sha = validate_sha(source_sha)
     runtime = (runtime_root or default_runtime_root()).resolve()
+    runtime.mkdir(parents=True, exist_ok=True)
+    persistent_python = stage_persistent_python(
+        python_executable.resolve(),
+        runtime,
+    )
+    stable_python = Path(persistent_python["python_executable"])
     release = runtime / "releases" / sha
     _copy_release(source_root.resolve(), release)
     launcher = _write_launcher(runtime)
@@ -869,7 +985,7 @@ def install(
     activation_launcher = _write_uac_activation_launcher(
         runtime,
         release_root=release,
-        python_executable=python_executable.resolve(),
+        python_executable=stable_python,
         metadata_path=metadata_path,
     )
     metadata = {
@@ -879,7 +995,13 @@ def install(
         "source_sha": sha,
         "runtime_root": str(runtime),
         "release_root": str(release),
-        "python_executable": str(python_executable.resolve()),
+        "python_executable": str(stable_python),
+        "python_runtime": {
+            "persistent": True,
+            "version": persistent_python["version"],
+            "executable_sha256": persistent_python["executable_sha256"],
+            "reused": persistent_python["reused"],
+        },
         "poll_seconds": max(30, min(int(poll_seconds), 300)),
         "not_before": now_iso(),
         "repository": REPOSITORY,
@@ -892,24 +1014,23 @@ def install(
         "installed_at": now_iso(),
         "activation_launcher": str(activation_launcher),
     }
-    runtime.mkdir(parents=True, exist_ok=True)
     atomic_json(metadata_path, metadata)
     activation_pending = False
     user_autostart = None
     started = None
     try:
-        task = register_task(python_executable=python_executable.resolve(), launcher=launcher)
+        task = register_task(python_executable=stable_python, launcher=launcher)
     except BrokerError as exc:
         if str(exc) != "task_scheduler_access_denied":
             raise
         activation_pending = True
         task = {"exists": False, "error": "access_denied"}
         user_autostart = register_user_autostart(
-            python_executable=python_executable.resolve(),
+            python_executable=stable_python,
             launcher=launcher,
         )
         started = start_user_broker(
-            python_executable=python_executable.resolve(),
+            python_executable=stable_python,
             launcher=launcher,
         )
         metadata.update(

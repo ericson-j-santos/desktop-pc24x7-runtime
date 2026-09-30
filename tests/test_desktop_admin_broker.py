@@ -153,6 +153,20 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
     python = tmp_path / "python.exe"
     python.write_text("", encoding="utf-8")
     monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    stable_python = runtime / m.PERSISTED_PYTHON_DIR / "runtime-hash" / "python.exe"
+    stable_python.parent.mkdir(parents=True)
+    stable_python.write_text("", encoding="utf-8")
+    monkeypatch.setattr(
+        m,
+        "stage_persistent_python",
+        lambda python_executable, runtime_root: {
+            "python_executable": stable_python,
+            "runtime_root": stable_python.parent,
+            "version": "3.12.10",
+            "executable_sha256": "f" * 64,
+            "reused": False,
+        },
+    )
     monkeypatch.setattr(
         m,
         "register_task",
@@ -563,6 +577,10 @@ def test_user_broker_start_is_fixed_argv_and_not_functional_success(
     class Proc:
         pid = 9876
 
+        @staticmethod
+        def poll():
+            return None
+
     def fake_popen(argv, **kwargs):
         calls.append((argv, kwargs))
         return Proc()
@@ -581,7 +599,140 @@ def test_user_broker_start_is_fixed_argv_and_not_functional_success(
     )
 
     assert result["requested"] is True
+    assert result["startup_survived"] is True
     assert result["functional_success_proven"] is False
     argv, kwargs = calls[0]
     assert argv == [str(python.resolve()), str(launcher.resolve())]
     assert kwargs["shell"] is False
+
+
+def test_stage_persistent_python_copies_runtime_and_reuses_by_hash(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source-python"
+    source.mkdir()
+    python = source / "python.exe"
+    python.write_bytes(b"python-runtime")
+    (source / "python312.dll").write_bytes(b"dll")
+    (source / "Lib").mkdir()
+    (source / "Lib" / "os.py").write_text("# stdlib\n", encoding="utf-8")
+    runtime = tmp_path / "broker-runtime"
+
+    monkeypatch.setattr(m, "_probe_python_version", lambda executable: "3.12.10")
+
+    first = m.stage_persistent_python(python, runtime)
+    stable = Path(first["python_executable"])
+    assert stable.is_file()
+    assert stable.parent.parent.name == m.PERSISTED_PYTHON_DIR
+    assert first["version"] == "3.12.10"
+    assert first["reused"] is False
+    assert m._sha256_file(stable) == m._sha256_file(python)
+    assert (stable.parent / "python312.dll").is_file()
+    assert (stable.parent / "Lib" / "os.py").is_file()
+
+    second = m.stage_persistent_python(python, runtime)
+    assert second["python_executable"] == stable
+    assert second["reused"] is True
+
+
+def test_stage_persistent_python_rejects_virtualenv(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    venv = tmp_path / "venv"
+    scripts = venv / "Scripts"
+    scripts.mkdir(parents=True)
+    python = scripts / "python.exe"
+    python.write_bytes(b"python-runtime")
+    (venv / "pyvenv.cfg").write_text("home = C:\\Python312\n", encoding="utf-8")
+
+    with pytest.raises(m.BrokerError, match="python_virtualenv_not_persistable"):
+        m.stage_persistent_python(python, tmp_path / "runtime")
+
+
+def test_install_uses_persisted_python_for_hkcu_and_immediate_start(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    scripts = source / "scripts"
+    scripts.mkdir(parents=True)
+    for name in (
+        "desktop_admin_broker.py",
+        "desktop_admin_broker_uac_launcher.py",
+        m.WATCHDOG_SCRIPT,
+        m.WATCHDOG_UAC_SCRIPT,
+        m.RDC_RECOVERY_SCRIPT,
+        m.RUNNER_BOOTSTRAP_SCRIPT,
+        m.READBACK_SCRIPT,
+    ):
+        (scripts / name).write_text("# stub\n", encoding="utf-8")
+
+    original = tmp_path / "transient" / "python.exe"
+    original.parent.mkdir()
+    original.write_text("", encoding="utf-8")
+    runtime = tmp_path / "runtime"
+    stable = runtime / m.PERSISTED_PYTHON_DIR / "abcd" / "python.exe"
+    stable.parent.mkdir(parents=True)
+    stable.write_text("", encoding="utf-8")
+    observed: list[tuple[str, Path]] = []
+
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(
+        m,
+        "stage_persistent_python",
+        lambda python_executable, runtime_root: {
+            "python_executable": stable,
+            "runtime_root": stable.parent,
+            "version": "3.12.10",
+            "executable_sha256": "a" * 64,
+            "reused": False,
+        },
+    )
+    monkeypatch.setattr(
+        m,
+        "register_task",
+        lambda **kwargs: (_ for _ in ()).throw(
+            m.BrokerError("task_scheduler_access_denied")
+        ),
+    )
+    monkeypatch.setattr(
+        m,
+        "register_user_autostart",
+        lambda **kwargs: observed.append(("hkcu", kwargs["python_executable"]))
+        or {
+            "ok": True,
+            "mode": "HKCU_RUN_AT_LOGON",
+            "readback_verified": True,
+            "requires_admin": False,
+        },
+    )
+    monkeypatch.setattr(
+        m,
+        "start_user_broker",
+        lambda **kwargs: observed.append(("start", kwargs["python_executable"]))
+        or {
+            "requested": True,
+            "pid": 1234,
+            "startup_survived": True,
+            "functional_success_proven": False,
+        },
+    )
+
+    result = m.install(
+        source,
+        source_sha="b" * 40,
+        python_executable=original,
+        runtime_root=runtime,
+        poll_seconds=90,
+        confirm=m.INSTALL_CONFIRM,
+    )
+
+    assert result["activation_pending"] is True
+    assert observed == [("hkcu", stable), ("start", stable)]
+    metadata = json.loads((runtime / "metadata.json").read_text(encoding="utf-8"))
+    assert metadata["python_executable"] == str(stable)
+    assert metadata["python_runtime"]["persistent"] is True
+    assert metadata["python_runtime"]["version"] == "3.12.10"
+    assert str(original) not in json.dumps(metadata)

@@ -48,10 +48,16 @@ substituído ou ter suas labels alteradas por esta capacidade.
 - nenhuma entrada pode fornecer shell, caminho, host, executável, repo, labels ou token;
 - token de runner nunca é persistido/logado;
 - sem listener inbound, reboot, shutdown, produção, deploy, force-push ou RBAC amplo;
+- antes de registrar qualquer persistência, o broker deve copiar o runtime Python
+  funcional para `%LOCALAPPDATA%\\DesktopPC24x7\\AdminBroker\\python-runtime\\<hash>`,
+  validar SHA-256 do executável e versão por execução independente e persistir
+  somente o executável dessa cópia imutável; Python global, virtualenv e
+  executável transitório do runner não podem ser usados por Task Scheduler/HKCU;
 - quando AtStartup + S4U não puder ser registrado sem elevação, o broker pode
   registrar fallback estrito em `HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run`,
   com valor fixo `DesktopPc24x7AdminBroker`, readback exato e início imediato
-  por argv fixo com `shell=False`;
+  por argv fixo com `shell=False`; o processo deve sobreviver à janela inicial
+  de partida, caso contrário a instalação falha fechada;
 - esse fallback é somente canal de recuperação local/DEV e não satisfaz o
   critério final AtStartup + S4U + highest;
 - a elevação da tarefa AtStartup + S4U continua exigindo autorização
@@ -66,8 +72,11 @@ substituído ou ter suas labels alteradas por esta capacidade.
 5. testes provam uso exclusivo do bootstrap do runner novo;
 6. comandos de watchdog apontam apenas para task/runtime próprios;
 7. fallback não administrativo usa somente HKCU do usuário corrente, comando
-   fixo e `shell=False`, sem tratar criação de processo como sucesso funcional;
-8. CI de PR verde no HEAD exato.
+   fixo e `shell=False`, apontando exclusivamente para o Python persistido no
+   runtime próprio; criação de processo não basta e morte imediata falha fechada;
+8. testes provam cópia idempotente do runtime Python, hash/versão, rejeição de
+   virtualenv e ausência do caminho Python transitório na metadata persistida;
+9. CI de PR verde no HEAD exato.
 
 ## Critérios de aceite runtime
 
