@@ -1031,7 +1031,7 @@ def install(
             "executable_sha256": persistent_python["executable_sha256"],
             "reused": persistent_python["reused"],
         },
-        "poll_seconds": max(30, min(int(poll_seconds), 300)),
+        "poll_seconds": DEFAULT_POLL_SECONDS,
         "not_before": now_iso(),
         "repository": REPOSITORY,
         "issue_number": ISSUE_NUMBER,
