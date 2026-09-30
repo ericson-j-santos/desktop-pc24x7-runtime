@@ -51,6 +51,7 @@ def test_allowlist_is_exact_and_has_no_shell_action() -> None:
         "/desktop-runtime admin recover-runner",
         "/desktop-runtime admin recover-control-plane",
         "/desktop-runtime admin activate-watchdog",
+        "/desktop-runtime admin refresh-self",
     }
     source = MODULE.read_text(encoding="utf-8").casefold()
     assert "shell=true" not in source
