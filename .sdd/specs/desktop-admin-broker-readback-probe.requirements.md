@@ -30,3 +30,5 @@ do runner do Desktop, Noteri, RDC, GUI ou shell remoto.
   funcional;
 - ausência/falha do readback permanece estado bloqueado e não dispara retry de
   recovery automaticamente.
+
+<!-- diagnostic-trigger: current-main-cbaffb561124d8a2a54f863a45312ac8cb8c10cb-20260929 -->
