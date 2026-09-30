@@ -99,9 +99,18 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
     validate_launcher(host=socket.gethostname(), platform=os.name, confirm=confirm)
     installation = load_installation(metadata_path)
 
-    current = broker.task_status()
-    if task_ready(current):
-        return {"ok": True, "mode": "already_ready", **finalize(installation)}
+    persisted_task = installation["metadata"].get("admin_task") or {}
+    if (
+        installation["metadata"].get("admin_channel_ready") is True
+        and task_ready(persisted_task)
+    ):
+        return {
+            "ok": True,
+            "mode": "already_ready",
+            "task": persisted_task,
+            "start": installation["metadata"].get("admin_task_start") or {},
+            "metadata": installation["metadata"],
+        }
 
     if is_admin():
         result = broker.register_task_from_metadata(installation["metadata_path"])
