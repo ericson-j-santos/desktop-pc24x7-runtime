@@ -142,3 +142,35 @@ def test_publish_uses_plain_text_topic_protocol(monkeypatch: pytest.MonkeyPatch)
     assert payload["authoritative_success"] is False
     assert result["published"] is True
     assert result["authoritative"] is False
+
+
+def test_self_refresh_summary_is_sanitized() -> None:
+    accepted = {
+        "comment_id": 902,
+        "action": "refresh-self",
+        "status": "completed",
+        "outcome": {
+            "result": {
+                "handler": "refresh-self",
+                "refresh_state": "updated",
+                "previous_source_sha": "a" * 40,
+                "target_source_sha": "b" * 40,
+                "new_broker_started": True,
+                "ignored_path": "C:/secret/path",
+            }
+        },
+    }
+
+    payload = m.build_payload(
+        accepted=accepted,
+        source_sha="b" * 40,
+        host=m.EXPECTED_HOST,
+    )
+
+    raw = json.dumps(payload)
+    assert payload["result"]["refresh_state"] == "updated"
+    assert payload["result"]["previous_source_sha"] == "a" * 40
+    assert payload["result"]["target_source_sha"] == "b" * 40
+    assert payload["result"]["new_broker_started"] is True
+    assert "ignored_path" not in raw
+    assert "secret/path" not in raw
