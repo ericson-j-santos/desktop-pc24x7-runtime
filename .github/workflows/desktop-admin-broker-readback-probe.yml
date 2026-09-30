@@ -1,5 +1,6 @@
 name: Desktop Admin Broker Readback Probe
 
+# Diagnostic branch trigger used to read sanitized outbound broker evidence.
 on:
   push:
     branches:
