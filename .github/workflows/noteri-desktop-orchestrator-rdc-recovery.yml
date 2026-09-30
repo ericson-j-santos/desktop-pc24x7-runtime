@@ -1,0 +1,131 @@
+name: Noteri Desktop RDC Recovery via Orchestrator
+
+on:
+  push:
+    branches:
+      - "fix/noteri-orchestrator-rdc-recovery-*"
+    paths:
+      - "scripts/noteri_desktop_orchestrator_rdc_recovery.py"
+      - "tests/test_noteri_desktop_orchestrator_rdc_recovery.py"
+      - ".github/workflows/noteri-desktop-orchestrator-rdc-recovery.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  recover:
+    name: Recover Desktop RDC through Orchestrator from Noteri
+    runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
+    timeout-minutes: 5
+    steps:
+      - name: Checkout immutable source SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Checkout canonical operational rules exact SHA
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 2e8aa9912dd453b9f1d7bc4bdee588a40a85e729
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap mandatory governed session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $correlation = "desktop-rdc-orchestrator-${{ github.run_id }}-${{ github.run_attempt }}"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $anchor = "${{ github.sha }}"
+          $syncRef = "origin/$env:GITHUB_REF_NAME"
+          $args = @(
+            "--policy", $policy,
+            "--repo", $env:GITHUB_WORKSPACE,
+            "--session-prefix", "desktop-rdc-recovery",
+            "--correlation-id", $correlation,
+            "--expected-head", $anchor,
+            "--sync-ref", $syncRef
+          )
+          $raw = & python $launcher @args
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = @($raw)[-1] | ConvertFrom-Json
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true) {
+            throw "SESSION_LAUNCH_BLOCKED"
+          }
+          if ($data.head -ne $anchor) { throw "SESSION_HEAD_MISMATCH" }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "anchor_sha=$anchor" | Add-Content $env:GITHUB_OUTPUT
+          "correlation_id=$correlation" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Validate fixed recovery client through Command Gateway
+        shell: powershell
+        run: |
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $args = @(
+            "--policy", $policy,
+            "--correlation-id", "${{ steps.session.outputs.correlation_id }}-tests",
+            "run",
+            "--cwd", "${{ steps.session.outputs.target_path }}",
+            "--session-id", "${{ steps.session.outputs.session_id }}",
+            "--risk", "1",
+            "--timeout", "60",
+            "--expected-head", "${{ steps.session.outputs.anchor_sha }}",
+            "--",
+            "python", "-m", "unittest",
+            "tests.test_noteri_desktop_orchestrator_rdc_recovery", "-v"
+          )
+          & python $gateway @args
+          exit $LASTEXITCODE
+
+      - name: Recover fixed Desktop RDC through Command Gateway
+        id: recovery
+        shell: powershell
+        run: |
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\noteri_desktop_orchestrator_rdc_recovery.py"
+          $dir = Join-Path $env:RUNNER_TEMP "desktop-rdc-orchestrator"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          $evidence = Join-Path $dir "evidence.json"
+          $args = @(
+            "--policy", $policy,
+            "--correlation-id", "${{ steps.session.outputs.correlation_id }}",
+            "run",
+            "--cwd", "${{ steps.session.outputs.target_path }}",
+            "--session-id", "${{ steps.session.outputs.session_id }}",
+            "--risk", "2",
+            "--timeout", "120",
+            "--expected-head", "${{ steps.session.outputs.anchor_sha }}",
+            "--",
+            "python", $script,
+            "--confirm", "RECOVER-DESKTOP-RDC-VIA-ORCHESTRATOR",
+            "--correlation-id", "${{ steps.session.outputs.correlation_id }}",
+            "--evidence-file", $evidence,
+            "--timeout-seconds", "90"
+          )
+          & python $gateway @args
+          $code = $LASTEXITCODE
+          "evidence=$evidence" | Add-Content $env:GITHUB_OUTPUT
+          exit $code
+
+      - name: Upload sanitized recovery evidence
+        if: always() && steps.recovery.outputs.evidence != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-rdc-orchestrator-${{ github.run_id }}
+          path: ${{ steps.recovery.outputs.evidence }}
+          if-no-files-found: error
+          retention-days: 30
