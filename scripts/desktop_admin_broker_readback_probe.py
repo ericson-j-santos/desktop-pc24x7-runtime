@@ -32,6 +32,10 @@ SAFE_RESULT_KEYS = {
     "control_plane_rdc_recovery_ok",
     "watchdog_persistence_status",
     "watchdog_persistence_ok",
+    "refresh_state",
+    "previous_source_sha",
+    "target_source_sha",
+    "new_broker_started",
 }
 
 
