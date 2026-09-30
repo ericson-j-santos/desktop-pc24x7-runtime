@@ -110,3 +110,65 @@ def test_finalize_requires_verified_privileged_task(monkeypatch, tmp_path: Path)
     assert result["metadata"]["activation_pending"] is False
     assert written["path"] == metadata_path
     assert started["value"] is True
+
+
+def test_uac_launch_accepts_elevated_persisted_proof_without_low_privilege_task_readback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    release_broker = tmp_path / "desktop_admin_broker.py"
+    python = tmp_path / "python.exe"
+    release_root = tmp_path / "release"
+    release_root.mkdir()
+    release_broker.write_text("", encoding="utf-8")
+    python.write_text("", encoding="utf-8")
+    installation = {
+        "metadata": {
+            "activation_pending": True,
+            "requires_uac_activation": True,
+        },
+        "metadata_path": metadata_path,
+        "release_broker": release_broker,
+        "python_executable": python,
+        "release_root": release_root,
+    }
+    proven = {
+        "activation_pending": False,
+        "requires_uac_activation": False,
+        "admin_channel_ready": True,
+        "admin_task": {
+            "exists": True,
+            "trigger_at_startup": True,
+            "logon_type": "S4U",
+            "run_level": "highest",
+            "enabled": True,
+        },
+        "admin_task_start": {"run_returncode": 0},
+    }
+    monkeypatch.setattr(m, "validate_launcher", lambda **kwargs: None)
+    monkeypatch.setattr(m, "load_installation", lambda path: installation)
+    monkeypatch.setattr(m, "is_admin", lambda: False)
+    monkeypatch.setattr(m, "shell_execute_runas", lambda *args, **kwargs: 42)
+    monkeypatch.setattr(
+        m.broker,
+        "load_installed_metadata",
+        lambda path, require_current_release=False: {
+            "metadata": proven,
+            "metadata_path": metadata_path,
+        },
+    )
+    monkeypatch.setattr(
+        m.broker,
+        "task_status",
+        lambda: (_ for _ in ()).throw(
+            AssertionError("low privilege task readback must not be required")
+        ),
+    )
+
+    result = m.launch(metadata_path, confirm=m.LAUNCH_CONFIRM, timeout_seconds=5)
+
+    assert result["ok"] is True
+    assert result["mode"] == "uac"
+    assert result["task"]["exists"] is True
+    assert result["metadata"]["admin_channel_ready"] is True

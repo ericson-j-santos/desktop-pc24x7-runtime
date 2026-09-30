@@ -26,6 +26,7 @@ def message_event(*, generated_at: str, host: str = m.EXPECTED_HOST) -> dict:
         "comment_id": 5856419547,
         "action": "status",
         "status": "completed",
+        "error_code": "",
         "production_touched": False,
         "secrets_read": False,
         "result": {
@@ -58,6 +59,7 @@ def test_valid_readback_is_sanitized() -> None:
     assert result["source_sha"] == "a" * 40
     assert result["comment_id"] == 5856419547
     assert result["authoritative_success"] is False
+    assert result["error_code"] == ""
     assert result["result_summary"]["handler"] == "status"
     assert "ignored_secret" not in raw
     assert "must-not-leak" not in raw
@@ -120,3 +122,52 @@ def test_probe_rejects_absent_message(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     with pytest.raises(m.ProbeError, match="ntfy_message_missing"):
         m.probe(max_age_seconds=900)
+
+
+def test_failed_readback_exposes_only_sanitized_error_code() -> None:
+    reference = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    event = message_event(generated_at="2026-09-27T13:44:30+00:00")
+    payload = json.loads(event["message"])
+    payload["status"] = "failed"
+    payload["error_code"] = "BrokerError"
+    payload["error_detail"] = "secret-detail-must-not-leak"
+    event["message"] = json.dumps(payload)
+
+    result = m.validate_message(
+        event,
+        max_age_seconds=900,
+        reference_time=reference,
+    )
+
+    raw = json.dumps(result)
+    assert result["status"] == "failed"
+    assert result["error_code"] == "BrokerError"
+    assert "secret-detail-must-not-leak" not in raw
+
+
+def test_probe_retains_self_refresh_summary() -> None:
+    reference = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    event = message_event(generated_at="2026-09-27T13:44:30+00:00")
+    payload = json.loads(event["message"])
+    payload["action"] = "refresh-self"
+    payload["result"] = {
+        "handler": "refresh-self",
+        "refresh_state": "updated",
+        "previous_source_sha": "a" * 40,
+        "target_source_sha": "b" * 40,
+        "new_broker_started": True,
+        "ignored_path": "C:/secret/path",
+    }
+    event["message"] = json.dumps(payload)
+
+    result = m.validate_message(
+        event,
+        max_age_seconds=900,
+        reference_time=reference,
+    )
+
+    raw = json.dumps(result)
+    assert result["result_summary"]["refresh_state"] == "updated"
+    assert result["result_summary"]["target_source_sha"] == "b" * 40
+    assert result["result_summary"]["new_broker_started"] is True
+    assert "ignored_path" not in raw

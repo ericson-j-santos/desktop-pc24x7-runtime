@@ -51,6 +51,7 @@ def test_allowlist_is_exact_and_has_no_shell_action() -> None:
         "/desktop-runtime admin recover-runner",
         "/desktop-runtime admin recover-control-plane",
         "/desktop-runtime admin activate-watchdog",
+        "/desktop-runtime admin refresh-self",
     }
     source = MODULE.read_text(encoding="utf-8").casefold()
     assert "shell=true" not in source
@@ -736,3 +737,280 @@ def test_install_uses_persisted_python_for_hkcu_and_immediate_start(
     assert metadata["python_runtime"]["persistent"] is True
     assert metadata["python_runtime"]["version"] == "3.12.10"
     assert str(original) not in json.dumps(metadata)
+
+
+def test_broker_error_persists_controlled_code_without_raw_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "runtime_root": str(tmp_path),
+        "release_root": str(tmp_path / "release"),
+        "source_sha": "a" * 40,
+        "not_before": (now - timedelta(seconds=30)).isoformat(),
+    }
+    comment = gh_comment(
+        comment_id=401,
+        body="/desktop-runtime admin recover-runner",
+        created=now,
+    )
+    monkeypatch.setattr(m, "fetch_comments", lambda since: [comment])
+    monkeypatch.setattr(
+        m,
+        "execute_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            m.BrokerError("runner_bootstrap_failed:github_auth_required")
+        ),
+    )
+    monkeypatch.setattr(
+        m,
+        "_publish_readback",
+        lambda meta, accepted: {"published": True, "authoritative": False},
+    )
+
+    m.process_once(metadata, reference_time=now)
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert state["accepted"]["status"] == "failed"
+    assert state["accepted"]["error_code"] == "runner_bootstrap_failed:github_auth_required"
+
+
+def test_register_task_from_metadata_persists_elevated_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    python = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    python.write_text("", encoding="utf-8")
+    launcher.write_text("", encoding="utf-8")
+    installation = {
+        "metadata": {
+            "activation_pending": True,
+            "requires_uac_activation": True,
+        },
+        "metadata_path": metadata_path,
+        "python_executable": python,
+        "launcher": launcher,
+    }
+    observed = {
+        "exists": True,
+        "trigger_at_startup": True,
+        "logon_type": "S4U",
+        "run_level": "highest",
+        "enabled": True,
+    }
+    written = {}
+    removed = {"value": False}
+    monkeypatch.setattr(
+        m,
+        "load_installed_metadata",
+        lambda path, require_current_release=False: installation,
+    )
+    monkeypatch.setattr(m, "register_task", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(m, "task_status", lambda: observed)
+    monkeypatch.setattr(m, "run_task", lambda: {"run_returncode": 0})
+    monkeypatch.setattr(m, "now_iso", lambda: "2026-09-30T21:30:00+00:00")
+    monkeypatch.setattr(
+        m,
+        "atomic_json",
+        lambda path, payload: written.update({"path": path, "payload": payload}),
+    )
+    monkeypatch.setattr(
+        m,
+        "remove_user_autostart",
+        lambda: removed.update({"value": True}) or {"ok": True},
+    )
+
+    result = m.register_task_from_metadata(metadata_path)
+
+    assert result["ok"] is True
+    assert result["task"] == observed
+    assert written["path"] == metadata_path
+    assert written["payload"]["admin_channel_ready"] is True
+    assert written["payload"]["activation_pending"] is False
+    assert written["payload"]["admin_task"] == observed
+    assert removed["value"] is True
+
+
+def test_default_poll_interval_is_rate_safe() -> None:
+    assert m.DEFAULT_POLL_SECONDS == 300
+    assert m.MAX_COMMENT_AGE_SECONDS >= 1800
+
+
+def test_remote_main_sha_uses_fixed_canonical_repository(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    observed = {}
+    git = tmp_path / "git.exe"
+    git.write_text("", encoding="utf-8")
+    target = "c" * 40
+
+    def fake_run_git(executable, args, **kwargs):
+        observed["git"] = executable
+        observed["args"] = list(args)
+        return f"{target}\trefs/heads/main"
+
+    monkeypatch.setattr(m, "_run_git", fake_run_git)
+
+    assert m._remote_main_sha(git) == target
+    assert observed["git"] == git
+    assert observed["args"] == [
+        "ls-remote",
+        "--exit-code",
+        m.REPOSITORY_URL,
+        "refs/heads/main",
+    ]
+
+
+def test_self_refresh_is_idempotent_when_main_is_current(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = "d" * 40
+    metadata = {
+        "source_sha": current,
+        "runtime_root": str(tmp_path),
+        "python_executable": str(tmp_path / "python.exe"),
+    }
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m, "_git_executable", lambda: tmp_path / "git.exe")
+    monkeypatch.setattr(m, "_remote_main_sha", lambda git: current)
+    monkeypatch.setattr(
+        m,
+        "start_user_broker",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("idempotent refresh must not start a new broker")
+        ),
+    )
+
+    result = m._self_refresh(metadata)
+
+    assert result["refresh_state"] == "already_current"
+    assert result["previous_source_sha"] == current
+    assert result["target_source_sha"] == current
+    assert result["new_broker_started"] is False
+
+
+def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    current = "d" * 40
+    target = "e" * 40
+    python = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    python.write_text("", encoding="utf-8")
+    launcher.write_text("", encoding="utf-8")
+    metadata = {
+        "source_sha": current,
+        "runtime_root": str(tmp_path),
+        "python_executable": str(python),
+        "release_root": str(tmp_path / "releases" / current),
+        "poll_seconds": 90,
+    }
+    written = {}
+
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m, "_git_executable", lambda: tmp_path / "git.exe")
+    monkeypatch.setattr(m, "_remote_main_sha", lambda git: target)
+
+    def fake_run_git(git, args, **kwargs):
+        if args[0] == "clone":
+            Path(args[-1]).mkdir(parents=True, exist_ok=True)
+            return ""
+        if "rev-parse" in args:
+            return target
+        if "status" in args:
+            return ""
+        raise AssertionError(args)
+
+    def fake_copy_release(source_root, release_root):
+        scripts = release_root / "scripts"
+        scripts.mkdir(parents=True, exist_ok=True)
+        (scripts / "desktop_admin_broker.py").write_text("# refreshed\n", encoding="utf-8")
+
+    monkeypatch.setattr(m, "_run_git", fake_run_git)
+    monkeypatch.setattr(m, "_copy_release", fake_copy_release)
+    monkeypatch.setattr(
+        m,
+        "_write_uac_activation_launcher",
+        lambda runtime_root, **kwargs: runtime_root / "Activate-Desktop-Admin-Broker.cmd",
+    )
+    monkeypatch.setattr(
+        m,
+        "atomic_json",
+        lambda path, payload: written.update({"path": path, "payload": dict(payload)}),
+    )
+    monkeypatch.setattr(
+        m,
+        "start_user_broker",
+        lambda **kwargs: {
+            "requested": True,
+            "pid": 4321,
+            "startup_survived": True,
+            "functional_success_proven": False,
+        },
+    )
+
+    result = m._self_refresh(metadata)
+
+    assert result["refresh_state"] == "updated"
+    assert result["previous_source_sha"] == current
+    assert result["target_source_sha"] == target
+    assert result["new_broker_started"] is True
+    assert written["path"] == tmp_path / "metadata.json"
+    assert written["payload"]["source_sha"] == target
+    assert written["payload"]["previous_source_sha"] == current
+    assert written["payload"]["poll_seconds"] == m.DEFAULT_POLL_SECONDS
+    assert written["payload"]["refresh_source"] == "canonical_main"
+
+
+def test_process_once_stops_after_successful_self_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "runtime_root": str(tmp_path),
+        "release_root": str(tmp_path / "release"),
+        "source_sha": "a" * 40,
+        "not_before": (now - timedelta(seconds=30)).isoformat(),
+    }
+    refresh = gh_comment(
+        comment_id=501,
+        body="/desktop-runtime admin refresh-self",
+        created=now,
+    )
+    later = gh_comment(
+        comment_id=502,
+        body="/desktop-runtime admin status",
+        created=now + timedelta(seconds=1),
+    )
+    calls = []
+    monkeypatch.setattr(m, "fetch_comments", lambda since: [refresh, later])
+    monkeypatch.setattr(
+        m,
+        "execute_action",
+        lambda action, metadata, comment_id: calls.append((action, comment_id))
+        or {
+            "ok": True,
+            "action": action,
+            "comment_id": comment_id,
+            "result": {"handler": action},
+        },
+    )
+    monkeypatch.setattr(
+        m,
+        "_publish_readback",
+        lambda meta, accepted: {"published": True, "authoritative": False},
+    )
+
+    result = m.process_once(metadata, reference_time=now + timedelta(seconds=1))
+
+    assert result["restart_requested"] is True
+    assert result["commands_accepted"] == 1
+    assert result["last_seen_comment_id"] == 501
+    assert calls == [("refresh-self", 501)]

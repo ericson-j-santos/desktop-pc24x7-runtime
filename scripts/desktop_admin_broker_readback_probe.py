@@ -32,6 +32,10 @@ SAFE_RESULT_KEYS = {
     "control_plane_rdc_recovery_ok",
     "watchdog_persistence_status",
     "watchdog_persistence_ok",
+    "refresh_state",
+    "previous_source_sha",
+    "target_source_sha",
+    "new_broker_started",
 }
 
 
@@ -108,6 +112,7 @@ def validate_message(
         "comment_id": comment_id,
         "action": str(payload.get("action") or "")[:80],
         "status": str(payload.get("status") or "unknown")[:40],
+        "error_code": str(payload.get("error_code") or "")[:120],
         "broker_generated_at": generated.isoformat(),
         "readback_age_seconds": round(max(age, 0.0), 3),
         "ntfy_message_id": str(event.get("id") or "")[:32],

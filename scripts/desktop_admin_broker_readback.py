@@ -40,6 +40,10 @@ def _safe_result_summary(accepted: dict[str, Any]) -> dict[str, Any]:
         "runner_started_now",
         "github_pickup_required",
         "local_recovery_ok",
+        "refresh_state",
+        "previous_source_sha",
+        "target_source_sha",
+        "new_broker_started",
     ):
         if key in result:
             summary[key] = result[key]
