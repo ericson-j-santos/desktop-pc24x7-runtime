@@ -64,6 +64,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Resolve evidence path
+        shell: powershell
+        run: |
+          "EVIDENCE_FILE=$env:RUNNER_TEMP\\desktop-rdc-orchestrator\\evidence.json" | Add-Content $env:GITHUB_ENV
+
       - name: Checkout canonical operational rules exact SHA
         uses: actions/checkout@v4
         with:
