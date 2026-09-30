@@ -736,3 +736,103 @@ def test_install_uses_persisted_python_for_hkcu_and_immediate_start(
     assert metadata["python_runtime"]["persistent"] is True
     assert metadata["python_runtime"]["version"] == "3.12.10"
     assert str(original) not in json.dumps(metadata)
+
+
+def test_broker_error_persists_controlled_code_without_raw_details(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "runtime_root": str(tmp_path),
+        "release_root": str(tmp_path / "release"),
+        "source_sha": "a" * 40,
+        "not_before": (now - timedelta(seconds=30)).isoformat(),
+    }
+    comment = gh_comment(
+        comment_id=401,
+        body="/desktop-runtime admin recover-runner",
+        created=now,
+    )
+    monkeypatch.setattr(m, "fetch_comments", lambda since: [comment])
+    monkeypatch.setattr(
+        m,
+        "execute_action",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            m.BrokerError("runner_bootstrap_failed:github_auth_required")
+        ),
+    )
+    monkeypatch.setattr(
+        m,
+        "_publish_readback",
+        lambda meta, accepted: {"published": True, "authoritative": False},
+    )
+
+    m.process_once(metadata, reference_time=now)
+    state = json.loads((tmp_path / "state.json").read_text(encoding="utf-8"))
+
+    assert state["accepted"]["status"] == "failed"
+    assert state["accepted"]["error_code"] == "runner_bootstrap_failed:github_auth_required"
+
+
+def test_register_task_from_metadata_persists_elevated_proof(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    python = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    python.write_text("", encoding="utf-8")
+    launcher.write_text("", encoding="utf-8")
+    installation = {
+        "metadata": {
+            "activation_pending": True,
+            "requires_uac_activation": True,
+        },
+        "metadata_path": metadata_path,
+        "python_executable": python,
+        "launcher": launcher,
+    }
+    observed = {
+        "exists": True,
+        "trigger_at_startup": True,
+        "logon_type": "S4U",
+        "run_level": "highest",
+        "enabled": True,
+    }
+    written = {}
+    removed = {"value": False}
+    monkeypatch.setattr(
+        m,
+        "load_installed_metadata",
+        lambda path, require_current_release=False: installation,
+    )
+    monkeypatch.setattr(m, "register_task", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(m, "task_status", lambda: observed)
+    monkeypatch.setattr(m, "run_task", lambda: {"run_returncode": 0})
+    monkeypatch.setattr(m, "now_iso", lambda: "2026-09-30T21:30:00+00:00")
+    monkeypatch.setattr(
+        m,
+        "atomic_json",
+        lambda path, payload: written.update({"path": path, "payload": payload}),
+    )
+    monkeypatch.setattr(
+        m,
+        "remove_user_autostart",
+        lambda: removed.update({"value": True}) or {"ok": True},
+    )
+
+    result = m.register_task_from_metadata(metadata_path)
+
+    assert result["ok"] is True
+    assert result["task"] == observed
+    assert written["path"] == metadata_path
+    assert written["payload"]["admin_channel_ready"] is True
+    assert written["payload"]["activation_pending"] is False
+    assert written["payload"]["admin_task"] == observed
+    assert removed["value"] is True
+
+
+def test_default_poll_interval_is_rate_safe() -> None:
+    assert m.DEFAULT_POLL_SECONDS == 300
+    assert m.MAX_COMMENT_AGE_SECONDS >= 1800
