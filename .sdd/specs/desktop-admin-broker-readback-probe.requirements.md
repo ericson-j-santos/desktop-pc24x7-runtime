@@ -32,3 +32,5 @@ do runner do Desktop, Noteri, RDC, GUI ou shell remoto.
   recovery automaticamente.
 
 <!-- diagnostic-trigger: current-main-cbaffb561124d8a2a54f863a45312ac8cb8c10cb-20260929 -->
+
+<!-- diagnostic-trigger: recover-runner-comment-5918887217 -->
