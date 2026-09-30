@@ -58,7 +58,9 @@ jobs:
 
   probe:
     name: Read Desktop Orchestrator capabilities from Noteri
-    if: github.event_name == 'workflow_dispatch'
+    # Diagnostic branches under fix/admin-broker-readback-probe-* may run the
+    # same read-only physical probe without changing main or the Desktop.
+    if: github.event_name == 'workflow_dispatch' || github.event_name == 'push'
     needs: contract
     runs-on: [self-hosted, Windows, X64, noteri, reqsys-dev]
     timeout-minutes: 5
