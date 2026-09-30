@@ -143,3 +143,31 @@ def test_failed_readback_exposes_only_sanitized_error_code() -> None:
     assert result["status"] == "failed"
     assert result["error_code"] == "BrokerError"
     assert "secret-detail-must-not-leak" not in raw
+
+
+def test_probe_retains_self_refresh_summary() -> None:
+    reference = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    event = message_event(generated_at="2026-09-27T13:44:30+00:00")
+    payload = json.loads(event["message"])
+    payload["action"] = "refresh-self"
+    payload["result"] = {
+        "handler": "refresh-self",
+        "refresh_state": "updated",
+        "previous_source_sha": "a" * 40,
+        "target_source_sha": "b" * 40,
+        "new_broker_started": True,
+        "ignored_path": "C:/secret/path",
+    }
+    event["message"] = json.dumps(payload)
+
+    result = m.validate_message(
+        event,
+        max_age_seconds=900,
+        reference_time=reference,
+    )
+
+    raw = json.dumps(result)
+    assert result["result_summary"]["refresh_state"] == "updated"
+    assert result["result_summary"]["target_source_sha"] == "b" * 40
+    assert result["result_summary"]["new_broker_started"] is True
+    assert "ignored_path" not in raw

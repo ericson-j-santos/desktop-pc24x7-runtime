@@ -32,6 +32,7 @@ EXPECTED_HOST = "DESKTOP-PDQK954"
 EXPECTED_ACTOR = "ericson-j-santos"
 EXPECTED_ASSOCIATION = "OWNER"
 REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
+REPOSITORY_URL = "https://github.com/ericson-j-santos/desktop-pc24x7-runtime.git"
 ISSUE_NUMBER = 2
 TASK_FOLDER = r"\Automation"
 TASK_LEAF = "DesktopPc24x7AdminBroker"
@@ -60,6 +61,7 @@ ALLOWED_COMMANDS = {
     "/desktop-runtime admin recover-runner": "recover-runner",
     "/desktop-runtime admin recover-control-plane": "recover-control-plane",
     "/desktop-runtime admin activate-watchdog": "activate-watchdog",
+    "/desktop-runtime admin refresh-self": "refresh-self",
 }
 
 
@@ -522,6 +524,133 @@ def _recover_control_plane(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _git_executable() -> Path:
+    located = shutil.which("git")
+    if not located:
+        raise BrokerError("self_refresh_git_missing")
+    return Path(located).resolve()
+
+
+def _run_git(
+    git: Path,
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout_seconds: float = 180.0,
+) -> str:
+    completed = subprocess.run(
+        [str(git), *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout_seconds,
+        check=False,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        raise BrokerError("self_refresh_git_failed")
+    return completed.stdout.strip()
+
+
+def _remote_main_sha(git: Path) -> str:
+    output = _run_git(
+        git,
+        ["ls-remote", "--exit-code", REPOSITORY_URL, "refs/heads/main"],
+        timeout_seconds=60,
+    )
+    rows = [line.split() for line in output.splitlines() if line.strip()]
+    if len(rows) != 1 or len(rows[0]) != 2 or rows[0][1] != "refs/heads/main":
+        raise BrokerError("self_refresh_main_ref_invalid")
+    return validate_sha(rows[0][0])
+
+
+def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
+    require_windows_desktop()
+    current_sha = validate_sha(str(metadata["source_sha"]))
+    runtime_root = Path(str(metadata["runtime_root"])).resolve()
+    metadata_path = runtime_root / "metadata.json"
+    python_executable = Path(str(metadata["python_executable"])).resolve()
+    launcher = runtime_root / "run.py"
+
+    git = _git_executable()
+    target_sha = _remote_main_sha(git)
+    if target_sha == current_sha:
+        return {
+            "handler": "refresh-self",
+            "refresh_state": "already_current",
+            "previous_source_sha": current_sha,
+            "target_source_sha": target_sha,
+            "new_broker_started": False,
+        }
+
+    staging_root = runtime_root / "refresh-staging"
+    staging_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="refresh-", dir=str(staging_root)) as temp:
+        clone = Path(temp) / "repo"
+        _run_git(
+            git,
+            [
+                "clone",
+                "--filter=blob:none",
+                "--no-tags",
+                "--depth",
+                "1",
+                "--branch",
+                "main",
+                REPOSITORY_URL,
+                str(clone),
+            ],
+            timeout_seconds=180,
+        )
+        observed_sha = validate_sha(
+            _run_git(git, ["-C", str(clone), "rev-parse", "HEAD"], timeout_seconds=30)
+        )
+        if observed_sha != target_sha:
+            raise BrokerError("self_refresh_sha_mismatch")
+        if _run_git(git, ["-C", str(clone), "status", "--porcelain"], timeout_seconds=30):
+            raise BrokerError("self_refresh_source_dirty")
+
+        release = runtime_root / "releases" / target_sha
+        _copy_release(clone, release)
+        release_broker = release / "scripts" / "desktop_admin_broker.py"
+        if not release_broker.is_file():
+            raise BrokerError("self_refresh_release_incomplete")
+
+        activation_launcher = _write_uac_activation_launcher(
+            runtime_root,
+            release_root=release,
+            python_executable=python_executable,
+            metadata_path=metadata_path,
+        )
+        updated = dict(metadata)
+        updated.update(
+            {
+                "previous_source_sha": current_sha,
+                "source_sha": target_sha,
+                "release_root": str(release),
+                "activation_launcher": str(activation_launcher),
+                "poll_seconds": DEFAULT_POLL_SECONDS,
+                "refreshed_at": now_iso(),
+                "refresh_source": "canonical_main",
+            }
+        )
+        atomic_json(metadata_path, updated)
+
+    start = start_user_broker(
+        python_executable=python_executable,
+        launcher=launcher,
+    )
+    return {
+        "handler": "refresh-self",
+        "refresh_state": "updated",
+        "previous_source_sha": current_sha,
+        "target_source_sha": target_sha,
+        "new_broker_started": bool(start.get("startup_survived")),
+    }
+
+
 def _status(metadata: dict[str, Any]) -> dict[str, Any]:
     watchdog_state = {}
     target = watchdog_runtime_metadata()
@@ -549,6 +678,8 @@ def execute_action(action: str, metadata: dict[str, Any], comment_id: int) -> di
         result = _recover_control_plane(metadata)
     elif action == "activate-watchdog":
         result = _activate_watchdog(metadata)
+    elif action == "refresh-self":
+        result = _self_refresh(metadata)
     else:
         raise BrokerError("action_id não allowlisted")
     return {
@@ -588,6 +719,7 @@ def process_once(metadata: dict[str, Any], *, reference_time: datetime | None = 
     last_seen = int(state.get("last_seen_comment_id") or 0)
     comments = sorted(fetch_comments(since), key=lambda item: int(item.get("id") or 0))
     accepted = 0
+    restart_requested = False
     for comment in comments:
         comment_id = int(comment.get("id") or 0)
         if comment_id <= last_seen:
@@ -641,11 +773,15 @@ def process_once(metadata: dict[str, Any], *, reference_time: datetime | None = 
         atomic_json(state_path(metadata), state)
         accepted += 1
         last_seen = comment_id
+        if action == "refresh-self" and state["accepted"].get("status") == "completed":
+            restart_requested = True
+            break
     return {
         "ok": True,
         "comments_seen": len(comments),
         "commands_accepted": accepted,
         "last_seen_comment_id": last_seen,
+        "restart_requested": restart_requested,
     }
 
 
@@ -654,7 +790,9 @@ def watch(metadata_path: Path) -> int:
     interval = max(30, min(int(metadata.get("poll_seconds") or DEFAULT_POLL_SECONDS), 300))
     while True:
         try:
-            process_once(metadata)
+            cycle = process_once(metadata)
+            if cycle.get("restart_requested") is True:
+                return 0
         except Exception as exc:
             state = load_state(metadata)
             state["broker_error"] = {
