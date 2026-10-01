@@ -264,7 +264,12 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert "state_validated" in workflow
     assert '"--session-id"' in workflow
     assert '"--risk", "2"' in workflow
-    assert "ac2297988651f41ab03469808e41f83496e9c58f" in workflow
+    assert "8cc4458f811bb8e5b13693798c484ea395e32f29" in workflow
+    assert "SESSION_SOURCE_SHA" in workflow
+    assert "SESSION_SYNC_REF" in workflow
+    assert '"--repo", $env:GITHUB_WORKSPACE' in workflow
+    assert "TARGET_REPO" not in workflow
+    assert "Resolve ReqSys session anchor" not in workflow
     assert "python scripts/engineering_worker_pool_smoke_dev.py" not in workflow
     assert "cancel-in-progress: true" in workflow
     assert "name: Ensure dedicated Desktop runner labels" in workflow
