@@ -45,15 +45,16 @@ jobs:
     runs-on: [self-hosted, Windows, X64]
     timeout-minutes: 10
     env:
-      RULES_SHA: ac2297988651f41ab03469808e41f83496e9c58f
-      TARGET_REPO: C:\\dev\\reqsys-v2-enterprise-real
+      RULES_SHA: 8cc4458f811bb8e5b13693798c484ea395e32f29
+      SESSION_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      SESSION_SYNC_REF: origin/${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
       CORRELATION_ID: worker-pool-runner-labels-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout Desktop runtime exact SHA
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
+          ref: ${{ env.SESSION_SOURCE_SHA }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Assert exact Desktop bootstrap host
@@ -72,18 +73,6 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Resolve ReqSys session anchor from GitHub API
-        id: prepare_anchor
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data } = await github.rest.repos.getBranch({
-              owner: 'ericson-j-santos',
-              repo: 'reqsys-v2-enterprise-real',
-              branch: 'main'
-            });
-            core.setOutput('sha', data.commit.sha);
-
       - name: Bootstrap mandatory governed session for runner repair
         id: prepare_session
         shell: powershell
@@ -91,14 +80,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\\scripts\\session_launcher.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\\config\\command-gateway.policy.json"
-          $anchorSha = "${{ steps.prepare_anchor.outputs.sha }}"
+          $anchorSha = $env:SESSION_SOURCE_SHA
           $launcherArgs = @(
             "--policy", $policy,
-            "--repo", $env:TARGET_REPO,
+            "--repo", $env:GITHUB_WORKSPACE,
             "--session-prefix", "worker-pool-runner-labels",
             "--correlation-id", $env:CORRELATION_ID,
             "--expected-head", $anchorSha,
-            "--sync-ref", "origin/main"
+            "--sync-ref", $env:SESSION_SYNC_REF
           )
           $raw = & python $launcher @launcherArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -135,7 +124,7 @@ jobs:
             "--",
             "python", $runtimeScript,
             "--confirm", "ACTIVATE-DESKTOP-RUNTIME-RUNNER",
-            "--source-sha", "${{ github.sha }}",
+            "--source-sha", $env:SESSION_SOURCE_SHA,
             "--non-interactive-auth"
           )
           & python $gateway @gatewayArgs
@@ -150,8 +139,9 @@ jobs:
     env:
       # Worker Pool autonomous reconciler integrated at main via PR #12.
       WORKER_POOL_SHA: ${{ github.event_name == 'workflow_dispatch' && inputs.worker_pool_sha || '6ea8b4bb2ab69727f13ecda53aadc7ef4b919eb7' }}
-      RULES_SHA: ac2297988651f41ab03469808e41f83496e9c58f
-      TARGET_REPO: C:\dev\reqsys-v2-enterprise-real
+      RULES_SHA: 8cc4458f811bb8e5b13693798c484ea395e32f29
+      SESSION_SOURCE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+      SESSION_SYNC_REF: origin/${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
       CORRELATION_ID: worker-pool-runtime-${{ github.run_id }}-${{ github.run_attempt }}
       EVIDENCE_REL: artifacts\engineering-worker-pool-smoke\evidence.json
 
@@ -159,8 +149,8 @@ jobs:
       - name: Checkout Desktop runtime exact SHA
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
+          ref: ${{ env.SESSION_SOURCE_SHA }}
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Checkout Engineering Worker Pool immutable SHA
@@ -181,18 +171,6 @@ jobs:
           fetch-depth: 1
           persist-credentials: false
 
-      - name: Resolve ReqSys session anchor from GitHub API
-        id: anchor
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data } = await github.rest.repos.getBranch({
-              owner: 'ericson-j-santos',
-              repo: 'reqsys-v2-enterprise-real',
-              branch: 'main'
-            });
-            core.setOutput('sha', data.commit.sha);
-
       - name: Bootstrap mandatory governed session
         id: session
         shell: powershell
@@ -200,14 +178,14 @@ jobs:
           $ErrorActionPreference = "Stop"
           $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
-          $anchorSha = "${{ steps.anchor.outputs.sha }}"
+          $anchorSha = $env:SESSION_SOURCE_SHA
           $launcherArgs = @(
             "--policy", $policy,
-            "--repo", $env:TARGET_REPO,
+            "--repo", $env:GITHUB_WORKSPACE,
             "--session-prefix", "worker-pool-smoke",
             "--correlation-id", $env:CORRELATION_ID,
             "--expected-head", $anchorSha,
-            "--sync-ref", "origin/main"
+            "--sync-ref", $env:SESSION_SYNC_REF
           )
           $raw = & python $launcher @launcherArgs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -244,7 +222,7 @@ jobs:
             "--expected-head", $env:ANCHOR_SHA,
             "--",
             "python", $runtimeScript,
-            "--expected-runtime-sha", "${{ github.sha }}",
+            "--expected-runtime-sha", $env:SESSION_SOURCE_SHA,
             "--expected-worker-pool-sha", $env:WORKER_POOL_SHA,
             "--worker-pool-root", $workerRoot,
             "--correlation-id", $env:CORRELATION_ID,
@@ -272,7 +250,7 @@ jobs:
       actions: write
       contents: read
     env:
-      RULES_SHA: ac2297988651f41ab03469808e41f83496e9c58f
+      RULES_SHA: 8cc4458f811bb8e5b13693798c484ea395e32f29
       TARGET_RUN_ID: ${{ github.run_id }}
       TARGET_JOB_NAME: Ensure dedicated Desktop runner labels
       STALL_AFTER_SECONDS: "60"
