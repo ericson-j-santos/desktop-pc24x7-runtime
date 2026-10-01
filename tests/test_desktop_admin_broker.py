@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import errno
 import json
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -188,6 +189,7 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
         assert metadata_at_start["activation_pending"] is True
         assert metadata_at_start["requires_uac_activation"] is True
         assert metadata_at_start["fallback_start_requested"] is True
+        assert metadata_at_start["functional_success_proven"] is False
         return {
             "requested": True,
             "pid": 4321,
@@ -215,6 +217,7 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
     assert metadata["fallback_persistence"]["mode"] == "HKCU_RUN_AT_LOGON"
     assert metadata["fallback_persistence"]["readback_verified"] is True
     assert metadata["fallback_start_requested"] is True
+    assert metadata["functional_success_proven"] is False
     assert (runtime / "releases" / ("a" * 40) / "scripts" / "desktop_admin_broker.py").is_file()
     assert (runtime / "releases" / ("a" * 40) / "scripts" / "desktop_admin_broker_uac_launcher.py").is_file()
     activation = runtime / "Activate-Desktop-Admin-Broker.cmd"
@@ -541,6 +544,12 @@ def test_user_autostart_is_hkcu_fixed_readback_and_no_shell(monkeypatch, tmp_pat
             assert access == self.KEY_SET_VALUE | self.KEY_QUERY_VALUE
             return FakeKey()
 
+        def OpenKey(self, root, path, reserved, access):
+            assert root is self.HKEY_CURRENT_USER
+            assert path == m.USER_RUN_KEY
+            assert access == self.KEY_QUERY_VALUE
+            return FakeKey()
+
         def SetValueEx(self, key, name, reserved, kind, value):
             assert name == m.USER_RUN_VALUE
             assert kind == self.REG_SZ
@@ -562,10 +571,16 @@ def test_user_autostart_is_hkcu_fixed_readback_and_no_shell(monkeypatch, tmp_pat
         python_executable=python,
         launcher=launcher,
     )
+    status = m.user_autostart_status(
+        python_executable=python,
+        launcher=launcher,
+    )
 
     assert result["mode"] == "HKCU_RUN_AT_LOGON"
     assert result["readback_verified"] is True
     assert result["requires_admin"] is False
+    assert status["exists"] is True
+    assert status["readback_verified"] is True
     assert str(python.resolve()) in fake.value
     assert str(launcher.resolve()) in fake.value
     source = MODULE.read_text(encoding="utf-8").casefold()
@@ -873,14 +888,53 @@ def test_self_refresh_is_idempotent_when_main_is_current(
     tmp_path: Path,
 ) -> None:
     current = "d" * 40
-    metadata = {
+    persisted_metadata = {
         "source_sha": current,
         "runtime_root": str(tmp_path),
         "python_executable": str(tmp_path / "python.exe"),
+        "release_root": str(tmp_path / "releases" / current),
+        "activation_pending": False,
+        "requires_uac_activation": False,
+        "admin_channel_ready": True,
+        "fallback_start_requested": False,
+        "functional_success_proven": True,
     }
+    metadata = dict(persisted_metadata)
+    physical_fallback = {
+        "ok": True,
+        "exists": True,
+        "mode": m.USER_AUTOSTART_MODE,
+        "readback_verified": True,
+        "requires_admin": False,
+    }
+    written = {}
     monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
     monkeypatch.setattr(m, "_git_executable", lambda: tmp_path / "git.exe")
     monkeypatch.setattr(m, "_remote_main_sha", lambda git: current)
+    persisted_state = dict(persisted_metadata)
+    monkeypatch.setattr(
+        m,
+        "load_installed_metadata",
+        lambda path: {"metadata": dict(persisted_state)},
+    )
+    monkeypatch.setattr(
+        m,
+        "user_autostart_status",
+        lambda **kwargs: dict(physical_fallback),
+    )
+    monkeypatch.setattr(
+        m,
+        "register_user_autostart",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("fallback físico válido não deve ser regravado")
+        ),
+    )
+    def fake_atomic_json(path, payload):
+        persisted_state.clear()
+        persisted_state.update(payload)
+        written.update({"path": path, "payload": dict(payload)})
+
+    monkeypatch.setattr(m, "atomic_json", fake_atomic_json)
     monkeypatch.setattr(
         m,
         "start_user_broker",
@@ -895,6 +949,13 @@ def test_self_refresh_is_idempotent_when_main_is_current(
     assert result["previous_source_sha"] == current
     assert result["target_source_sha"] == current
     assert result["new_broker_started"] is False
+    assert written["path"] == tmp_path / "metadata.json"
+    assert written["payload"]["activation_pending"] is True
+    assert written["payload"]["requires_uac_activation"] is True
+    assert written["payload"]["admin_channel_ready"] is False
+    assert written["payload"]["fallback_persistence"] == physical_fallback
+    assert written["payload"]["fallback_start_requested"] is True
+    assert written["payload"]["functional_success_proven"] is False
 
 
 def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
@@ -913,14 +974,21 @@ def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
         "python_executable": str(python),
         "release_root": str(tmp_path / "releases" / current),
         "poll_seconds": 90,
-        "activation_pending": True,
-        "requires_uac_activation": True,
-        "fallback_start_requested": True,
+        "activation_pending": False,
+        "requires_uac_activation": False,
+        "admin_channel_ready": True,
+        "fallback_persistence": {"legacy_marker": "preserved"},
+        "fallback_start_requested": False,
+        "functional_success_proven": True,
     }
     metadata = dict(persisted_metadata)
-    metadata["activation_pending"] = False
-    metadata["requires_uac_activation"] = False
-    metadata["fallback_start_requested"] = False
+    physical_fallback = {
+        "ok": True,
+        "exists": True,
+        "mode": m.USER_AUTOSTART_MODE,
+        "readback_verified": True,
+        "requires_admin": False,
+    }
     written = {}
 
     monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
@@ -944,21 +1012,35 @@ def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
 
     monkeypatch.setattr(m, "_run_git", fake_run_git)
     monkeypatch.setattr(m, "_copy_release", fake_copy_release)
+    persisted_state = dict(persisted_metadata)
     monkeypatch.setattr(
         m,
         "load_installed_metadata",
-        lambda path: {"metadata": dict(persisted_metadata)},
+        lambda path: {"metadata": dict(persisted_state)},
+    )
+    monkeypatch.setattr(
+        m,
+        "user_autostart_status",
+        lambda **kwargs: dict(physical_fallback),
+    )
+    monkeypatch.setattr(
+        m,
+        "register_user_autostart",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("fallback físico válido não deve ser regravado")
+        ),
     )
     monkeypatch.setattr(
         m,
         "_write_uac_activation_launcher",
         lambda runtime_root, **kwargs: runtime_root / "Activate-Desktop-Admin-Broker.cmd",
     )
-    monkeypatch.setattr(
-        m,
-        "atomic_json",
-        lambda path, payload: written.update({"path": path, "payload": dict(payload)}),
-    )
+    def fake_atomic_json(path, payload):
+        persisted_state.clear()
+        persisted_state.update(payload)
+        written.update({"path": path, "payload": dict(payload)})
+
+    monkeypatch.setattr(m, "atomic_json", fake_atomic_json)
     monkeypatch.setattr(
         m,
         "start_user_broker",
@@ -983,7 +1065,13 @@ def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
     assert written["payload"]["refresh_source"] == "canonical_main"
     assert written["payload"]["activation_pending"] is True
     assert written["payload"]["requires_uac_activation"] is True
+    assert written["payload"]["admin_channel_ready"] is False
+    assert written["payload"]["fallback_persistence"] == {
+        "legacy_marker": "preserved",
+        **physical_fallback,
+    }
     assert written["payload"]["fallback_start_requested"] is True
+    assert written["payload"]["functional_success_proven"] is False
 
 
 def test_process_once_stops_after_successful_self_refresh(
@@ -1017,7 +1105,11 @@ def test_process_once_stops_after_successful_self_refresh(
             "ok": True,
             "action": action,
             "comment_id": comment_id,
-            "result": {"handler": action},
+            "result": {
+                "handler": action,
+                "refresh_state": "updated",
+                "new_broker_started": True,
+            },
         },
     )
     monkeypatch.setattr(
@@ -1032,3 +1124,423 @@ def test_process_once_stops_after_successful_self_refresh(
     assert result["commands_accepted"] == 1
     assert result["last_seen_comment_id"] == 501
     assert calls == [("refresh-self", 501)]
+
+
+def test_process_once_does_not_restart_after_already_current_refresh(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    now = datetime.now(timezone.utc)
+    metadata = {
+        "runtime_root": str(tmp_path),
+        "release_root": str(tmp_path / "release"),
+        "source_sha": "a" * 40,
+        "not_before": (now - timedelta(seconds=30)).isoformat(),
+    }
+    refresh = gh_comment(
+        comment_id=601,
+        body="/desktop-runtime admin refresh-self",
+        created=now,
+    )
+    later = gh_comment(
+        comment_id=602,
+        body="/desktop-runtime admin status",
+        created=now + timedelta(seconds=1),
+    )
+    calls = []
+    monkeypatch.setattr(m, "fetch_comments", lambda since: [refresh, later])
+
+    def fake_execute(action, metadata, comment_id):
+        calls.append((action, comment_id))
+        result = {"handler": action}
+        if action == "refresh-self":
+            result.update(
+                {
+                    "refresh_state": "already_current",
+                    "new_broker_started": False,
+                }
+            )
+        return {
+            "ok": True,
+            "action": action,
+            "comment_id": comment_id,
+            "result": result,
+        }
+
+    monkeypatch.setattr(m, "execute_action", fake_execute)
+    monkeypatch.setattr(
+        m,
+        "_publish_readback",
+        lambda meta, accepted: {"published": True, "authoritative": False},
+    )
+
+    result = m.process_once(metadata, reference_time=now + timedelta(seconds=1))
+
+    assert result["restart_requested"] is False
+    assert result["commands_accepted"] == 2
+    assert result["last_seen_comment_id"] == 602
+    assert calls == [("refresh-self", 601), ("status", 602)]
+
+
+def test_reconcile_registers_missing_physical_fallback_before_marking_requested(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    python = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    registered = {
+        "ok": True,
+        "exists": True,
+        "mode": m.USER_AUTOSTART_MODE,
+        "readback_verified": True,
+        "requires_admin": False,
+    }
+    calls = []
+    monkeypatch.setattr(
+        m,
+        "user_autostart_status",
+        lambda **kwargs: {
+            "ok": False,
+            "exists": False,
+            "mode": m.USER_AUTOSTART_MODE,
+            "readback_verified": False,
+            "requires_admin": False,
+        },
+    )
+    monkeypatch.setattr(
+        m,
+        "register_user_autostart",
+        lambda **kwargs: calls.append(kwargs) or dict(registered),
+    )
+
+    result = m._reconcile_activation_metadata(
+        {
+            "activation_pending": False,
+            "requires_uac_activation": False,
+            "admin_channel_ready": True,
+        },
+        python_executable=python,
+        launcher=launcher,
+    )
+
+    assert len(calls) == 1
+    assert result["fallback_persistence"] == registered
+    assert result["fallback_start_requested"] is True
+    assert result["functional_success_proven"] is False
+    assert result["admin_channel_ready"] is False
+
+
+def test_reconcile_does_not_demote_verified_elevated_task(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    metadata = {
+        "activation_pending": False,
+        "requires_uac_activation": False,
+        "admin_channel_ready": True,
+        "admin_task": {
+            "exists": True,
+            "trigger_at_startup": True,
+            "logon_type": "S4U",
+            "run_level": "highest",
+            "enabled": True,
+        },
+        "fallback_persistence": {
+            "mode": m.USER_AUTOSTART_MODE,
+            "readback_verified": True,
+        },
+    }
+    monkeypatch.setattr(m, "task_status", lambda: dict(metadata["admin_task"]))
+    monkeypatch.setattr(
+        m,
+        "user_autostart_status",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("task elevada comprovada não deve recriar HKCU")
+        ),
+    )
+
+    result = m._reconcile_activation_metadata(
+        metadata,
+        python_executable=tmp_path / "python.exe",
+        launcher=tmp_path / "run.py",
+    )
+
+    assert result == metadata
+    assert result is not metadata
+
+
+def test_reconcile_demotes_stale_elevated_proof_when_physical_task_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fallback = {
+        "ok": True,
+        "exists": True,
+        "mode": m.USER_AUTOSTART_MODE,
+        "value_name": m.USER_RUN_VALUE,
+        "readback_verified": True,
+        "requires_admin": False,
+    }
+    metadata = {
+        "activation_pending": False,
+        "requires_uac_activation": False,
+        "admin_channel_ready": True,
+        "functional_success_proven": True,
+        "admin_task": {
+            "exists": True,
+            "trigger_at_startup": True,
+            "logon_type": "S4U",
+            "run_level": "highest",
+            "enabled": True,
+        },
+        "fallback_persistence": dict(fallback),
+    }
+    monkeypatch.setattr(
+        m,
+        "task_status",
+        lambda: {"exists": False, "trigger_at_startup": False},
+    )
+    monkeypatch.setattr(m, "user_autostart_status", lambda **kwargs: dict(fallback))
+    monkeypatch.setattr(
+        m,
+        "register_user_autostart",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("HKCU válido não deve ser regravado")
+        ),
+    )
+
+    result = m._reconcile_activation_metadata(
+        metadata,
+        python_executable=tmp_path / "python.exe",
+        launcher=tmp_path / "run.py",
+    )
+
+    assert result["activation_pending"] is True
+    assert result["requires_uac_activation"] is True
+    assert result["fallback_start_requested"] is True
+    assert result["functional_success_proven"] is False
+    assert result["admin_channel_ready"] is False
+    assert result["fallback_persistence"] == fallback
+
+
+def test_broker_lock_serializes_two_instances_and_allows_handoff(tmp_path: Path) -> None:
+    first = m._acquire_broker_lock(tmp_path, timeout_seconds=0)
+    try:
+        with pytest.raises(m.BrokerError, match="broker_lock_timeout"):
+            m._acquire_broker_lock(tmp_path, timeout_seconds=0)
+    finally:
+        m._release_broker_lock(first)
+
+    successor = m._acquire_broker_lock(tmp_path, timeout_seconds=0)
+    m._release_broker_lock(successor)
+
+
+def test_degraded_watch_releases_lock_before_admin_successor_fetches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    degraded = {
+        "runtime_root": str(tmp_path),
+        "admin_channel_ready": False,
+    }
+    ready = {
+        "runtime_root": str(tmp_path),
+        "admin_channel_ready": True,
+        "admin_task": {
+            "exists": True,
+            "trigger_at_startup": True,
+            "logon_type": "S4U",
+            "run_level": "highest",
+            "enabled": True,
+        },
+    }
+    payloads = iter(
+        [
+            {
+                "runtime_root": tmp_path,
+                "python_executable": tmp_path / "python.exe",
+                "launcher": tmp_path / "run.py",
+            },
+            {"metadata": degraded},
+            {"metadata": ready},
+        ]
+    )
+    lock = object()
+    released = []
+    monkeypatch.setattr(m, "load_installed_metadata", lambda path: next(payloads))
+    monkeypatch.setattr(m, "_acquire_broker_lock", lambda runtime_root: lock)
+    monkeypatch.setattr(m, "_release_broker_lock", lambda handle: released.append(handle))
+    monkeypatch.setattr(m, "task_status", lambda: dict(ready["admin_task"]))
+    monkeypatch.setattr(
+        m,
+        "process_once",
+        lambda metadata: (_ for _ in ()).throw(
+            AssertionError("fallback degradado deve sair antes de novo fetch")
+        ),
+    )
+
+    assert m.watch(tmp_path / "metadata.json") == 0
+    assert released == [lock]
+
+
+def test_watch_repairs_initial_stale_green_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    stale_green = {
+        "runtime_root": str(tmp_path),
+        "poll_seconds": 30,
+        "admin_channel_ready": True,
+        "admin_task": {
+            "exists": True,
+            "trigger_at_startup": True,
+            "logon_type": "S4U",
+            "run_level": "highest",
+            "enabled": True,
+        },
+    }
+    repaired = {
+        **stale_green,
+        "activation_pending": True,
+        "requires_uac_activation": True,
+        "admin_channel_ready": False,
+    }
+    installation = {
+        "runtime_root": tmp_path,
+        "python_executable": tmp_path / "python.exe",
+        "launcher": tmp_path / "run.py",
+    }
+    loads = iter(
+        [
+            installation,
+            {"metadata": dict(stale_green)},
+            {"metadata": dict(stale_green)},
+        ]
+    )
+    reconciled = []
+    lock = object()
+    released = []
+    monkeypatch.setattr(m, "load_installed_metadata", lambda path: next(loads))
+    monkeypatch.setattr(m, "_acquire_broker_lock", lambda runtime_root: lock)
+    monkeypatch.setattr(m, "_release_broker_lock", lambda handle: released.append(handle))
+    monkeypatch.setattr(
+        m,
+        "task_status",
+        lambda: {
+            "exists": False,
+            "trigger_at_startup": False,
+            "logon_type": None,
+            "run_level": None,
+            "enabled": False,
+        },
+    )
+    monkeypatch.setattr(
+        m,
+        "_reconcile_activation_metadata_file",
+        lambda *args, **kwargs: reconciled.append(kwargs) or dict(repaired),
+    )
+    monkeypatch.setattr(m, "process_once", lambda metadata: {"restart_requested": True})
+
+    assert m.watch(tmp_path / "metadata.json") == 0
+    assert len(reconciled) == 1
+    assert reconciled[0]["python_executable"] == installation["python_executable"]
+    assert reconciled[0]["launcher"] == installation["launcher"]
+    assert released == [lock]
+
+
+def test_persist_task_activation_preserves_refreshed_release(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "metadata.json"
+    latest = {
+        "runtime_root": str(tmp_path),
+        "source_sha": "b" * 40,
+        "release_root": str(tmp_path / "releases" / ("b" * 40)),
+        "previous_source_sha": "a" * 40,
+        "activation_pending": True,
+    }
+    task = {
+        "exists": True,
+        "trigger_at_startup": True,
+        "logon_type": "S4U",
+        "run_level": "highest",
+        "enabled": True,
+    }
+    written = {}
+    lock = object()
+    released = []
+    monkeypatch.setattr(
+        m,
+        "load_installed_metadata",
+        lambda path, require_current_release=False: {"metadata": dict(latest)},
+    )
+    monkeypatch.setattr(m, "_acquire_metadata_lock", lambda path: lock)
+    monkeypatch.setattr(m, "_release_broker_lock", lambda handle: released.append(handle))
+    monkeypatch.setattr(
+        m,
+        "atomic_json",
+        lambda path, payload: written.update({"path": path, "payload": dict(payload)}),
+    )
+    monkeypatch.setattr(m, "remove_user_autostart", lambda: None)
+
+    result = m.persist_task_activation(
+        metadata_path,
+        observed=task,
+        started={"run_returncode": 0},
+    )
+
+    assert result["source_sha"] == "b" * 40
+    assert result["release_root"] == latest["release_root"]
+    assert result["previous_source_sha"] == "a" * 40
+    assert result["admin_channel_ready"] is True
+    assert written["payload"] == result
+    assert released == [lock]
+
+
+def test_lock_contention_rejects_unexpected_os_error() -> None:
+    assert m._lock_contention(OSError(errno.EIO, "io failure")) is False
+
+
+def test_admin_successor_reloads_metadata_after_lock_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ready = {
+        "runtime_root": str(tmp_path),
+        "poll_seconds": 30,
+        "admin_channel_ready": True,
+        "admin_task": {
+            "exists": True,
+            "trigger_at_startup": True,
+            "logon_type": "S4U",
+            "run_level": "highest",
+            "enabled": True,
+        },
+    }
+    loads = []
+    lock = object()
+    released = []
+
+    def fake_load(path):
+        loads.append(path)
+        return {
+            "runtime_root": tmp_path,
+            "python_executable": tmp_path / "python.exe",
+            "launcher": tmp_path / "run.py",
+            "metadata": dict(ready),
+        }
+
+    monkeypatch.setattr(m, "load_installed_metadata", fake_load)
+    monkeypatch.setattr(m, "_acquire_broker_lock", lambda runtime_root: lock)
+    monkeypatch.setattr(m, "_release_broker_lock", lambda handle: released.append(handle))
+    monkeypatch.setattr(m, "task_status", lambda: dict(ready["admin_task"]))
+    monkeypatch.setattr(
+        m,
+        "process_once",
+        lambda metadata: {"restart_requested": True},
+    )
+
+    assert m.watch(tmp_path / "metadata.json") == 0
+    assert len(loads) == 3
+    assert released == [lock]

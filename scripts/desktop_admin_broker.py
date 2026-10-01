@@ -12,6 +12,7 @@ Canal outbound-only:
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import importlib.util
 import json
@@ -45,9 +46,15 @@ TASK_RUNLEVEL_HIGHEST = 1
 TASK_INSTANCES_IGNORE_NEW = 2
 USER_RUN_KEY = r"Software\\Microsoft\\Windows\\CurrentVersion\\Run"
 USER_RUN_VALUE = "DesktopPc24x7AdminBroker"
+USER_AUTOSTART_MODE = "HKCU_RUN_AT_LOGON"
 INSTALL_CONFIRM = "INSTALL-DESKTOP-ADMIN-BROKER"
 DEFAULT_POLL_SECONDS = 300
 MAX_COMMENT_AGE_SECONDS = 1800
+BROKER_LOCK_FILE = "broker.lock"
+BROKER_LOCK_TIMEOUT_SECONDS = 900.0
+BROKER_LOCK_POLL_SECONDS = 0.25
+METADATA_LOCK_FILE = "metadata.lock"
+METADATA_LOCK_TIMEOUT_SECONDS = 30.0
 WATCHDOG_SCRIPT = "desktop_control_plane_watchdog.py"
 WATCHDOG_UAC_SCRIPT = "desktop_control_plane_watchdog_uac_launcher.py"
 RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
@@ -566,6 +573,116 @@ def _remote_main_sha(git: Path) -> str:
     return validate_sha(rows[0][0])
 
 
+def task_ready(task: dict[str, Any]) -> bool:
+    return (
+        task.get("exists") is True
+        and task.get("trigger_at_startup") is True
+        and str(task.get("logon_type") or "").casefold() == "s4u"
+        and str(task.get("run_level") or "").casefold() == "highest"
+        and task.get("enabled") is True
+    )
+
+
+def _elevated_task_proven(metadata: dict[str, Any]) -> bool:
+    task = metadata.get("admin_task")
+    return (
+        metadata.get("admin_channel_ready") is True
+        and isinstance(task, dict)
+        and task_ready(task)
+    )
+
+
+def _fallback_persistence_ready(status: dict[str, Any]) -> bool:
+    return (
+        status.get("mode") == USER_AUTOSTART_MODE
+        and status.get("readback_verified") is True
+    )
+
+
+def _reconcile_activation_metadata(
+    metadata: dict[str, Any],
+    *,
+    python_executable: Path,
+    launcher: Path,
+) -> dict[str, Any]:
+    """Falha fechado sem promover metadata para o estado administrativo."""
+    reconciled = dict(metadata)
+    if _elevated_task_proven(reconciled):
+        observed_task = task_status()
+        if task_ready(observed_task):
+            return reconciled
+
+    fallback = user_autostart_status(
+        python_executable=python_executable,
+        launcher=launcher,
+    )
+    if not _fallback_persistence_ready(fallback):
+        fallback = register_user_autostart(
+            python_executable=python_executable,
+            launcher=launcher,
+        )
+    if not _fallback_persistence_ready(fallback):
+        raise BrokerError("user_autostart_readback_mismatch")
+
+    persisted_fallback = reconciled.get("fallback_persistence")
+    fallback_metadata = (
+        dict(persisted_fallback) if isinstance(persisted_fallback, dict) else {}
+    )
+    fallback_metadata.update(fallback)
+
+    reconciled.update(
+        {
+            "activation_pending": True,
+            "requires_uac_activation": True,
+            "admin_channel_ready": False,
+            "fallback_persistence": fallback_metadata,
+            "fallback_start_requested": True,
+            "functional_success_proven": False,
+        }
+    )
+    return reconciled
+
+
+def _load_refresh_metadata(metadata_path: Path, current_sha: str) -> dict[str, Any]:
+    latest = load_installed_metadata(metadata_path)["metadata"]
+    if validate_sha(str(latest["source_sha"])) != current_sha:
+        raise BrokerError("self_refresh_metadata_changed")
+    return latest
+
+
+def _reconcile_activation_metadata_file(
+    metadata_path: Path,
+    *,
+    python_executable: Path,
+    launcher: Path,
+    expected_sha: str | None = None,
+) -> dict[str, Any]:
+    """Reconcilia o fallback sem manter metadata.lock durante I/O físico."""
+    for _attempt in range(3):
+        base = load_installed_metadata(metadata_path)["metadata"]
+        if expected_sha is not None:
+            observed_sha = validate_sha(str(base["source_sha"]))
+            if observed_sha != expected_sha:
+                raise BrokerError("self_refresh_metadata_changed")
+
+        reconciled = _reconcile_activation_metadata(
+            base,
+            python_executable=python_executable,
+            launcher=launcher,
+        )
+        lock_handle = _acquire_metadata_lock(metadata_path)
+        try:
+            latest = load_installed_metadata(metadata_path)["metadata"]
+            if latest != base:
+                continue
+            if reconciled != latest:
+                atomic_json(metadata_path, reconciled)
+            return reconciled
+        finally:
+            _release_broker_lock(lock_handle)
+    raise BrokerError("metadata_reconcile_contention")
+
+
 def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
     require_windows_desktop()
     current_sha = validate_sha(str(metadata["source_sha"]))
@@ -577,6 +694,12 @@ def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
     git = _git_executable()
     target_sha = _remote_main_sha(git)
     if target_sha == current_sha:
+        _reconcile_activation_metadata_file(
+            metadata_path,
+            python_executable=python_executable,
+            launcher=launcher,
+            expected_sha=current_sha,
+        )
         return {
             "handler": "refresh-self",
             "refresh_state": "already_current",
@@ -624,22 +747,30 @@ def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
             python_executable=python_executable,
             metadata_path=metadata_path,
         )
-        latest_metadata = load_installed_metadata(metadata_path)["metadata"]
-        if validate_sha(str(latest_metadata["source_sha"])) != current_sha:
-            raise BrokerError("self_refresh_metadata_changed")
-        updated = dict(latest_metadata)
-        updated.update(
-            {
-                "previous_source_sha": current_sha,
-                "source_sha": target_sha,
-                "release_root": str(release),
-                "activation_launcher": str(activation_launcher),
-                "poll_seconds": DEFAULT_POLL_SECONDS,
-                "refreshed_at": now_iso(),
-                "refresh_source": "canonical_main",
-            }
+        _reconcile_activation_metadata_file(
+            metadata_path,
+            python_executable=python_executable,
+            launcher=launcher,
+            expected_sha=current_sha,
         )
-        atomic_json(metadata_path, updated)
+        lock_handle = _acquire_metadata_lock(metadata_path)
+        try:
+            latest_metadata = _load_refresh_metadata(metadata_path, current_sha)
+            updated = dict(latest_metadata)
+            updated.update(
+                {
+                    "previous_source_sha": current_sha,
+                    "source_sha": target_sha,
+                    "release_root": str(release),
+                    "activation_launcher": str(activation_launcher),
+                    "poll_seconds": DEFAULT_POLL_SECONDS,
+                    "refreshed_at": now_iso(),
+                    "refresh_source": "canonical_main",
+                }
+            )
+            atomic_json(metadata_path, updated)
+        finally:
+            _release_broker_lock(lock_handle)
 
     start = start_user_broker(
         python_executable=python_executable,
@@ -777,8 +908,10 @@ def process_once(metadata: dict[str, Any], *, reference_time: datetime | None = 
         accepted += 1
         last_seen = comment_id
         if action == "refresh-self" and state["accepted"].get("status") == "completed":
-            restart_requested = True
-            break
+            refresh = state["accepted"].get("outcome", {}).get("result", {})
+            if refresh.get("refresh_state") == "updated":
+                restart_requested = refresh.get("new_broker_started") is True
+                break
     return {
         "ok": True,
         "comments_seen": len(comments),
@@ -788,23 +921,143 @@ def process_once(metadata: dict[str, Any], *, reference_time: datetime | None = 
     }
 
 
+def _lock_contention(exc: OSError) -> bool:
+    if os.name == "nt":
+        winerror = getattr(exc, "winerror", None)
+        if winerror is not None:
+            return winerror in {32, 33}
+    return exc.errno in {errno.EACCES, errno.EAGAIN}
+
+
+def _try_lock_broker_file(handle: Any) -> bool:
+    handle.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if _lock_contention(exc):
+            return False
+        raise BrokerError("broker_lock_failed") from exc
+    return True
+
+
+def _acquire_file_lock(
+    runtime_root: Path,
+    *,
+    lock_file: str,
+    timeout_seconds: float = BROKER_LOCK_TIMEOUT_SECONDS,
+    poll_seconds: float = BROKER_LOCK_POLL_SECONDS,
+    timeout_error: str = "broker_lock_timeout",
+) -> Any:
+    path = runtime_root / lock_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = path.open("a+b")
+    except OSError as exc:
+        raise BrokerError("broker_lock_open_failed") from exc
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            if _try_lock_broker_file(handle):
+                return handle
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BrokerError(timeout_error)
+            time.sleep(min(max(0.01, poll_seconds), remaining))
+    except Exception:
+        handle.close()
+        raise
+
+
+def _acquire_broker_lock(
+    runtime_root: Path,
+    *,
+    timeout_seconds: float = BROKER_LOCK_TIMEOUT_SECONDS,
+    poll_seconds: float = BROKER_LOCK_POLL_SECONDS,
+) -> Any:
+    return _acquire_file_lock(
+        runtime_root,
+        lock_file=BROKER_LOCK_FILE,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
+
+
+def _acquire_metadata_lock(metadata_path: Path) -> Any:
+    return _acquire_file_lock(
+        metadata_path.parent,
+        lock_file=METADATA_LOCK_FILE,
+        timeout_seconds=METADATA_LOCK_TIMEOUT_SECONDS,
+        poll_seconds=BROKER_LOCK_POLL_SECONDS,
+        timeout_error="metadata_lock_timeout",
+    )
+
+
+def _release_broker_lock(handle: Any) -> None:
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
 def watch(metadata_path: Path) -> int:
-    metadata = load_installed_metadata(metadata_path)["metadata"]
-    interval = max(30, min(int(metadata.get("poll_seconds") or DEFAULT_POLL_SECONDS), 300))
-    while True:
+    installation = load_installed_metadata(metadata_path)
+    lock_handle = _acquire_broker_lock(installation["runtime_root"])
+    try:
+        metadata = load_installed_metadata(metadata_path)["metadata"]
+        persisted_elevated = _elevated_task_proven(metadata)
         try:
-            cycle = process_once(metadata)
-            if cycle.get("restart_requested") is True:
-                return 0
-        except Exception as exc:
-            state = load_state(metadata)
-            state["broker_error"] = {
-                "error": str(exc)[:1000],
-                "error_type": type(exc).__name__,
-                "observed_at": now_iso(),
-            }
-            atomic_json(state_path(metadata), state)
-        time.sleep(interval)
+            physical_task_ready = persisted_elevated and task_ready(task_status())
+        except Exception:
+            physical_task_ready = False
+        lock_owner_was_degraded = not physical_task_ready
+        while True:
+            metadata = load_installed_metadata(metadata_path)["metadata"]
+            interval = max(
+                30,
+                min(int(metadata.get("poll_seconds") or DEFAULT_POLL_SECONDS), 300),
+            )
+            try:
+                if lock_owner_was_degraded and _elevated_task_proven(metadata):
+                    if task_ready(task_status()):
+                        return 0
+                    metadata = _reconcile_activation_metadata_file(
+                        metadata_path,
+                        python_executable=installation["python_executable"],
+                        launcher=installation["launcher"],
+                    )
+                cycle = process_once(metadata)
+                if cycle.get("restart_requested") is True:
+                    return 0
+            except Exception as exc:
+                state = load_state(metadata)
+                state["broker_error"] = {
+                    "error": str(exc)[:1000],
+                    "error_type": type(exc).__name__,
+                    "observed_at": now_iso(),
+                }
+                atomic_json(state_path(metadata), state)
+            time.sleep(interval)
+    finally:
+        _release_broker_lock(lock_handle)
 
 
 def current_user_id() -> str:
@@ -822,6 +1075,54 @@ def _scheduler():
     return service
 
 
+def _user_autostart_command(*, python_executable: Path, launcher: Path) -> str:
+    return subprocess.list2cmdline(
+        [str(python_executable.resolve()), str(launcher.resolve())]
+    )
+
+
+def user_autostart_status(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    """Lê e valida o fallback per-user sem alterar o Registro."""
+    require_windows_desktop()
+    try:
+        import winreg
+    except ImportError as exc:
+        raise BrokerError("winreg_unavailable") from exc
+
+    command = _user_autostart_command(
+        python_executable=python_executable,
+        launcher=launcher,
+    )
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            USER_RUN_KEY,
+            0,
+            winreg.KEY_QUERY_VALUE,
+        ) as key:
+            observed, value_type = winreg.QueryValueEx(key, USER_RUN_VALUE)
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "exists": False,
+            "mode": USER_AUTOSTART_MODE,
+            "value_name": USER_RUN_VALUE,
+            "readback_verified": False,
+            "requires_admin": False,
+        }
+    except OSError as exc:
+        raise BrokerError("user_autostart_status_failed") from exc
+    verified = value_type == winreg.REG_SZ and str(observed) == command
+    return {
+        "ok": verified,
+        "exists": True,
+        "mode": USER_AUTOSTART_MODE,
+        "value_name": USER_RUN_VALUE,
+        "readback_verified": verified,
+        "requires_admin": False,
+    }
+
+
 def register_user_autostart(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
     """Registra fallback per-user fixo e sem privilégio administrativo."""
     require_windows_desktop()
@@ -830,8 +1131,9 @@ def register_user_autostart(*, python_executable: Path, launcher: Path) -> dict[
     except ImportError as exc:
         raise BrokerError("winreg_unavailable") from exc
 
-    command = subprocess.list2cmdline(
-        [str(python_executable.resolve()), str(launcher.resolve())]
+    command = _user_autostart_command(
+        python_executable=python_executable,
+        launcher=launcher,
     )
     access = winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
     try:
@@ -849,7 +1151,8 @@ def register_user_autostart(*, python_executable: Path, launcher: Path) -> dict[
         raise BrokerError("user_autostart_readback_mismatch")
     return {
         "ok": True,
-        "mode": "HKCU_RUN_AT_LOGON",
+        "exists": True,
+        "mode": USER_AUTOSTART_MODE,
         "value_name": USER_RUN_VALUE,
         "readback_verified": True,
         "requires_admin": False,
@@ -1096,6 +1399,38 @@ def load_installed_metadata(metadata_path: Path, *, require_current_release: boo
     }
 
 
+def persist_task_activation(
+    metadata_path: Path,
+    *,
+    observed: dict[str, Any],
+    started: dict[str, Any],
+) -> dict[str, Any]:
+    if not task_ready(observed):
+        raise BrokerError("task_registration_readback_failed")
+    lock_handle = _acquire_metadata_lock(metadata_path)
+    try:
+        latest = load_installed_metadata(
+            metadata_path,
+            require_current_release=False,
+        )["metadata"]
+        metadata = dict(latest)
+        metadata.update(
+            {
+                "activation_pending": False,
+                "requires_uac_activation": False,
+                "admin_channel_ready": True,
+                "admin_task": observed,
+                "admin_task_start": started,
+                "uac_activated_at": now_iso(),
+            }
+        )
+        atomic_json(metadata_path, metadata)
+    finally:
+        _release_broker_lock(lock_handle)
+    remove_user_autostart()
+    return metadata
+
+
 def register_task_from_metadata(metadata_path: Path) -> dict[str, Any]:
     installation = load_installed_metadata(metadata_path, require_current_release=True)
     register_task(
@@ -1103,28 +1438,15 @@ def register_task_from_metadata(metadata_path: Path) -> dict[str, Any]:
         launcher=installation["launcher"],
     )
     observed = task_status()
-    ready = (
-        observed.get("exists") is True
-        and observed.get("trigger_at_startup") is True
-        and str(observed.get("logon_type") or "").casefold() == "s4u"
-        and str(observed.get("run_level") or "").casefold() == "highest"
-    )
+    ready = task_ready(observed)
     if not ready:
         raise BrokerError("task_registration_readback_failed")
     started = run_task()
-    metadata = dict(installation["metadata"])
-    metadata.update(
-        {
-            "activation_pending": False,
-            "requires_uac_activation": False,
-            "admin_channel_ready": True,
-            "admin_task": observed,
-            "admin_task_start": started,
-            "uac_activated_at": now_iso(),
-        }
+    persist_task_activation(
+        installation["metadata_path"],
+        observed=observed,
+        started=started,
     )
-    atomic_json(installation["metadata_path"], metadata)
-    remove_user_autostart()
     return {"ok": True, "task": observed, "start": started, "metadata_updated": True}
 
 
@@ -1205,6 +1527,7 @@ def install(
                 "requires_uac_activation": True,
                 "fallback_persistence": user_autostart,
                 "fallback_start_requested": True,
+                "functional_success_proven": False,
             }
         )
         atomic_json(metadata_path, metadata)

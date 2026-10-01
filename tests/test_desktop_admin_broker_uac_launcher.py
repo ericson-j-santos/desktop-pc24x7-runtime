@@ -38,6 +38,7 @@ def test_task_ready_requires_startup_s4u_highest() -> None:
             "trigger_at_startup": True,
             "logon_type": "S4U",
             "run_level": "highest",
+            "enabled": True,
         }
     )
     assert not m.task_ready(
@@ -46,6 +47,16 @@ def test_task_ready_requires_startup_s4u_highest() -> None:
             "trigger_at_startup": True,
             "logon_type": "S4U",
             "run_level": "limited",
+            "enabled": True,
+        }
+    )
+    assert not m.task_ready(
+        {
+            "exists": True,
+            "trigger_at_startup": True,
+            "logon_type": "S4U",
+            "run_level": "highest",
+            "enabled": False,
         }
     )
 
@@ -92,18 +103,30 @@ def test_finalize_requires_verified_privileged_task(monkeypatch, tmp_path: Path)
             "trigger_at_startup": True,
             "logon_type": "S4U",
             "run_level": "highest",
+            "enabled": True,
         },
-    )
-    monkeypatch.setattr(m.broker, "now_iso", lambda: "2026-09-21T18:00:00+00:00")
-    monkeypatch.setattr(
-        m.broker,
-        "atomic_json",
-        lambda path, payload: written.update({"path": path, "payload": payload}),
     )
     monkeypatch.setattr(
         m.broker,
         "run_task",
         lambda: started.update({"value": True}) or {"run_returncode": 0},
+    )
+    monkeypatch.setattr(
+        m.broker,
+        "persist_task_activation",
+        lambda path, observed, started: written.update(
+            {
+                "path": path,
+                "payload": {
+                    **installation["metadata"],
+                    "admin_channel_ready": True,
+                    "activation_pending": False,
+                    "admin_task": observed,
+                    "admin_task_start": started,
+                },
+            }
+        )
+        or written["payload"],
     )
     result = m.finalize(installation)
     assert result["metadata"]["admin_channel_ready"] is True
@@ -112,7 +135,7 @@ def test_finalize_requires_verified_privileged_task(monkeypatch, tmp_path: Path)
     assert started["value"] is True
 
 
-def test_uac_launch_accepts_elevated_persisted_proof_without_low_privilege_task_readback(
+def test_uac_launch_requires_current_physical_task_readback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -161,9 +184,7 @@ def test_uac_launch_accepts_elevated_persisted_proof_without_low_privilege_task_
     monkeypatch.setattr(
         m.broker,
         "task_status",
-        lambda: (_ for _ in ()).throw(
-            AssertionError("low privilege task readback must not be required")
-        ),
+        lambda: dict(proven["admin_task"]),
     )
 
     result = m.launch(metadata_path, confirm=m.LAUNCH_CONFIRM, timeout_seconds=5)
