@@ -21,6 +21,7 @@ def _container() -> dict:
     return {
         "Image": "sha256:" + ("d" * 64),
         "Config": {
+            "Image": "reqsys-codex-worker-pool-codex-worker-pool",
             "Labels": {"com.docker.compose.project": "reqsys"},
             "Env": [
                 f"CODEX_WORKER_POOL_API_TOKEN_FILE={module.TOKEN_DESTINATION}",
@@ -116,9 +117,17 @@ def test_recreate_service_uses_canonical_compose_and_immutable_override(
     ) -> str:
         if args[:2] == ["image", "tag"]:
             assert failure_reason == "worker_pool_image_tag_failed"
-            assert args == ["image", "tag", "d" * 64, expected_ref]
+            assert args == [
+                "image",
+                "tag",
+                "reqsys-codex-worker-pool-codex-worker-pool",
+                expected_ref,
+            ]
             return ""
         if args[:2] == ["image", "inspect"]:
+            if args[2] == "reqsys-codex-worker-pool-codex-worker-pool":
+                assert failure_reason == "worker_pool_image_source_unavailable"
+                return image_id + "\n"
             assert failure_reason == "worker_pool_image_tag_readback_failed"
             assert args == ["image", "inspect", expected_ref, "--format", "{{.Id}}"]
             return image_id + "\n"
@@ -238,13 +247,18 @@ def test_compose_image_reference_tags_exact_image_id_and_validates_readback(
 
     container = _container()
     container["Image"] = image_id
+    container["Config"]["Image"] = ""
     actual = module._compose_image_reference(container)
 
     assert actual == expected_ref
     assert calls == [
-        (
-            ["image", "tag", "e" * 64, expected_ref],
-            "worker_pool_image_tag_failed",
+            (
+                ["image", "inspect", image_id, "--format", "{{.Id}}"],
+                "worker_pool_image_source_unavailable",
+            ),
+            (
+                ["image", "tag", image_id, expected_ref],
+                "worker_pool_image_tag_failed",
         ),
         (
             ["image", "inspect", expected_ref, "--format", "{{.Id}}"],
@@ -275,7 +289,7 @@ def test_compose_image_reference_fails_closed_on_readback_mismatch(
 
     with pytest.raises(
         module.ReconcileError,
-        match="worker_pool_image_tag_readback_mismatch",
+        match="worker_pool_image_source_mismatch",
     ):
         module._compose_image_reference(container)
 
@@ -373,3 +387,4 @@ def test_reconcile_is_idempotent_noop_when_runtime_is_healthy(
     assert result["bind_mount_resynced"] is False
     assert result["token_rotated"] is False
     assert result["authenticated_readback"] is True
+
