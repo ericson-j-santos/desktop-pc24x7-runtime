@@ -30,6 +30,7 @@ POOL_HOST_IP = "127.0.0.1"
 POOL_HOST_PORT = "8097"
 POOL_CONTAINER_PORT = "8097/tcp"
 TOKEN_DESTINATION = "/run/secrets/codex_worker_pool_api_token"
+CANONICAL_COMPOSE_BASENAME = "docker-compose.pc24x7-codex-worker-pool.yml"
 AUTH_RECONCILE_SCRIPT = ROOT / "scripts" / "engineering_worker_pool_auth_reconcile_dev.py"
 
 
@@ -157,6 +158,28 @@ def discover_worker_pool_token_file(
     return Path(str(mounts[0]["Source"]))
 
 
+def discover_canonical_compose_file(
+    docker_run: DockerRun = _docker_run,
+) -> Path:
+    """Resolve compose from Docker's authoritative working-dir label."""
+    direct = Path.cwd() / CANONICAL_COMPOSE_BASENAME
+    if direct.is_file():
+        return direct.resolve()
+    raw_ids = docker_run(
+        ["docker", "ps", "--filter", f"label=com.docker.compose.service={POOL_SERVICE}", "--format", "{{.ID}}"]
+    )
+    ids = [line.strip() for line in raw_ids.stdout.splitlines() if line.strip()]
+    if len(ids) != 1:
+        raise RuntimeSmokeError("worker_pool_canonical_compose_container_not_unique")
+    payload = json.loads(docker_run(["docker", "inspect", ids[0]]).stdout)
+    labels = ((payload[0].get("Config") or {}).get("Labels") or {}) if payload else {}
+    working_dir = str(labels.get("com.docker.compose.project.working_dir") or "").strip()
+    candidate = Path(working_dir) / CANONICAL_COMPOSE_BASENAME
+    if not working_dir or not candidate.is_file():
+        raise RuntimeSmokeError("worker_pool_canonical_compose_missing")
+    return candidate.resolve()
+
+
 def resolve_output_path(path: Path, base: Path | None = None) -> Path:
     if path.is_absolute():
         return path.resolve()
@@ -224,7 +247,14 @@ def run_auth_reconcile(output: Path) -> dict[str, Any]:
         raise RuntimeSmokeError("worker_pool_auth_reconcile_script_missing")
 
     evidence = output.with_name("worker-pool-auth-reconcile.json")
-    session_compose = Path.cwd() / "docker-compose.pc24x7-codex-worker-pool.yml"
+    session_compose = Path.cwd() / CANONICAL_COMPOSE_BASENAME
+    if not session_compose.is_file():
+        try:
+            session_compose = discover_canonical_compose_file()
+        except RuntimeSmokeError:
+            # The auth reconciler remains fail-closed on an invalid path; keep
+            # the deterministic fallback for unit tests and legacy sessions.
+            session_compose = Path.cwd() / CANONICAL_COMPOSE_BASENAME
     command = [
         sys.executable,
         str(AUTH_RECONCILE_SCRIPT),
@@ -418,3 +448,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
