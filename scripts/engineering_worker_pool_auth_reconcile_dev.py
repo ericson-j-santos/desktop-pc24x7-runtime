@@ -405,7 +405,7 @@ def _recreate_service(
     )
 
 
-def _wait_ready(token: str, attempts: int = 15) -> tuple[int, int]:
+def _wait_ready(token: str, attempts: int = 30) -> tuple[int, int]:
     last_health = 0
     last_snapshot = 0
     last_reason = "worker_pool_runtime_not_ready_after_recreate"
