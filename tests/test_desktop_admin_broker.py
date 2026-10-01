@@ -183,15 +183,18 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
             "requires_admin": False,
         },
     )
-    monkeypatch.setattr(
-        m,
-        "start_user_broker",
-        lambda **kwargs: {
+    def fake_start_user_broker(**kwargs):
+        metadata_at_start = json.loads((runtime / "metadata.json").read_text(encoding="utf-8"))
+        assert metadata_at_start["activation_pending"] is True
+        assert metadata_at_start["requires_uac_activation"] is True
+        assert metadata_at_start["fallback_start_requested"] is True
+        return {
             "requested": True,
             "pid": 4321,
             "functional_success_proven": False,
-        },
-    )
+        }
+
+    monkeypatch.setattr(m, "start_user_broker", fake_start_user_broker)
     result = m.install(
         source,
         source_sha="a" * 40,
@@ -904,13 +907,20 @@ def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
     launcher = tmp_path / "run.py"
     python.write_text("", encoding="utf-8")
     launcher.write_text("", encoding="utf-8")
-    metadata = {
+    persisted_metadata = {
         "source_sha": current,
         "runtime_root": str(tmp_path),
         "python_executable": str(python),
         "release_root": str(tmp_path / "releases" / current),
         "poll_seconds": 90,
+        "activation_pending": True,
+        "requires_uac_activation": True,
+        "fallback_start_requested": True,
     }
+    metadata = dict(persisted_metadata)
+    metadata["activation_pending"] = False
+    metadata["requires_uac_activation"] = False
+    metadata["fallback_start_requested"] = False
     written = {}
 
     monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
@@ -934,6 +944,11 @@ def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
 
     monkeypatch.setattr(m, "_run_git", fake_run_git)
     monkeypatch.setattr(m, "_copy_release", fake_copy_release)
+    monkeypatch.setattr(
+        m,
+        "load_installed_metadata",
+        lambda path: {"metadata": dict(persisted_metadata)},
+    )
     monkeypatch.setattr(
         m,
         "_write_uac_activation_launcher",
@@ -966,6 +981,9 @@ def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
     assert written["payload"]["previous_source_sha"] == current
     assert written["payload"]["poll_seconds"] == m.DEFAULT_POLL_SECONDS
     assert written["payload"]["refresh_source"] == "canonical_main"
+    assert written["payload"]["activation_pending"] is True
+    assert written["payload"]["requires_uac_activation"] is True
+    assert written["payload"]["fallback_start_requested"] is True
 
 
 def test_process_once_stops_after_successful_self_refresh(

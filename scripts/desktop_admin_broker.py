@@ -624,7 +624,10 @@ def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
             python_executable=python_executable,
             metadata_path=metadata_path,
         )
-        updated = dict(metadata)
+        latest_metadata = load_installed_metadata(metadata_path)["metadata"]
+        if validate_sha(str(latest_metadata["source_sha"])) != current_sha:
+            raise BrokerError("self_refresh_metadata_changed")
+        updated = dict(latest_metadata)
         updated.update(
             {
                 "previous_source_sha": current_sha,
@@ -1196,10 +1199,6 @@ def install(
             python_executable=stable_python,
             launcher=launcher,
         )
-        started = start_user_broker(
-            python_executable=stable_python,
-            launcher=launcher,
-        )
         metadata.update(
             {
                 "activation_pending": True,
@@ -1209,6 +1208,10 @@ def install(
             }
         )
         atomic_json(metadata_path, metadata)
+        started = start_user_broker(
+            python_executable=stable_python,
+            launcher=launcher,
+        )
     if not activation_pending:
         started = run_task()
     return {
