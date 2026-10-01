@@ -277,9 +277,16 @@ def _compose_image_reference(container: dict[str, Any]) -> str:
     digest = image_id.removeprefix("sha256:")
     local_ref = f"desktop-pc24x7-worker-pool-recovery:sha256-{digest}"
 
-    source_image_id = digest
+    config_image = str((container.get("Config") or {}).get("Image") or "").strip()
+    source_image = config_image or image_id
+    source_readback = _docker(
+        ["image", "inspect", source_image, "--format", "{{.Id}}"],
+        failure_reason="worker_pool_image_source_unavailable",
+    ).strip().lower()
+    if source_readback != image_id:
+        raise ReconcileError("worker_pool_image_source_mismatch")
     _docker(
-        ["image", "tag", source_image_id, local_ref],
+        ["image", "tag", source_image, local_ref],
         failure_reason="worker_pool_image_tag_failed",
     )
     readback = _docker(
@@ -495,3 +502,4 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
