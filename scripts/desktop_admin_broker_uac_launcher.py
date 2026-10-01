@@ -41,12 +41,7 @@ def default_metadata_path() -> Path:
 
 
 def task_ready(task: dict[str, Any]) -> bool:
-    return (
-        task.get("exists") is True
-        and task.get("trigger_at_startup") is True
-        and str(task.get("logon_type") or "").casefold() == "s4u"
-        and str(task.get("run_level") or "").casefold() == "highest"
-    )
+    return broker.task_ready(task)
 
 
 def load_installation(metadata_path: Path) -> dict[str, Any]:
@@ -81,17 +76,12 @@ def finalize(installation: dict[str, Any]) -> dict[str, Any]:
     task = broker.task_status()
     if not task_ready(task):
         raise RuntimeError("AtStartup + S4U + highest não foi verificado")
-    metadata = dict(installation["metadata"])
-    metadata.update(
-        {
-            "activation_pending": False,
-            "requires_uac_activation": False,
-            "admin_channel_ready": True,
-            "uac_activated_at": broker.now_iso(),
-        }
-    )
-    broker.atomic_json(installation["metadata_path"], metadata)
     started = broker.run_task()
+    metadata = broker.persist_task_activation(
+        installation["metadata_path"],
+        observed=task,
+        started=started,
+    )
     return {"metadata": metadata, "task": task, "start": started}
 
 
@@ -103,6 +93,7 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
     if (
         installation["metadata"].get("admin_channel_ready") is True
         and task_ready(persisted_task)
+        and task_ready(broker.task_status())
     ):
         return {
             "ok": True,
@@ -132,7 +123,11 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
         )
         metadata = refreshed["metadata"]
         task = metadata.get("admin_task") or {}
-        if metadata.get("admin_channel_ready") is True and task_ready(task):
+        if (
+            metadata.get("admin_channel_ready") is True
+            and task_ready(task)
+            and task_ready(broker.task_status())
+        ):
             return {
                 "ok": True,
                 "mode": "uac",
