@@ -99,6 +99,27 @@ def test_image_override_is_minimal_and_valid() -> None:
     assert "volumes:" not in raw
 
 
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "/run/desktop/mnt/host/c/Users/Windows/token",
+            "C:/Users/Windows/token",
+        ),
+        (
+            r"\run\desktop\mnt\host\d\secure\token",
+            "D:/secure/token",
+        ),
+        ("/host_mnt/e/secrets/token", "E:/secrets/token"),
+        ("C:/secure/worker-pool-token", str(Path("C:/secure/worker-pool-token"))),
+    ],
+)
+def test_compose_host_path_normalizes_docker_desktop_bind_source(
+    source: str, expected: str
+) -> None:
+    assert module._compose_host_path(Path(source)) == expected
+
+
 def test_recreate_service_uses_canonical_compose_and_immutable_override(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
