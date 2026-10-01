@@ -40,6 +40,23 @@ def _container(*, running: bool = True, mounts: list[dict] | None = None) -> dic
     }
 
 
+def test_discover_canonical_compose_uses_docker_working_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    compose = tmp_path / smoke.CANONICAL_COMPOSE_BASENAME
+    compose.write_text("services: {}\n", encoding="utf-8")
+    container = _container()
+    container["Config"]["Labels"]["com.docker.compose.project.working_dir"] = str(tmp_path)
+
+    def fake_run(args: list[str]) -> subprocess.CompletedProcess[str]:
+        if args[:2] == ["docker", "ps"]:
+            return _completed(args, "one\n")
+        return _completed(args, json.dumps([container]))
+
+    found = smoke.discover_canonical_compose_file(fake_run)
+    assert found == compose.resolve()
+
+
 def test_discover_token_file_requires_unique_canonical_container() -> None:
     calls: list[list[str]] = []
 
@@ -175,6 +192,11 @@ def test_runtime_smoke_wraps_external_harness_without_exposing_token_path(
     monkeypatch.setattr(
         smoke, "discover_worker_pool_token_file", lambda _runner: token_file
     )
+    monkeypatch.setattr(
+        smoke,
+        "discover_canonical_compose_file",
+        lambda: tmp_path / smoke.CANONICAL_COMPOSE_BASENAME,
+    )
 
     observed_child_output: list[Path] = []
 
@@ -305,6 +327,11 @@ def test_runtime_smoke_reconciles_stale_bind_on_401_then_retries(
     )
     monkeypatch.setattr(
         smoke, "discover_worker_pool_token_file", lambda _runner: token_file
+    )
+    monkeypatch.setattr(
+        smoke,
+        "discover_canonical_compose_file",
+        lambda: tmp_path / smoke.CANONICAL_COMPOSE_BASENAME,
     )
 
     calls: list[str] = []
@@ -441,3 +468,4 @@ def test_runtime_smoke_does_not_reconcile_non_auth_failure(
                 "RUNNER_NAME": smoke.EXPECTED_RUNNER,
             },
         )
+
