@@ -330,6 +330,19 @@ def _canonical_compose_contract_valid(path: Path) -> bool:
     return all(fragment in raw for fragment in required)
 
 
+def _compose_host_path(path: Path) -> str:
+    """Translate Docker Desktop's Linux bind source to a Windows host path."""
+    raw = str(path)
+    normalized = raw.replace("\\", "/")
+    match = re.fullmatch(
+        r"/(?:run/desktop/mnt/host|host_mnt)/([a-zA-Z])/(.+)", normalized
+    )
+    if match:
+        drive, remainder = match.groups()
+        return f"{drive.upper()}:/{remainder}"
+    return raw
+
+
 def _image_override_contract_valid() -> bool:
     try:
         raw = IMAGE_OVERRIDE_FILE.read_text(encoding="utf-8")
@@ -360,7 +373,9 @@ def _recreate_service(
         raise ReconcileError("worker_pool_compose_identity_missing")
 
     process_env = os.environ.copy()
-    process_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] = str(token_path)
+    process_env["CODEX_WORKER_POOL_API_TOKEN_FILE_HOST"] = _compose_host_path(
+        token_path
+    )
     process_env["CODEX_WORKER_POOL_EXPECTED_RULES_SHA"] = _rules_sha(container)
     process_env["CODEX_WORKER_POOL_RUNNING_IMAGE"] = _compose_image_reference(container)
 
