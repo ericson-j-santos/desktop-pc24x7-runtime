@@ -280,7 +280,7 @@ def test_compose_image_reference_fails_closed_on_readback_mismatch(
         failure_reason: str = "worker_pool_docker_command_failed",
     ) -> str:
         if args[:2] == ["image", "inspect"]:
-            return "sha256:" + ("a" * 64)
+            return "not-an-image-id"
         return ""
 
     monkeypatch.setattr(module, "_docker", fake_docker)
@@ -289,7 +289,7 @@ def test_compose_image_reference_fails_closed_on_readback_mismatch(
 
     with pytest.raises(
         module.ReconcileError,
-        match="worker_pool_image_source_mismatch",
+        match="worker_pool_image_source_invalid",
     ):
         module._compose_image_reference(container)
 
