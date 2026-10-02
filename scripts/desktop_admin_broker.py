@@ -61,6 +61,9 @@ RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
 RUNNER_BOOTSTRAP_SCRIPT = "activate_desktop_runtime_runner.py"
 READBACK_SCRIPT = "desktop_admin_broker_readback.py"
 PERSISTED_PYTHON_DIR = "python-runtime"
+BROKER_HEARTBEAT_FILE = "broker-heartbeat.json"
+BROKER_HEARTBEAT_INTERVAL_SECONDS = 30
+BROKER_SUPERVISOR_VERSION = "2"
 
 ALLOWED_COMMANDS = {
     "/desktop-runtime admin status": "status",
@@ -785,6 +788,49 @@ def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _heartbeat_path(metadata: dict[str, Any]) -> Path:
+    return Path(metadata["runtime_root"]) / BROKER_HEARTBEAT_FILE
+
+
+def _write_heartbeat(metadata: dict[str, Any], **updates: Any) -> dict[str, Any]:
+    """Persiste um readback sanitizado para provar que o broker está vivo."""
+    path = _heartbeat_path(metadata)
+    payload: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            candidate = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                payload.update(candidate)
+        except (OSError, json.JSONDecodeError):
+            payload = {}
+    payload.update(
+        {
+            "schema_version": "1",
+            "supervisor_version": BROKER_SUPERVISOR_VERSION,
+            "pid": os.getpid(),
+            "source_sha": str(metadata.get("source_sha") or "")[:40],
+            "updated_at": now_iso(),
+            "production_touched": False,
+            "secrets_read": False,
+            "reboot_performed": False,
+        }
+    )
+    payload.update(updates)
+    atomic_json(path, payload)
+    return payload
+
+
+def _heartbeat_is_fresh(payload: dict[str, Any], *, reference_time: datetime | None = None) -> bool:
+    try:
+        observed = parse_github_time(str(payload.get("updated_at") or ""))
+    except Exception:
+        return False
+    reference = reference_time or now_utc()
+    return 0 <= (reference - observed).total_seconds() <= max(
+        90, BROKER_HEARTBEAT_INTERVAL_SECONDS * 3
+    )
+
+
 def _status(metadata: dict[str, Any]) -> dict[str, Any]:
     watchdog_state = {}
     target = watchdog_runtime_metadata()
@@ -793,10 +839,26 @@ def _status(metadata: dict[str, Any]) -> dict[str, Any]:
         state = Path(installed["runtime_root"]) / "state.json"
         if state.is_file():
             watchdog_state = json.loads(state.read_text(encoding="utf-8"))
+    heartbeat = {}
+    heartbeat_file = _heartbeat_path(metadata)
+    if heartbeat_file.is_file():
+        try:
+            candidate = json.loads(heartbeat_file.read_text(encoding="utf-8"))
+            if isinstance(candidate, dict):
+                heartbeat = candidate
+        except (OSError, json.JSONDecodeError):
+            heartbeat = {}
     return {
         "handler": "status",
         "broker_task": task_status(),
         "watchdog_state": watchdog_state,
+        "broker_runtime": {
+            "ready": _heartbeat_is_fresh(heartbeat),
+            "heartbeat": heartbeat,
+            "admin_activation_pending": bool(metadata.get("requires_uac_activation")),
+            "admin_channel_ready": bool(metadata.get("admin_channel_ready")),
+            "fallback_autostart": metadata.get("fallback_persistence"),
+        },
     }
 
 
@@ -1023,6 +1085,7 @@ def watch(metadata_path: Path) -> int:
     lock_handle = _acquire_broker_lock(installation["runtime_root"])
     try:
         metadata = load_installed_metadata(metadata_path)["metadata"]
+        _write_heartbeat(metadata, status="running", started_at=now_iso())
         persisted_elevated = _elevated_task_proven(metadata)
         try:
             physical_task_ready = persisted_elevated and task_ready(task_status())
@@ -1036,8 +1099,14 @@ def watch(metadata_path: Path) -> int:
                 min(int(metadata.get("poll_seconds") or DEFAULT_POLL_SECONDS), 300),
             )
             try:
+                _write_heartbeat(metadata, status="running", last_cycle_started_at=now_iso())
                 if lock_owner_was_degraded and _elevated_task_proven(metadata):
                     if task_ready(task_status()):
+                        _write_heartbeat(
+                            metadata,
+                            status="handoff_to_elevated_task",
+                            stopped_at=now_iso(),
+                        )
                         return 0
                     metadata = _reconcile_activation_metadata_file(
                         metadata_path,
@@ -1045,7 +1114,18 @@ def watch(metadata_path: Path) -> int:
                         launcher=installation["launcher"],
                     )
                 cycle = process_once(metadata)
+                _write_heartbeat(
+                    metadata,
+                    status="running",
+                    last_cycle_completed_at=now_iso(),
+                    last_cycle_ok=True,
+                )
                 if cycle.get("restart_requested") is True:
+                    _write_heartbeat(
+                        metadata,
+                        status="handoff_after_refresh",
+                        stopped_at=now_iso(),
+                    )
                     return 0
             except Exception as exc:
                 state = load_state(metadata)
@@ -1055,9 +1135,27 @@ def watch(metadata_path: Path) -> int:
                     "observed_at": now_iso(),
                 }
                 atomic_json(state_path(metadata), state)
-            time.sleep(interval)
+                _write_heartbeat(
+                    metadata,
+                    status="degraded_retrying",
+                    last_error_code=type(exc).__name__,
+                )
+            deadline = time.monotonic() + interval
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _write_heartbeat(metadata, status="running")
+                time.sleep(min(BROKER_HEARTBEAT_INTERVAL_SECONDS, remaining))
     finally:
-        _release_broker_lock(lock_handle)
+        try:
+            _write_heartbeat(
+                installation["metadata"],
+                status="stopped",
+                stopped_at=now_iso(),
+            )
+        finally:
+            _release_broker_lock(lock_handle)
 
 
 def current_user_id() -> str:
@@ -1326,15 +1424,46 @@ def _copy_release(source_root: Path, release_root: Path) -> None:
 
 
 def _write_launcher(runtime_root: Path) -> Path:
+    """Gera um supervisor per-user que mantém o broker vivo sem nova UAC."""
     launcher = runtime_root / "run.py"
     launcher.write_text(
         "from pathlib import Path\n"
-        "import json, runpy, sys\n"
+        "import json, os, runpy, sys, time\n"
         "metadata = Path(__file__).with_name('metadata.json')\n"
-        "payload = json.loads(metadata.read_text(encoding='utf-8'))\n"
-        "script = Path(payload['release_root']) / 'scripts' / 'desktop_admin_broker.py'\n"
-        "sys.argv = [str(script), 'watch', '--metadata', str(metadata)]\n"
-        "runpy.run_path(str(script), run_name='__main__')\n",
+        "heartbeat = metadata.with_name('broker-heartbeat.json')\n"
+        "restart_delay = 5\n"
+        "restart_count = 0\n"
+        "while True:\n"
+        "    payload = json.loads(metadata.read_text(encoding='utf-8'))\n"
+        "    script = Path(payload['release_root']) / 'scripts' / 'desktop_admin_broker.py'\n"
+        "    try:\n"
+        "        sys.argv = [str(script), 'watch', '--metadata', str(metadata)]\n"
+        "        runpy.run_path(str(script), run_name='__main__')\n"
+        "        latest = json.loads(metadata.read_text(encoding='utf-8'))\n"
+        "        if latest.get('admin_channel_ready') is True and latest.get('requires_uac_activation') is False:\n"
+        "            break\n"
+        "        restart_count += 1\n"
+        "        time.sleep(restart_delay)\n"
+        "    except SystemExit as exc:\n"
+        "        code = exc.code if isinstance(exc.code, int) else 0\n"
+        "        if code == 0:\n"
+        "            restart_count += 1\n"
+        "            time.sleep(restart_delay)\n"
+        "            continue\n"
+        "        time.sleep(restart_delay)\n"
+        "    except Exception as exc:\n"
+        "        try:\n"
+        "            observed = {}\n"
+        "            if heartbeat.is_file():\n"
+        "                candidate = json.loads(heartbeat.read_text(encoding='utf-8'))\n"
+        "                if isinstance(candidate, dict):\n"
+        "                    observed.update(candidate)\n"
+        "            observed.update({'pid': os.getpid(), 'status': 'supervisor_retrying', 'restart_count': restart_count, 'last_error_code': type(exc).__name__, 'updated_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), 'production_touched': False, 'secrets_read': False, 'reboot_performed': False})\n"
+        "            heartbeat.write_text(json.dumps(observed, sort_keys=True), encoding='utf-8')\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        restart_count += 1\n"
+        "        time.sleep(restart_delay)\n",
         encoding="utf-8",
     )
     return launcher
@@ -1505,6 +1634,7 @@ def install(
         "secrets_read": False,
         "installed_at": now_iso(),
         "activation_launcher": str(activation_launcher),
+        "broker_supervisor_version": BROKER_SUPERVISOR_VERSION,
     }
     atomic_json(metadata_path, metadata)
     activation_pending = False
