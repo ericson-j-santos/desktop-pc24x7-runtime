@@ -1,0 +1,63 @@
+name: Cleanup fixed diagnostic run
+on:
+  push:
+    branches: ['ops/cleanup-diagnostic-36854449405']
+    paths: ['.github/workflows/cleanup-fixed-diagnostic.yml']
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions: {}
+    timeout-minutes: 2
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            function allowed(run, jobs) {
+             return run.id === 36854449405 && run.run_attempt === 2
+              && run.head_sha === 'ab3d2e9c21d03709bc3dbb1489792e816a52d3c7'
+              && run.path === '.github/workflows/dedicated-runtime-runner-e2e.yml'
+              && run.status === 'queued' && run.event === 'workflow_dispatch'
+              && jobs.some(j => j.name === 'Pickup on dedicated Desktop runtime runner' && j.status === 'queued' && !j.runner_id)
+              && jobs.every(j => j.status !== 'in_progress');
+            }
+            const run = {id:36854449405,run_attempt:2,head_sha:'ab3d2e9c21d03709bc3dbb1489792e816a52d3c7',path:'.github/workflows/dedicated-runtime-runner-e2e.yml',status:'queued',event:'workflow_dispatch'};
+            const jobs = [{name:'Pickup on dedicated Desktop runtime runner',status:'queued',runner_id:0}];
+            if (!allowed(run,jobs)) throw new Error('positive_control_failed');
+            for (const delta of [{id:1},{run_attempt:3},{head_sha:'0'.repeat(40)},{path:'other.yml'},{status:'in_progress'},{event:'push'}]) {
+              if (allowed({...run,...delta},jobs)) throw new Error('negative_control_failed');
+            }
+            if (allowed(run,[{...jobs[0],runner_id:1}]) || allowed(run,[...jobs,{status:'in_progress'}])) throw new Error('running_job_control_failed');
+            core.info('Exact-run positive and negative controls passed');
+  cancel:
+    needs: validate
+    if: github.actor == 'ericson-j-santos' && github.repository == 'ericson-j-santos/desktop-pc24x7-runtime'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            function allowed(run, jobs) {
+             return run.id === 36854449405 && run.run_attempt === 2
+              && run.head_sha === 'ab3d2e9c21d03709bc3dbb1489792e816a52d3c7'
+              && run.path === '.github/workflows/dedicated-runtime-runner-e2e.yml'
+              && run.status === 'queued' && run.event === 'workflow_dispatch'
+              && jobs.some(j => j.name === 'Pickup on dedicated Desktop runtime runner' && j.status === 'queued' && !j.runner_id)
+              && jobs.every(j => j.status !== 'in_progress');
+            }
+            const params = {owner:context.repo.owner,repo:context.repo.repo,run_id:36854449405};
+            const run = (await github.rest.actions.getWorkflowRun(params)).data;
+            if (run.status === 'completed') { core.info('Diagnostic already terminal'); return; }
+            const jobs = (await github.rest.actions.listJobsForWorkflowRun({...params,per_page:100})).data.jobs;
+            if (!allowed(run,jobs)) throw new Error('diagnostic_precondition_mismatch');
+            await github.rest.actions.cancelWorkflowRun(params);
+            for (let i=0;i<12;i++) {
+              const current=(await github.rest.actions.getWorkflowRun(params)).data;
+              if(current.status==='completed' && current.conclusion==='cancelled') {core.info('Fixed queued diagnostic cancelled and independently verified');return;}
+              await new Promise(resolve=>setTimeout(resolve,3000));
+            }
+            throw new Error('cancellation_not_confirmed');
