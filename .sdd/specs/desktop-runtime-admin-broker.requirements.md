@@ -79,9 +79,9 @@ substituído ou ter suas labels alteradas por esta capacidade.
    runtime próprio; criação de processo não basta e morte imediata falha fechada;
 8. o launcher per-user deve supervisionar o broker, reiniciar falhas transitórias
    com backoff limitado e publicar heartbeat sanitizado para readback independente;
-8. testes provam cópia idempotente do runtime Python, hash/versão, rejeição de
+9. testes provam cópia idempotente do runtime Python, hash/versão, rejeição de
    virtualenv e ausência do caminho Python transitório na metadata persistida;
-9. CI de PR verde no HEAD exato.
+10. CI de PR verde no HEAD exato.
 
 ## Critérios de aceite runtime
 
