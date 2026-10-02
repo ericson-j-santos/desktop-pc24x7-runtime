@@ -32,20 +32,20 @@ jobs:
               runners = registry.data.runners;
             } catch (error) {
               if ([401, 403].includes(Number(error.status))) {
-                core.info('RUNNER_REGISTRY_READ_UNAVAILABLE; no physical dispatch');
-                return;
+                core.info('RUNNER_REGISTRY_READ_UNAVAILABLE; use the fixed canary with its finite pickup watchdog');
+                runners = null;
               }
-              throw new Error('runner_registry_read_failed');
+              else { throw new Error('runner_registry_read_failed'); }
             }
             const expectedLabels = ['self-hosted', 'Windows', 'X64', 'pc24x7', 'desktop-runtime', 'runtime-dev'];
-            const eligible = runners.filter(item => item.name === 'DESKTOP-PDQK954-runtime' &&
-              expectedLabels.every(label => item.labels.some(entry => entry.name === label)));
-            if (eligible.length !== 1) {
+            const eligible = runners ? runners.filter(item => item.name === 'DESKTOP-PDQK954-runtime' &&
+              expectedLabels.every(label => item.labels.some(entry => entry.name === label))) : [];
+            if (runners && eligible.length !== 1) {
               core.info('FIXED_DESKTOP_RUNNER_NOT_UNIQUE; no physical dispatch');
               return;
             }
-            core.info(JSON.stringify({runner: eligible[0].name, status: eligible[0].status, busy: eligible[0].busy}));
-            if (eligible[0].status !== 'online' || eligible[0].busy) {
+            if (runners) core.info(JSON.stringify({runner: eligible[0].name, status: eligible[0].status, busy: eligible[0].busy}));
+            if (runners && (eligible[0].status !== 'online' || eligible[0].busy)) {
               core.info('FIXED_DESKTOP_RUNNER_NOT_READY; no physical dispatch');
               return;
             }
