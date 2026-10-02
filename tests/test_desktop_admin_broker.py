@@ -1544,3 +1544,49 @@ def test_admin_successor_reloads_metadata_after_lock_and_continues(
     assert m.watch(tmp_path / "metadata.json") == 0
     assert len(loads) == 3
     assert released == [lock]
+
+
+def test_user_launcher_is_a_restartable_supervisor(tmp_path: Path) -> None:
+    launcher = m._write_launcher(tmp_path)
+    source = launcher.read_text(encoding="utf-8")
+    assert "while True:" in source
+    assert "runpy.run_path" in source
+    assert "supervisor_retrying" in source
+    assert "broker-heartbeat.json" in source
+    assert "production_touched" in source
+    assert "secrets_read" in source
+    assert "reboot_performed" in source
+
+
+def test_broker_heartbeat_freshness_is_bounded() -> None:
+    now = datetime.now(timezone.utc)
+    fresh = {
+        "updated_at": now.isoformat(),
+        "production_touched": False,
+        "secrets_read": False,
+        "reboot_performed": False,
+    }
+    stale = {
+        **fresh,
+        "updated_at": (now - timedelta(seconds=91)).isoformat(),
+    }
+    assert m._heartbeat_is_fresh(fresh, reference_time=now) is True
+    assert m._heartbeat_is_fresh(stale, reference_time=now) is False
+
+
+def test_status_exposes_runtime_readiness_without_promoting_uac_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(m, "watchdog_runtime_metadata", lambda: tmp_path / "missing.json")
+    monkeypatch.setattr(m, "task_status", lambda: {"exists": False})
+    metadata = {
+        "runtime_root": str(tmp_path),
+        "requires_uac_activation": True,
+        "admin_channel_ready": False,
+        "fallback_persistence": {"mode": m.USER_AUTOSTART_MODE, "readback_verified": True},
+    }
+    result = m._status(metadata)
+    assert result["broker_runtime"]["ready"] is False
+    assert result["broker_runtime"]["admin_activation_pending"] is True
+    assert result["broker_runtime"]["admin_channel_ready"] is False
+    assert result["broker_runtime"]["fallback_autostart"]["readback_verified"] is True
