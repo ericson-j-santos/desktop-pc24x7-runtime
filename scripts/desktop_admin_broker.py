@@ -1150,7 +1150,7 @@ def watch(metadata_path: Path) -> int:
     finally:
         try:
             _write_heartbeat(
-                installation["metadata"],
+                metadata,
                 status="stopped",
                 stopped_at=now_iso(),
             )
@@ -1447,6 +1447,12 @@ def _write_launcher(runtime_root: Path) -> Path:
         "    except SystemExit as exc:\n"
         "        code = exc.code if isinstance(exc.code, int) else 0\n"
         "        if code == 0:\n"
+        "            try:\n"
+        "                latest = json.loads(metadata.read_text(encoding='utf-8'))\n"
+        "            except Exception:\n"
+        "                latest = {}\n"
+        "            if latest.get('admin_channel_ready') is True and latest.get('requires_uac_activation') is False:\n"
+        "                break\n"
         "            restart_count += 1\n"
         "            time.sleep(restart_delay)\n"
         "            continue\n"
