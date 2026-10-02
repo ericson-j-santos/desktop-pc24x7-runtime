@@ -58,8 +58,11 @@ substituído ou ter suas labels alteradas por esta capacidade.
   com valor fixo `DesktopPc24x7AdminBroker`, readback exato e início imediato
   por argv fixo com `shell=False`; o processo deve sobreviver à janela inicial
   de partida, caso contrário a instalação falha fechada;
-- esse fallback é somente canal de recuperação local/DEV e não satisfaz o
-  critério final AtStartup + S4U + highest;
+- esse fallback é o canal operacional local/DEV enquanto AtStartup + S4U +
+  highest não estiver comprovado; ele deve usar um supervisor per-user
+  idempotente, manter heartbeat sanitizado e reiniciar o broker após falha,
+  sem exigir nova UAC;
+- esse fallback não satisfaz o critério final AtStartup + S4U + highest;
 - a elevação da tarefa AtStartup + S4U continua exigindo autorização
   administrativa explícita; quando concluída, o fallback HKCU deve ser removido.
 
@@ -74,6 +77,8 @@ substituído ou ter suas labels alteradas por esta capacidade.
 7. fallback não administrativo usa somente HKCU do usuário corrente, comando
    fixo e `shell=False`, apontando exclusivamente para o Python persistido no
    runtime próprio; criação de processo não basta e morte imediata falha fechada;
+8. o launcher per-user deve supervisionar o broker, reiniciar falhas transitórias
+   com backoff limitado e publicar heartbeat sanitizado para readback independente;
 8. testes provam cópia idempotente do runtime Python, hash/versão, rejeição de
    virtualenv e ausência do caminho Python transitório na metadata persistida;
 9. CI de PR verde no HEAD exato.
