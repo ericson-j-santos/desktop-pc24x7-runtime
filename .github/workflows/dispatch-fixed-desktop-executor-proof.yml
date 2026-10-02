@@ -1,0 +1,83 @@
+name: Dispatch fixed Desktop executor proof
+
+on:
+  push:
+    branches: ["ops/noteri-recovery-gate-20261002"]
+    paths: [".github/workflows/dispatch-fixed-desktop-executor-proof.yml"]
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Verify fixed target and dispatch existing bounded canary
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const owner = 'ericson-j-santos';
+            const repo = 'desktop-pc24x7-runtime';
+            const workflow = 'dedicated-runtime-runner-e2e.yml';
+            const expected = '75d23444e83c42e8c4b03be30deba886d666e9f4';
+            if (context.repo.owner !== owner || context.repo.repo !== repo ||
+                context.ref !== 'refs/heads/ops/noteri-recovery-gate-20261002') {
+              throw new Error('fixed_dispatch_context_mismatch');
+            }
+            let runners;
+            try {
+              const registry = await github.rest.actions.listSelfHostedRunnersForRepo({owner, repo, per_page: 100});
+              runners = registry.data.runners;
+            } catch (error) {
+              if ([401, 403].includes(Number(error.status))) {
+                core.info('RUNNER_REGISTRY_READ_UNAVAILABLE; no physical dispatch');
+                return;
+              }
+              throw new Error('runner_registry_read_failed');
+            }
+            const expectedLabels = ['self-hosted', 'Windows', 'X64', 'pc24x7', 'desktop-runtime', 'runtime-dev'];
+            const eligible = runners.filter(item => item.name === 'DESKTOP-PDQK954-runtime' &&
+              expectedLabels.every(label => item.labels.some(entry => entry.name === label)));
+            if (eligible.length !== 1) {
+              core.info('FIXED_DESKTOP_RUNNER_NOT_UNIQUE; no physical dispatch');
+              return;
+            }
+            core.info(JSON.stringify({runner: eligible[0].name, status: eligible[0].status, busy: eligible[0].busy}));
+            if (eligible[0].status !== 'online' || eligible[0].busy) {
+              core.info('FIXED_DESKTOP_RUNNER_NOT_READY; no physical dispatch');
+              return;
+            }
+            const branch = await github.rest.repos.getBranch({owner, repo, branch: 'main'});
+            if (branch.data.commit.sha !== expected) {
+              throw new Error('desktop_main_advanced_revalidate_before_dispatch');
+            }
+            const metadata = await github.rest.actions.getWorkflow({owner, repo, workflow_id: workflow});
+            if (metadata.data.path !== '.github/workflows/' + workflow || metadata.data.state !== 'active') {
+              throw new Error('fixed_workflow_unavailable');
+            }
+            const before = await github.rest.actions.listWorkflowRuns({
+              owner, repo, workflow_id: workflow, event: 'workflow_dispatch', per_page: 20,
+            });
+            const previousIds = new Set(before.data.workflow_runs.map(run => run.id));
+            const began = Date.now() - 1000;
+            await github.rest.actions.createWorkflowDispatch({owner, repo, workflow_id: workflow, ref: 'main'});
+            for (let attempt = 0; attempt < 8; attempt += 1) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner, repo, workflow_id: workflow, event: 'workflow_dispatch', per_page: 20,
+              });
+              const matches = runs.data.workflow_runs.filter(run =>
+                run.head_sha === expected && Date.parse(run.created_at) >= began &&
+                !previousIds.has(run.id));
+              if (matches.length > 1) throw new Error('ambiguous_dispatch_readback');
+              if (matches.length === 1) {
+                core.setOutput('target_run_id', String(matches[0].id));
+                core.info(JSON.stringify({result: 'FIXED_DESKTOP_PROOF_DISPATCHED',
+                  head_sha: expected, target_run_id: matches[0].id,
+                  target_url: matches[0].html_url}));
+                return;
+              }
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            throw new Error('dispatch_readback_not_observed');
