@@ -1,6 +1,12 @@
 name: PC24x7 Runtime Canary
 
 on:
+  pull_request:
+    paths:
+      - .github/workflows/runtime-canary.yml
+      - config/runtime-supervisor.example.json
+      - scripts/runtime_health_supervisor.py
+      - tests/test_runtime_health_supervisor.py
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
@@ -21,6 +27,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
       - name: Materialize governed session
         id: session
@@ -31,8 +38,8 @@ jobs:
             --repo $env:GITHUB_WORKSPACE `
             --session-prefix runtime-canary `
             --correlation-id "runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}" `
-            --expected-head $env:GITHUB_SHA `
-            --sync-ref origin/${{ github.ref_name }} `
+            --expected-head '${{ github.event.pull_request.head.sha || github.sha }}' `
+            --sync-ref 'origin/${{ github.event.pull_request.head.ref || github.ref_name }}' `
             --require-runner-version-preflight
           $result | Set-Content -Encoding utf8 session-launch.json
           $session = $result | ConvertFrom-Json
@@ -55,7 +62,7 @@ jobs:
             --session-id '${{ steps.session.outputs.session_id }}' `
             --risk 1 `
             --timeout 120 `
-            --expected-head $env:GITHUB_SHA `
+            --expected-head '${{ github.event.pull_request.head.sha || github.sha }}' `
             -- python scripts/runtime_health_supervisor.py `
               --config config/runtime-supervisor.example.json `
               --state (Join-Path $runtime 'state.json') `

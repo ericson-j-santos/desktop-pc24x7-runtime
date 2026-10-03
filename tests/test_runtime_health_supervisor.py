@@ -87,3 +87,5 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "steps.session.outputs.target_path" in workflow
     assert "scripts\\command_gateway.py" in workflow
     assert "schedule:" in workflow
+    assert "pull_request:" in workflow
+    assert "github.event.pull_request.head.sha || github.sha" in workflow
