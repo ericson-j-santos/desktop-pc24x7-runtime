@@ -19,14 +19,16 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from pc24x7_host_policy import authorized_host
+
 import desktop_control_plane_watchdog as watchdog
 
-EXPECTED_HOST = "DESKTOP-PDQK954"
+EXPECTED_HOST = "DESKTOP-PDQK954"  # compatibility default; runtime identity comes from host policy
 EXPECTED_GITHUB_LOGIN = "ericson-j-santos"
 REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}"
-RUNNER_NAME = "DESKTOP-PDQK954-runtime"
-RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev"
+RUNNER_NAME = "DESKTOP-PDQK954-runtime"  # compatibility default; resolved per authorized host
+RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev"  # compatibility default; resolved per authorized host
 REQUIRED_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev")
 CONFIRM = "BOOTSTRAP-DESKTOP-RUNTIME-RUNNER"
 RUNNER_VERSION = "2.337.0"
@@ -54,8 +56,10 @@ def validate_host() -> str:
     if os.name != "nt":
         raise BootstrapError("windows_required", "Windows obrigatório")
     host = socket.gethostname()
-    if host.casefold() != EXPECTED_HOST.casefold():
-        raise BootstrapError("host_not_authorized", f"host não autorizado: {host}")
+    try:
+        authorized_host(host)
+    except ValueError as exc:
+        raise BootstrapError("host_not_authorized", str(exc)) from None
     if platform.machine().casefold() not in {"amd64", "x86_64"}:
         raise BootstrapError("x64_required", "arquitetura x64 obrigatória")
     return host
@@ -300,6 +304,11 @@ def persist(path: Path | None, payload: dict[str, Any]) -> None:
 
 def bootstrap(*, source_sha: str, evidence_file: Path | None = None) -> dict[str, Any]:
     host = validate_host()
+    profile = authorized_host(host)
+    global RUNNER_NAME, RUNNER_LABELS, REQUIRED_LABELS
+    RUNNER_NAME = profile.runner_name
+    RUNNER_LABELS = profile.runner_labels
+    REQUIRED_LABELS = ("self-hosted", "Windows", "X64", *tuple(x for x in profile.runner_labels.split(",") if x))
     if len(source_sha) != 40 or any(ch not in "0123456789abcdefABCDEF" for ch in source_sha):
         raise BootstrapError("source_sha_invalid", "source_sha inválido")
     token = os.environ.get("GH_TOKEN", "").strip() or None
