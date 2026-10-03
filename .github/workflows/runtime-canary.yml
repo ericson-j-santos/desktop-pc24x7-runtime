@@ -33,8 +33,13 @@ jobs:
         id: session
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          $python = 'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-          if (-not (Test-Path $python)) { throw 'PYTHON_RUNTIME_NOT_FOUND' }
+          $pythonCandidates = @(
+            (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'),
+            'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
+            'C:\Users\Windows\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          )
+          $python = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $python) { throw "PYTHON_RUNTIME_NOT_FOUND: $($pythonCandidates -join '; ')" }
           $result = & $python C:\dev\chatgpt-operational-rules\scripts\session_launcher.py `
             --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
             --repo $env:GITHUB_WORKSPACE `
@@ -56,8 +61,13 @@ jobs:
         run: |
           $runtime = Join-Path $env:LOCALAPPDATA 'DesktopPC24x7\RuntimeSupervisor'
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-          $python = 'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-          if (-not (Test-Path $python)) { throw 'PYTHON_RUNTIME_NOT_FOUND' }
+          $pythonCandidates = @(
+            (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'),
+            'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
+            'C:\Users\Windows\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          )
+          $python = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $python) { throw "PYTHON_RUNTIME_NOT_FOUND: $($pythonCandidates -join '; ')" }
           & $python C:\dev\chatgpt-operational-rules\scripts\command_gateway.py `
             --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
             --correlation-id "runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}" `
