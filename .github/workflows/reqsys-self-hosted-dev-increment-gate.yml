@@ -1,0 +1,39 @@
+name: Fixed ReqSys DEV migration increment gate
+
+on:
+  push:
+    branches: [fix/reqsys-self-hosted-dev-20261003]
+    paths:
+      - .github/workflows/reqsys-self-hosted-dev-increment-gate.yml
+
+permissions:
+  contents: read
+  actions: read
+  pull-requests: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ericson-j-santos/reqsys-v2-enterprise-real
+          ref: 2dfd38e5666f82f33ae939ced7b383e52096f65f
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Evaluate the existing closed-scope migration gate
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          python scripts/coordenador_status_consolidator.py --repo ericson-j-santos/reqsys-v2-enterprise-real --branch main --output-dir artifacts/coordenador-status
+          python scripts/agent_increment_gate.py --increment-type hotfix --reference OPS-GAP-SELFHOST-DEV-20261003 --intent "Concluir restauracao SQLite e publicacao DEV propria ja autorizadas" --status-json artifacts/coordenador-status/coordenador-status.json --output-dir artifacts/agent-increment-gate --json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: reqsys-dev-increment-gate
+          path: artifacts/agent-increment-gate
+          if-no-files-found: error
+          retention-days: 7

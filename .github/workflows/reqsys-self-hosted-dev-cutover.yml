@@ -1,65 +1,264 @@
-name: ReqSys self-hosted DEV Compose cutover
+name: ReqSys self-hosted DEV preflight
+
 on:
   workflow_dispatch:
   push:
-    branches: [main]
-    paths: [.github/workflows/reqsys-self-hosted-dev-cutover.yml]
+    branches: [fix/reqsys-self-hosted-dev-20261003]
+    paths:
+      - scripts/reqsys_self_hosted_dev_preflight.py
+      - .github/workflows/reqsys-self-hosted-dev-cutover.yml
+
 permissions:
   contents: read
+
+concurrency:
+  group: reqsys-dev-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  cutover:
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
-    timeout-minutes: 20
-    env:
-      TARGET_SHA: 9fb8e70cb5e7495cb2d33eaa1dea645e0870c172
-      ENV_FILE: C:\ReqSys\dev\runtime.env
-      SECRET_DIR: C:\ReqSys\dev\secrets
-      PROJECT_NAME: reqsys-dev-selfhosted
+  resolve_rules:
+    name: Resolve canonical operational rules
+    runs-on: windows-latest
+    timeout-minutes: 2
+    outputs:
+      rules_sha: ${{ steps.rules.outputs.sha }}
     steps:
-      - name: Assert exact host
-        shell: powershell
-        run: |
-          if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") { throw "HOST_MISMATCH" }
-      - name: Checkout ReqSys
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Resolve main SHA and require rules 1.6.9+
+        id: rules
+        uses: actions/github-script@v7
         with:
-          repository: ericson-j-santos/reqsys-v2-enterprise-real
-          ref: 9fb8e70cb5e7495cb2d33eaa1dea645e0870c172
-          path: reqsys
+          script: |
+            const branch = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              branch: 'main',
+            });
+            const sha = branch.data.commit.sha;
+            const readme = await github.rest.repos.getContent({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              path: 'README.md',
+              ref: sha,
+            });
+            const text = Buffer.from(readme.data.content, 'base64').toString('utf8');
+            const match = text.match(/^Versão:\s*(\d+)\.(\d+)\.(\d+)\s*$/m);
+            if (!match) {
+              core.setFailed('RULES_VERSION_UNREADABLE');
+              return;
+            }
+            const observed = match.slice(1).map(Number);
+            const required = [1, 6, 9];
+            const sufficient = observed[0] > required[0]
+              || (observed[0] === required[0] && observed[1] > required[1])
+              || (observed[0] === required[0] && observed[1] === required[1] && observed[2] >= required[2]);
+            if (!sufficient) {
+              core.setFailed(`RULES_1_6_9_REQUIRED:observed=${observed.join('.')}`);
+              return;
+            }
+            core.setOutput('sha', sha);
+
+  e2e:
+    needs: resolve_rules
+    name: Inspect fixed Desktop DEV migration prerequisites
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 10
+    env:
+      RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
+      CORRELATION_ID: reqsys-dev-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_REL: artifacts/reqsys-dev-preflight-e2e/evidence.json
+    steps:
+      - name: Checkout exact runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
           fetch-depth: 1
           persist-credentials: false
-      - name: Validate private DEV inputs
-        shell: powershell
-        working-directory: reqsys
-        run: |
-          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "DOCKER_MISSING" }
-          if (-not (Test-Path $env:ENV_FILE)) { throw "DEV_ENV_FILE_MISSING" }
-          if (-not (Test-Path $env:SECRET_DIR)) { throw "DEV_SECRET_DIR_MISSING" }
-          foreach ($n in @("db_owner_password","db_app_password","jwt_secret")) { if (-not (Test-Path (Join-Path $env:SECRET_DIR $n))) { throw "SECRET_FILE_MISSING:$n" } }
-          docker version
-          docker compose version
-      - name: Validate and start isolated DEV Compose
-        shell: powershell
-        working-directory: reqsys
-        run: |
-          $env:COMPOSE_PROJECT_NAME=$env:PROJECT_NAME
-          $env:REQSYS_SECRET_DIR=$env:SECRET_DIR
-          docker compose --env-file $env:ENV_FILE -f infra/self-hosted/compose.yml config --quiet
-          docker compose --env-file $env:ENV_FILE -f infra/self-hosted/compose.yml up --build -d --wait --wait-timeout 300
-      - name: Smoke test
-        shell: powershell
-        run: |
-          $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18080/api/health -TimeoutSec 20
-          if ($r.StatusCode -ne 200) { throw "DEV_HEALTH_FAILED" }
-          Write-Host "REQSYS_SELF_HOSTED_DEV_HEALTH_OK"
-      - name: Evidence
-        if: always()
-        shell: powershell
-        run: |
-          New-Item -ItemType Directory -Force evidence | Out-Null
-          [ordered]@{host=$env:COMPUTERNAME;target_sha=$env:TARGET_SHA;project=$env:PROJECT_NAME;secrets_read=$false;production_touched=$false;fly_used=$false} | ConvertTo-Json | Set-Content evidence/evidence.json
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
+
+      - name: Checkout canonical operational rules exact SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
-          name: reqsys-self-hosted-dev-cutover
-          path: evidence/evidence.json
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap governed session and runner version preflight
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $anchorSha = "${{ github.sha }}"
+          $syncRef = "origin/$env:GITHUB_REF_NAME"
+          $launcherArgs = @(
+            "--policy", $policy,
+            "--repo", $env:GITHUB_WORKSPACE,
+            "--session-prefix", "desktop-runner",
+            "--correlation-id", $env:CORRELATION_ID,
+            "--expected-head", $anchorSha,
+            "--sync-ref", $syncRef,
+            "--require-runner-version-preflight"
+          )
+          $raw = & python $launcher @launcherArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = @($raw)[-1] | ConvertFrom-Json
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true) {
+            throw "SESSION_LAUNCH_BLOCKED"
+          }
+          if ($data.head -ne $anchorSha) { throw "SESSION_HEAD_MISMATCH" }
+          if ($null -eq $data.runner_version_preflight -or $data.runner_version_preflight.ok -ne $true) {
+            throw "RUNNER_VERSION_PREFLIGHT_BLOCKED"
+          }
+          if ([string]::IsNullOrWhiteSpace([string]$data.runner_version_preflight.installed_version)) {
+            throw "RUNNER_VERSION_EVIDENCE_MISSING"
+          }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
+          "runner_version=$($data.runner_version_preflight.installed_version)" | Add-Content $env:GITHUB_OUTPUT
+          "RUNNER_VERSION_OBSERVED=$($data.runner_version_preflight.installed_version)" | Add-Content $env:GITHUB_ENV
+          "RUNNER_REGISTRATION_SUPPORTED=$($data.runner_version_preflight.registration_supported.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
+          "RUNNER_RUNTIME_SUPPORTED=$($data.runner_version_preflight.runtime_supported_now.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
+          "RUNNER_DEPRECATION_API_STATUS=$($data.runner_version_preflight.deprecation_api_status)" | Add-Content $env:GITHUB_ENV
+
+      - name: Inspect Docker, private input presence and DEV health through Command Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\reqsys_self_hosted_dev_preflight.py"
+          $gatewayArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "1",
+            "--timeout", "180",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", $script,
+            "--evidence-file", $env:EVIDENCE_REL
+          )
+          & python $gateway @gatewayArgs
+          exit $LASTEXITCODE
+
+      - name: Upload sanitized evidence
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-dev-preflight-e2e-${{ github.run_id }}
+          path: ${{ steps.session.outputs.target_path }}/artifacts/reqsys-dev-preflight-e2e/evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
+  queue_watchdog:
+    needs: resolve_rules
+    name: Dedicated runner queue watchdog
+    runs-on: windows-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+    env:
+      RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
+      TARGET_RUN_ID: ${{ github.run_id }}
+      TARGET_JOB_NAME: Inspect fixed Desktop DEV migration prerequisites
+      STALL_AFTER_SECONDS: "60"
+      CORRELATION_ID: reqsys-dev-preflight-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout canonical progress watchdog
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Observe dedicated runner pickup
+        id: observe
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
+            const runId = Number(process.env.TARGET_RUN_ID);
+            const run = await github.rest.actions.getWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: runId,
+            });
+            const anchor = new Date(run.data.created_at || Date.now());
+            while (true) {
+              const response = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+              });
+              const job = response.data.jobs.find((item) => item.name === process.env.TARGET_JOB_NAME) || null;
+              if (job && (job.status !== 'queued' || Number(job.runner_id || 0) > 0)) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: String(job.id),
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: job.status === 'completed' ? 'completed' : 'running',
+                  last_material_progress_at: new Date().toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+              const noProgressMs = Date.now() - anchor.getTime();
+              if (noProgressMs >= stallMs) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: job ? String(job.id) : 'reqsys-dev-preflight-job-not-created',
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: 'queued',
+                  last_material_progress_at: anchor.toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+              await sleep(Math.min(15000, stallMs - noProgressMs));
+            }
+
+      - name: Evaluate canonical progress watchdog
+        id: watchdog
+        continue-on-error: true
+        shell: pwsh
+        run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
+
+      - name: Fail closed and cancel stalled canary
+        if: steps.watchdog.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('progress-watchdog-output.json')) {
+              core.setFailed('PROGRESS_WATCHDOG_EVIDENCE_MISSING');
+              return;
+            }
+            const decision = JSON.parse(fs.readFileSync('progress-watchdog-output.json', 'utf8'));
+            if (decision.decision !== 'block') {
+              core.setFailed(`PROGRESS_WATCHDOG_INVALID_DECISION:${decision.decision || 'missing'}`);
+              return;
+            }
+            core.setFailed(`SELF_HOSTED_RUNNER_UNAVAILABLE:${decision.no_progress_seconds}s`);
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.TARGET_RUN_ID),
+            });
+
