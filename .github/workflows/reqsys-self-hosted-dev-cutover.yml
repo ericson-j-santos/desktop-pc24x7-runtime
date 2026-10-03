@@ -174,6 +174,27 @@ jobs:
           "RUNNER_RUNTIME_SUPPORTED=$($data.runner_version_preflight.runtime_supported_now.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
           "RUNNER_DEPRECATION_API_STATUS=$($data.runner_version_preflight.deprecation_api_status)" | Add-Content $env:GITHUB_ENV
 
+      - name: Inspect the database serving the existing DEV before migration
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $probe = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\reqsys_dev_current_data_probe.py"
+          $evidence = Join-Path $env:RUNNER_TEMP ("reqsys-current-dev-data-" + $env:GITHUB_RUN_ID + "\evidence.json")
+          "CURRENT_DEV_EVIDENCE_FILE=$evidence" | Add-Content $env:GITHUB_ENV
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-current-data" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $probe --evidence-file $evidence
+          exit $LASTEXITCODE
+
+      - name: Upload current DEV metadata only
+        if: always() && env.CURRENT_DEV_EVIDENCE_FILE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-current-dev-data-${{ github.run_id }}
+          path: ${{ env.CURRENT_DEV_EVIDENCE_FILE }}
+          if-no-files-found: warn
+          retention-days: 7
       - name: Materialize the fixed ReqSys DEV source through Command Gateway
         id: reqsys_source
         shell: powershell
@@ -191,7 +212,7 @@ jobs:
             "--expected-head",$env:ANCHOR_SHA,"--","python",$sourceScript,"--expected-sha",$env:REQSYS_TARGET_SHA)
           & python $gateway @args
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $source = "C:\dev\chatgpt-workers\reqsys-selfhost-source-$env:REQSYS_TARGET_SHA"
+          $source = "C:\dev\chatgpt-workers\rs2-$env:REQSYS_TARGET_SHA"
           $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
           $raw = & python $launcher --policy $policy --repo $source --session-prefix reqsys-dev-prepare --correlation-id "$env:CORRELATION_ID-reqsys" --expected-head $env:REQSYS_TARGET_SHA --sync-ref origin/fix/self-hosted-dev-restore-20261003 --require-runner-version-preflight
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
