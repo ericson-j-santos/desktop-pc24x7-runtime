@@ -33,7 +33,9 @@ jobs:
         id: session
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
-          $result = python C:\dev\chatgpt-operational-rules\scripts\session_launcher.py `
+          $python = 'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path $python)) { throw 'PYTHON_RUNTIME_NOT_FOUND' }
+          $result = & $python C:\dev\chatgpt-operational-rules\scripts\session_launcher.py `
             --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
             --repo $env:GITHUB_WORKSPACE `
             --session-prefix runtime-canary `
@@ -54,7 +56,9 @@ jobs:
         run: |
           $runtime = Join-Path $env:LOCALAPPDATA 'DesktopPC24x7\RuntimeSupervisor'
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null
-          python C:\dev\chatgpt-operational-rules\scripts\command_gateway.py `
+          $python = 'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path $python)) { throw 'PYTHON_RUNTIME_NOT_FOUND' }
+          & $python C:\dev\chatgpt-operational-rules\scripts\command_gateway.py `
             --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
             --correlation-id "runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}" `
             run `
