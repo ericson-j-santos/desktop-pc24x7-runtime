@@ -31,7 +31,7 @@ jobs:
 
       - name: Materialize governed session
         id: session
-        shell: pwsh
+        shell: powershell
         run: |
           $result = python C:\dev\chatgpt-operational-rules\scripts\session_launcher.py `
             --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
@@ -50,7 +50,7 @@ jobs:
           "session_id=$($session.session_id)" >> $env:GITHUB_OUTPUT
 
       - name: Run fail-closed canary
-        shell: pwsh
+        shell: powershell
         run: |
           $runtime = Join-Path $env:LOCALAPPDATA 'DesktopPC24x7\RuntimeSupervisor'
           New-Item -ItemType Directory -Force -Path $runtime | Out-Null

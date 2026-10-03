@@ -89,6 +89,8 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "schedule:" in workflow
     assert "pull_request:" in workflow
     assert "github.event.pull_request.head.sha || github.sha" in workflow
+    assert workflow.count("shell: powershell") == 2
+    assert "shell: pwsh" not in workflow
 
 
 def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
