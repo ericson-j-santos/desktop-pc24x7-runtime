@@ -81,3 +81,5 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, 5000));
             }
             throw new Error('dispatch_readback_not_observed');
+
+# pickup validation rerun after local Desktop run.cmd was opened (2026-10-03)
