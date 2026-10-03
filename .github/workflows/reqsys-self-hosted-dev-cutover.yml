@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ericson-j-santos/reqsys-v2-enterprise-real
-          ref: ce8145e34e910ef3b485042d73f500df69c88ac7
+          ref: 56f2940d8a3e3d7ccf299f0fed79bd0dc874b56d
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -98,7 +98,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           repository: ericson-j-santos/reqsys-v2-enterprise-real
-          ref: ce8145e34e910ef3b485042d73f500df69c88ac7
+          ref: 56f2940d8a3e3d7ccf299f0fed79bd0dc874b56d
           persist-credentials: false
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
@@ -113,7 +113,7 @@ jobs:
     timeout-minutes: 20
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
-      REQSYS_TARGET_SHA: ce8145e34e910ef3b485042d73f500df69c88ac7
+      REQSYS_TARGET_SHA: 56f2940d8a3e3d7ccf299f0fed79bd0dc874b56d
       PYTHONPATH: ${{ github.workspace }}
       CORRELATION_ID: reqsys-dev-prepare-${{ github.run_id }}-${{ github.run_attempt }}
       EVIDENCE_REL: artifacts/reqsys-dev-prepare-e2e/evidence.json
@@ -210,6 +210,7 @@ jobs:
           & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-deps" run --cwd "${{ steps.reqsys_source.outputs.target_path }}" --session-id "${{ steps.reqsys_source.outputs.session_id }}" --risk 2 --timeout 240 --expected-head $env:REQSYS_TARGET_SHA -- python -m pip --isolated install --only-binary=:all: --no-user --target $site --index-url https://pypi.org/simple cryptography==46.0.2 pywin32==311
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "PYTHONPATH=$site" | Add-Content $env:GITHUB_ENV
+          "REQSYS_MIGRATION_DEPENDENCIES=$site" | Add-Content $env:GITHUB_ENV
 
       - name: Provision the fixed receiver identity through Command Gateway
         shell: powershell
@@ -217,14 +218,30 @@ jobs:
           $ErrorActionPreference = "Stop"
           $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
-          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-recipient" run --cwd "${{ steps.reqsys_source.outputs.target_path }}" --session-id "${{ steps.reqsys_source.outputs.session_id }}" --risk 2 --timeout 90 --expected-head $env:REQSYS_TARGET_SHA -- python scripts/dev_backup_transport.py recipient-init --confirm INIT-PC24X7-DEV-MIGRATION-IDENTITY
+          $ownerGateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\owner_risk3_gateway.py"
+          $ownerStatus = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\set_owner_risk3_development_mode.py"
+          $target = "${{ steps.reqsys_source.outputs.target_path }}"
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-owner-status" run --cwd $target --session-id "${{ steps.reqsys_source.outputs.session_id }}" --risk 1 --timeout 30 --expected-head $env:REQSYS_TARGET_SHA -- python $ownerStatus --status
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-recipient" run --cwd $target --session-id "${{ steps.reqsys_source.outputs.session_id }}" --risk 2 --timeout 120 --expected-head $env:REQSYS_TARGET_SHA -- python $ownerGateway --action-id reqsys.selfhost.receiver.init.dev --scope repo://reqsys/environment/dev --cwd $target --timeout 90 --correlation-id "$env:CORRELATION_ID-owner" -- python scripts/dev_backup_transport.py recipient-init --confirm INIT-PC24X7-DEV-MIGRATION-IDENTITY
           exit $LASTEXITCODE
+      - name: Read only the validated recipient public identity through Command Gateway
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $reader = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\read_reqsys_dev_recipient_public.py"
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-public" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 30 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $reader --confirm READ-PC24X7-DEV-RECIPIENT-PUBLIC
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $publicFile = Join-Path $env:LOCALAPPDATA "ReqSys\SelfHostedDev\Migration\receiver-public-key.json"
+          "RECIPIENT_PUBLIC_FILE=$publicFile" | Add-Content $env:GITHUB_ENV
       - name: Upload receiver public identity only
         if: success()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: reqsys-dev-prepare-e2e-${{ github.run_id }}
-          path: C:\Users\Windows\AppData\Local\ReqSys\SelfHostedDev\Migration\receiver-public-key.json
+          path: ${{ env.RECIPIENT_PUBLIC_FILE }}
           if-no-files-found: error
           retention-days: 30
 
