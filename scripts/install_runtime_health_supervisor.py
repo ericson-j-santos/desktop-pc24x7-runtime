@@ -109,7 +109,10 @@ def register_task(python_executable: Path, launcher: Path) -> dict[str, Any]:
     try:
         folder.RegisterTaskDefinition(TASK_LEAF, definition, 6, principal.UserId, "", 2)
     except Exception as exc:
-        if "0x80070005" in repr(exc).casefold() or "-2147024891" in repr(exc):
+        detail = repr(exc).casefold()
+        if any(marker in detail for marker in (
+            "0x80070005", "-2147024891", "access is denied", "acesso negado"
+        )):
             raise InstallError("task_scheduler_access_denied") from exc
         raise InstallError(f"task_registration_failed:{type(exc).__name__}") from exc
     return {"task_name": TASK_NAME, "logon_type": "S4U", "interval": "PT1M"}
@@ -160,11 +163,23 @@ def install(source_root: Path, source_sha: str, confirm: str) -> dict[str, Any]:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--source-root", type=Path, required=True)
-    parser.add_argument("--source-sha", required=True)
-    parser.add_argument("--confirm", required=True)
+    parser.add_argument("--source-root", type=Path)
+    parser.add_argument("--source-sha")
+    parser.add_argument("--confirm")
+    parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
     try:
+        if args.status:
+            root = runtime_root()
+            print(json.dumps({
+                "runtime_root_present": root.is_dir(),
+                "config_present": (root / "config.json").is_file(),
+                "launcher_present": (root / "run-supervisor.py").is_file(),
+                "task": task_readback(),
+            }, sort_keys=True))
+            return 0
+        if not args.source_root or not args.source_sha or not args.confirm:
+            raise InstallError("source-root, source-sha e confirm sao obrigatorios")
         print(json.dumps(install(args.source_root, args.source_sha, args.confirm), sort_keys=True))
         return 0
     except (InstallError, OSError, subprocess.SubprocessError) as exc:
