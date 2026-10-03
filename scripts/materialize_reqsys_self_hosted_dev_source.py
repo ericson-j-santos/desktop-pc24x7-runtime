@@ -14,7 +14,8 @@ REF = "fix/self-hosted-dev-restore-20261003"
 ROOT = Path(r"C:\dev\chatgpt-workers")
 
 def git(args: list[str], cwd: Path) -> str:
-    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1")
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0", GIT_LFS_SKIP_SMUDGE="1",
+               GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
     try:
         p = subprocess.run(["git", *args], cwd=cwd, env=env, capture_output=True,
                            text=True, timeout=180, check=False)
@@ -57,7 +58,6 @@ def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--expected-sha", required=True)
     a = p.parse_args()
-    # Detached check cannot use symbolic-ref's expected nonzero result as a Git failure.
     source = materialize(a.expected_sha)
     print(json.dumps({"result":"REQSYS_DEV_SOURCE_READY","source_root":str(source),
                       "source_sha":a.expected_sha,"source_ref":REF}))
