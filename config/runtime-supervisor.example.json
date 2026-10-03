@@ -1,0 +1,24 @@
+{
+  "cooldown_seconds": 900,
+  "host": "DESKTOP-PDQK954",
+  "max_attempts": 3,
+  "targets": [
+    {
+      "kind": "runner",
+      "log_path": "%LOCALAPPDATA%\\DesktopPC24x7\\GitHubRunner\\logs\\supervisor-runner.log",
+      "name": "github-runner",
+      "runner_home": "%LOCALAPPDATA%\\DesktopPC24x7\\GitHubRunner"
+    },
+    {
+      "kind": "http",
+      "name": "engineering-orchestrator",
+      "recovery_task": "\\Automation\\ReqSysOrchestrator24x7",
+      "url": "http://127.0.0.1:8787/readyz"
+    },
+    {
+      "container": "reqsys-codex-worker-pool-codex-worker-pool-1",
+      "kind": "docker",
+      "name": "engineering-worker-pool"
+    }
+  ]
+}
