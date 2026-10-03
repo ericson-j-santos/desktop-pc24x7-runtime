@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
+import json
 
 EXPECTED_BRANCH = "feat/runtime-supervisor-canary"
 EXPECTED_REMOTE = "https://github.com/ericson-j-santos/desktop-pc24x7-runtime.git"
@@ -35,7 +36,33 @@ def main() -> int:
     result = git("push", "--set-upstream", "origin", f"HEAD:{EXPECTED_BRANCH}")
     if result.returncode != 0:
         raise RuntimeError(f"push falhou: exit={result.returncode}")
-    print(f"PUBLISH_OK branch={EXPECTED_BRANCH} head={head}")
+    listed = subprocess.run(
+        ["gh", "pr", "list", "--repo", "ericson-j-santos/desktop-pc24x7-runtime",
+         "--head", EXPECTED_BRANCH, "--state", "open", "--json", "url"],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+    )
+    if listed.returncode != 0:
+        raise RuntimeError(f"consulta de PR falhou: exit={listed.returncode}")
+    existing = json.loads(listed.stdout or "[]")
+    if existing:
+        url = existing[0]["url"]
+    else:
+        created = subprocess.run(
+            [
+                "gh", "pr", "create", "--repo", "ericson-j-santos/desktop-pc24x7-runtime",
+                "--base", "main", "--head", EXPECTED_BRANCH,
+                "--title", "feat: add bounded PC24x7 runtime supervisor",
+                "--body", (
+                    "Implementa supervisor Pareto com circuit breaker, canario fisico a cada "
+                    "cinco minutos e evidencias fail-closed para runner, orquestrador e Worker Pool."
+                ),
+            ],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
+        )
+        if created.returncode != 0:
+            raise RuntimeError(f"criacao de PR falhou: exit={created.returncode}")
+        url = created.stdout.strip()
+    print(f"PUBLISH_OK branch={EXPECTED_BRANCH} head={head} pr={url}")
     return 0
 
 
