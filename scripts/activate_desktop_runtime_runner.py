@@ -722,11 +722,11 @@ def main() -> int:
     restart_evidence: dict[str, Any] | None = None
     try:
         host = validate_host()
-    profile = authorized_host(host)
-    global RUNNER_NAME, RUNNER_LABELS, REQUIRED_RUNNER_LABELS
-    RUNNER_NAME = profile.runner_name
-    RUNNER_LABELS = profile.runner_labels
-    REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", *tuple(x for x in profile.runner_labels.split(",") if x))
+        profile = authorized_host(host)
+        global RUNNER_NAME, RUNNER_LABELS, REQUIRED_RUNNER_LABELS
+        RUNNER_NAME = profile.runner_name
+        RUNNER_LABELS = profile.runner_labels
+        REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", *tuple(x for x in profile.runner_labels.split(",") if x))
         repo_root = args.repo_root.resolve()
         source_sha = resolve_source_sha(repo_root, args.source_sha)
 
