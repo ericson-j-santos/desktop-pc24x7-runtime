@@ -2,12 +2,14 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import pytest
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 MODULE = ROOT / "scripts" / "pc24x7_host_policy.py"
 SPEC = importlib.util.spec_from_file_location("pc24x7_host_policy_tested", MODULE)
 assert SPEC and SPEC.loader
 m = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = m
 SPEC.loader.exec_module(m)
 
 def test_known_hosts_are_explicitly_authorized() -> None:
