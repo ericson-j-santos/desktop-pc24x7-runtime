@@ -1,0 +1,74 @@
+name: PC24x7 Runtime Canary
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: pc24x7-runtime-canary
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: Runner, Docker and workers canary
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Materialize governed session
+        id: session
+        shell: pwsh
+        run: |
+          $result = python C:\dev\chatgpt-operational-rules\scripts\session_launcher.py `
+            --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
+            --repo $env:GITHUB_WORKSPACE `
+            --session-prefix runtime-canary `
+            --correlation-id "runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}" `
+            --expected-head $env:GITHUB_SHA `
+            --sync-ref origin/${{ github.ref_name }} `
+            --require-runner-version-preflight
+          $result | Set-Content -Encoding utf8 session-launch.json
+          $session = $result | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or -not $session.state_validated) {
+            throw 'SESSION_LAUNCH_BLOCKED'
+          }
+          "target_path=$($session.target_path)" >> $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" >> $env:GITHUB_OUTPUT
+
+      - name: Run fail-closed canary
+        shell: pwsh
+        run: |
+          $runtime = Join-Path $env:LOCALAPPDATA 'DesktopPC24x7\RuntimeSupervisor'
+          New-Item -ItemType Directory -Force -Path $runtime | Out-Null
+          python C:\dev\chatgpt-operational-rules\scripts\command_gateway.py `
+            --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
+            --correlation-id "runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}" `
+            run `
+            --cwd '${{ steps.session.outputs.target_path }}' `
+            --session-id '${{ steps.session.outputs.session_id }}' `
+            --risk 1 `
+            --timeout 120 `
+            --expected-head $env:GITHUB_SHA `
+            -- python scripts/runtime_health_supervisor.py `
+              --config config/runtime-supervisor.example.json `
+              --state (Join-Path $runtime 'state.json') `
+              --evidence (Join-Path $runtime 'canary-evidence.json')
+          Copy-Item (Join-Path $runtime 'canary-evidence.json') runtime-canary-evidence.json
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            runtime-canary-evidence.json
+            session-launch.json
+          if-no-files-found: error
+          retention-days: 14

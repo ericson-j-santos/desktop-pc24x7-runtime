@@ -11,6 +11,7 @@ Este repositório contém somente capacidades exclusivas do Desktop PC24x7:
 - health/readiness e evidência do host;
 - startup/recovery e mecanismos fail-closed;
 - integração do host com runners/workers por contratos explícitos.
+- supervisor Pareto com circuit breaker e canário físico a cada cinco minutos.
 
 ## Fora de escopo
 
@@ -27,6 +28,8 @@ Fonte canônica de regras: `ericson-j-santos/chatgpt-operational-rules`, especia
 Durante a migração, o código operacional existente no ReqSys permanece intacto até
 haver equivalência validada neste repositório, incluindo testes e evidência runtime
 no Desktop.
+
+Runbook do supervisor: `docs/runtime-supervisor.md`.
 
 ## Estado
 
