@@ -27,7 +27,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-EXPECTED_HOST = "DESKTOP-PDQK954"
+from pc24x7_host_policy import authorized_host
+
+EXPECTED_HOST = "DESKTOP-PDQK954"  # compatibility default; authorization is host-policy driven
 SERVICE_NAME = "desktop-pc24x7-runtime-watchdog"
 TASK_FOLDER = r"\Automation"
 TASK_LEAF = "DesktopPc24x7RuntimeWatchdog"
@@ -67,8 +69,10 @@ def require_windows_desktop() -> str:
     if os.name != "nt":
         raise WatchdogError("Windows obrigatório")
     host = socket.gethostname()
-    if host.casefold() != EXPECTED_HOST.casefold():
-        raise WatchdogError(f"host não autorizado: {host}")
+    try:
+        authorized_host(host)
+    except ValueError as exc:
+        raise WatchdogError(str(exc)) from None
     return host
 
 
