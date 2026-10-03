@@ -18,10 +18,17 @@ orquestrador. A evidencia inclui SHA e `correlation_id` do workflow.
 
 ## Instalacao no host
 
-Copie `config/runtime-supervisor.example.json` para o diretorio operacional
-`%LOCALAPPDATA%\DesktopPC24x7\RuntimeSupervisor\config.json`. A tarefa persistente
-deve executar o script com `--apply` a cada minuto e no boot, sob S4U, usando o
-Command Gateway/Admin Broker. A instalacao nao deve depender de logon interativo.
+O instalador versionado copia uma release imutavel por SHA e registra a tarefa
+`\Automation\DesktopPc24x7RuntimeHealthSupervisor` sob S4U, no boot e a cada
+minuto. A instalacao deve ser executada pelo Command Gateway/Admin Broker e nao
+depende de logon interativo.
+
+```powershell
+python scripts/install_runtime_health_supervisor.py `
+  --source-root . `
+  --source-sha <sha-completo> `
+  --confirm INSTALL-PC24X7-RUNTIME-HEALTH-SUPERVISOR
+```
 
 O exemplo referencia apenas caminhos e nomes canônicos observados no host
 `DESKTOP-PDQK954`. Alteracoes de host, URL externa, comando ou executavel

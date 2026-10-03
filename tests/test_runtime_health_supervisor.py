@@ -89,3 +89,14 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "schedule:" in workflow
     assert "pull_request:" in workflow
     assert "github.event.pull_request.head.sha || github.sha" in workflow
+
+
+def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
+    installer = (ROOT / "scripts" / "install_runtime_health_supervisor.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'TASK_LEAF = "DesktopPc24x7RuntimeHealthSupervisor"' in installer
+    assert "definition.Triggers.Create(8)" in installer
+    assert 'trigger.Repetition.Interval = "PT1M"' in installer
+    assert "principal.LogonType = 2" in installer
+    assert "task_readback_failed" in installer
