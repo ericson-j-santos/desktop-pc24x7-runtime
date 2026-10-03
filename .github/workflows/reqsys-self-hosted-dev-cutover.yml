@@ -1,0 +1,65 @@
+name: ReqSys self-hosted DEV Compose cutover
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/reqsys-self-hosted-dev-cutover.yml]
+permissions:
+  contents: read
+jobs:
+  cutover:
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 20
+    env:
+      TARGET_SHA: 9fb8e70cb5e7495cb2d33eaa1dea645e0870c172
+      ENV_FILE: C:\ReqSys\dev\runtime.env
+      SECRET_DIR: C:\ReqSys\dev\secrets
+      PROJECT_NAME: reqsys-dev-selfhosted
+    steps:
+      - name: Assert exact host
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") { throw "HOST_MISMATCH" }
+      - name: Checkout ReqSys
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ericson-j-santos/reqsys-v2-enterprise-real
+          ref: 9fb8e70cb5e7495cb2d33eaa1dea645e0870c172
+          path: reqsys
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Validate private DEV inputs
+        shell: powershell
+        working-directory: reqsys
+        run: |
+          if (-not (Get-Command docker -ErrorAction SilentlyContinue)) { throw "DOCKER_MISSING" }
+          if (-not (Test-Path $env:ENV_FILE)) { throw "DEV_ENV_FILE_MISSING" }
+          if (-not (Test-Path $env:SECRET_DIR)) { throw "DEV_SECRET_DIR_MISSING" }
+          foreach ($n in @("db_owner_password","db_app_password","jwt_secret")) { if (-not (Test-Path (Join-Path $env:SECRET_DIR $n))) { throw "SECRET_FILE_MISSING:$n" } }
+          docker version
+          docker compose version
+      - name: Validate and start isolated DEV Compose
+        shell: powershell
+        working-directory: reqsys
+        run: |
+          $env:COMPOSE_PROJECT_NAME=$env:PROJECT_NAME
+          $env:REQSYS_SECRET_DIR=$env:SECRET_DIR
+          docker compose --env-file $env:ENV_FILE -f infra/self-hosted/compose.yml config --quiet
+          docker compose --env-file $env:ENV_FILE -f infra/self-hosted/compose.yml up --build -d --wait --wait-timeout 300
+      - name: Smoke test
+        shell: powershell
+        run: |
+          $r=Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18080/api/health -TimeoutSec 20
+          if ($r.StatusCode -ne 200) { throw "DEV_HEALTH_FAILED" }
+          Write-Host "REQSYS_SELF_HOSTED_DEV_HEALTH_OK"
+      - name: Evidence
+        if: always()
+        shell: powershell
+        run: |
+          New-Item -ItemType Directory -Force evidence | Out-Null
+          [ordered]@{host=$env:COMPUTERNAME;target_sha=$env:TARGET_SHA;project=$env:PROJECT_NAME;secrets_read=$false;production_touched=$false;fly_used=$false} | ConvertTo-Json | Set-Content evidence/evidence.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: reqsys-self-hosted-dev-cutover
+          path: evidence/evidence.json
