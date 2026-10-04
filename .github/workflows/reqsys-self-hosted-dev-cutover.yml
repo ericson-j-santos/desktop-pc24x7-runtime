@@ -1,9 +1,9 @@
-name: ReqSys self-hosted DEV preflight
+name: ReqSys self-hosted DEV controlled preparation
 
 on:
   workflow_dispatch:
   push:
-    branches: [fix/reqsys-self-hosted-dev-20261003]
+    branches: [fix/reqsys-self-hosted-dev-prepare-20261003]
     paths:
       - scripts/reqsys_self_hosted_dev_preflight.py
       - .github/workflows/reqsys-self-hosted-dev-cutover.yml
@@ -12,8 +12,9 @@ permissions:
   contents: read
 
 concurrency:
-  group: reqsys-dev-preflight-${{ github.ref }}
-  cancel-in-progress: true
+  group: reqsys-dev-selfhosted-physical
+
+  cancel-in-progress: false
 
 jobs:
   resolve_rules:
@@ -25,7 +26,7 @@ jobs:
     steps:
       - name: Resolve main SHA and require rules 1.6.9+
         id: rules
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
             const branch = await github.rest.repos.getBranch({
@@ -57,15 +58,75 @@ jobs:
             }
             core.setOutput('sha', sha);
 
+  contract_linux:
+    name: Real PostgreSQL restore and ciphertext controls
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: reqsys-ci-disposable
+          POSTGRES_DB: reqsys_importer_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d reqsys_importer_test"
+          --health-interval 5s --health-timeout 5s --health-retries 12
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ericson-j-santos/reqsys-v2-enterprise-real
+          ref: 3e2204df4e82bbd0cb65b6bc1df971f1faa8c971
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - name: Install declared validation dependencies
+        run: |
+          python -m pip install --only-binary=:all: pytest==8.4.2 SQLAlchemy==2.0.43 psycopg2-binary==2.9.10 cryptography==46.0.2
+      - name: Run real database restore and negative controls
+        env:
+          REQSYS_IMPORTER_TEST_DATABASE_URL: postgresql+psycopg2://postgres:reqsys-ci-disposable@127.0.0.1:5432/reqsys_importer_test
+          REQSYS_POSTGRES_RESTORE_CONTRACT: "1"
+          REQSYS_TEST_PG_CONTAINER: ${{ job.services.postgres.id }}
+        run: python -m pytest tests/test_import_self_hosted_dev_sqlite.py tests/test_dev_backup_transport.py tests/test_reqsys_self_hosted_dev_publish.py tests/test_run_self_hosted_dev_owner_action.py tests/test_self_hosted_dev_maintenance.py tests/test_pc24x7_dev_runtime_supervisor.py tests/test_reqsys_dev_runtime_key_handoff.py tests/test_verify_self_hosted_dev_azure_auth.py tests/test_restore_self_hosted_dev_postgres.py tests/test_self_hosted_dev_candidate_control.py -q
+
+  contract_windows:
+    name: Windows private ACL and configuration controls
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: ericson-j-santos/reqsys-v2-enterprise-real
+          ref: 3e2204df4e82bbd0cb65b6bc1df971f1faa8c971
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --only-binary=:all: pytest==8.4.2 cryptography==46.0.2 pywin32==311
+      - run: python -m pytest tests/test_reqsys_self_hosted_dev_publish.py tests/test_dev_backup_transport.py tests/test_run_self_hosted_dev_owner_action.py tests/test_self_hosted_dev_maintenance.py tests/test_pc24x7_dev_runtime_supervisor.py tests/test_reqsys_dev_runtime_key_handoff.py tests/test_verify_self_hosted_dev_azure_auth.py tests/test_restore_self_hosted_dev_postgres.py tests/test_self_hosted_dev_candidate_control.py -q
+      - name: Checkout the exact Desktop backup controls
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          path: _runtime
+          persist-credentials: false
+      - name: Verify native Windows backup and owner registry controls
+        run: python -m pytest _runtime/tests/test_backup_reqsys_current_dev_postgres.py _runtime/tests/test_register_reqsys_dev_owner_actions.py _runtime/tests/test_reqsys_registered_runner_metadata_preflight.py _runtime/tests/test_plan_owner_risk3_file_acl_repair.py -q
   e2e:
-    needs: resolve_rules
-    name: Inspect fixed Desktop DEV migration prerequisites
+    needs: [resolve_rules, contract_linux, contract_windows]
+    name: Prepare isolated DEV through the fixed Desktop executor
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
-    timeout-minutes: 10
+    timeout-minutes: 20
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
-      CORRELATION_ID: reqsys-dev-preflight-${{ github.run_id }}-${{ github.run_attempt }}
-      EVIDENCE_REL: artifacts/reqsys-dev-preflight-e2e/evidence.json
+      REQSYS_TARGET_SHA: 3e2204df4e82bbd0cb65b6bc1df971f1faa8c971
+      PYTHONPATH: ${{ github.workspace }}
+      CORRELATION_ID: reqsys-dev-prepare-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_REL: artifacts/reqsys-dev-prepare-e2e/evidence.json
     steps:
       - name: Checkout exact runtime SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -123,7 +184,58 @@ jobs:
           "RUNNER_RUNTIME_SUPPORTED=$($data.runner_version_preflight.runtime_supported_now.ToString().ToLowerInvariant())" | Add-Content $env:GITHUB_ENV
           "RUNNER_DEPRECATION_API_STATUS=$($data.runner_version_preflight.deprecation_api_status)" | Add-Content $env:GITHUB_ENV
 
-      - name: Inspect Docker, private input presence and DEV health through Command Gateway
+      - name: Inspect the database serving the existing DEV before migration
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $probe = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\reqsys_dev_current_data_probe.py"
+          $evidence = Join-Path $env:RUNNER_TEMP ("reqsys-current-dev-data-" + $env:GITHUB_RUN_ID + "\evidence.json")
+          "CURRENT_DEV_EVIDENCE_FILE=$evidence" | Add-Content $env:GITHUB_ENV
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-current-data" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $probe --evidence-file $evidence
+          exit $LASTEXITCODE
+
+      - name: Upload current DEV metadata only
+        if: always() && env.CURRENT_DEV_EVIDENCE_FILE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-current-dev-data-${{ github.run_id }}
+          path: ${{ env.CURRENT_DEV_EVIDENCE_FILE }}
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Capture the existing PostgreSQL DEV in a protected local backup
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $backup = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\backup_reqsys_current_dev_postgres.py"
+          $raw = & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-pg-backup" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 2 --timeout 600 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $backup --expected-build-sha 03b568e9c21a8abf1c066a7d6d20fb3b191d6927
+          $exitCode = $LASTEXITCODE
+          @($raw) | ForEach-Object { Write-Output $_ }
+          if ($exitCode -ne 0) { exit $exitCode }
+          $result = @($raw)[-1] | ConvertFrom-Json
+          if ($result.gateway_exit_code -ne 0 -or $result.command_exit_code -ne 0) { throw "PG_BACKUP_GATEWAY_NOT_SUCCESS" }
+          $proof = $result.stdout | ConvertFrom-Json
+          if ($proof.status -ne "captured" -or $proof.plaintext_files_written -ne $false -or $proof.pg_dump_consistent_snapshot -ne $true) { throw "PG_BACKUP_PROOF_INVALID" }
+          $folder = Join-Path $env:RUNNER_TEMP ("reqsys-pg-backup-proof-" + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          $file = Join-Path $folder "evidence.json"
+          $proof | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 -Path $file
+          "PG_BACKUP_EVIDENCE_FILE=$file" | Add-Content $env:GITHUB_ENV
+
+      - name: Upload PostgreSQL backup metadata only
+        if: success() && env.PG_BACKUP_EVIDENCE_FILE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-current-pg-backup-proof-${{ github.run_id }}
+          path: ${{ env.PG_BACKUP_EVIDENCE_FILE }}
+          if-no-files-found: error
+          retention-days: 30
+      - name: Materialize the fixed ReqSys DEV source through Command Gateway
+        id: reqsys_source
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
@@ -133,34 +245,113 @@ jobs:
           $ErrorActionPreference = "Stop"
           $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
-          $script = Join-Path $env:TARGET_PATH "scripts\reqsys_self_hosted_dev_preflight.py"
-          $gatewayArgs = @(
-            "--policy", $policy,
-            "--correlation-id", $env:CORRELATION_ID,
-            "run",
-            "--cwd", $env:TARGET_PATH,
-            "--session-id", $env:SESSION_ID,
-            "--risk", "1",
-            "--timeout", "180",
-            "--expected-head", $env:ANCHOR_SHA,
-            "--",
-            "python", $script,
-            "--evidence-file", $env:EVIDENCE_REL
-          )
-          & python $gateway @gatewayArgs
+          $sourceScript = Join-Path $env:TARGET_PATH "scripts\materialize_reqsys_self_hosted_dev_source.py"
+          $args = @("--policy",$policy,"--correlation-id",$env:CORRELATION_ID,"run",
+            "--cwd",$env:TARGET_PATH,"--session-id",$env:SESSION_ID,"--risk","2","--timeout","300",
+            "--expected-head",$env:ANCHOR_SHA,"--","python",$sourceScript,"--expected-sha",$env:REQSYS_TARGET_SHA)
+          & python $gateway @args
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $source = "C:\dev\chatgpt-workers\rs2-$env:REQSYS_TARGET_SHA"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $raw = & python $launcher --policy $policy --repo $source --session-prefix reqsys-dev-prepare --correlation-id "$env:CORRELATION_ID-reqsys" --expected-head $env:REQSYS_TARGET_SHA --sync-ref origin/fix/self-hosted-dev-restore-20261003 --require-runner-version-preflight
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = @($raw)[-1] | ConvertFrom-Json
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true -or $data.head -ne $env:REQSYS_TARGET_SHA) { throw "REQSYS_SESSION_BLOCKED" }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Install isolated migration dependencies through Command Gateway
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $site = Join-Path $env:RUNNER_TEMP ("reqsys-migration-python-" + $env:GITHUB_RUN_ID)
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-deps" run --cwd "${{ steps.reqsys_source.outputs.target_path }}" --session-id "${{ steps.reqsys_source.outputs.session_id }}" --risk 2 --timeout 240 --expected-head $env:REQSYS_TARGET_SHA -- python -m pip --isolated install --only-binary=:all: --no-user --target $site --index-url https://pypi.org/simple cryptography==46.0.2 pywin32==311
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "PYTHONPATH=$site" | Add-Content $env:GITHUB_ENV
+          "REQSYS_MIGRATION_DEPENDENCIES=$site" | Add-Content $env:GITHUB_ENV
+
+      - name: Review the narrow owner action plan without applying grants
+        id: owner_plan
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $registry = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\register_reqsys_dev_owner_actions.py"
+          $source = "C:\dev\chatgpt-workers\rs2-$env:REQSYS_TARGET_SHA"
+          $prepareSha = (Get-FileHash (Join-Path $source "scripts\reqsys_self_hosted_dev_publish.py") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $launcherSha = (Get-FileHash (Join-Path $source "scripts\run_self_hosted_dev_owner_action.py") -Algorithm SHA256).Hash.ToLowerInvariant()
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-owner-plan" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $registry --source-sha $env:REQSYS_TARGET_SHA --prepare-script-sha256 $prepareSha --launcher-script-sha256 $launcherSha
           exit $LASTEXITCODE
 
-      - name: Upload sanitized evidence
-        if: always() && steps.session.outputs.target_path != ''
+      - name: Inspect only the fixed ReqSys runner registration metadata
+        id: reqsys_registration
+        if: always() && steps.session.outcome == 'success'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $probe = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\reqsys_registered_runner_metadata_preflight.py"
+          $file = Join-Path $env:RUNNER_TEMP ("reqsys-registration-metadata-" + $env:GITHUB_RUN_ID + "\evidence.json")
+          "REQSYS_REGISTRATION_EVIDENCE_FILE=$file" | Add-Content $env:GITHUB_ENV
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-reqsys-registration" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $probe --evidence-file $file
+          exit $LASTEXITCODE
+
+      - name: Upload public ReqSys runner metadata only
+        if: always() && env.REQSYS_REGISTRATION_EVIDENCE_FILE != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: reqsys-dev-preflight-e2e-${{ github.run_id }}
-          path: ${{ steps.session.outputs.target_path }}/artifacts/reqsys-dev-preflight-e2e/evidence.json
+          name: reqsys-registration-metadata-${{ github.run_id }}
+          path: ${{ env.REQSYS_REGISTRATION_EVIDENCE_FILE }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Plan a repair of the single owner file ACL without applying it
+        id: owner_acl_plan
+        if: always() && steps.session.outcome == 'success'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $probe = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\plan_owner_risk3_file_acl_repair.py"
+          $raw = & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-owner-acl-plan" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $probe
+          $exitCode = $LASTEXITCODE
+          @($raw) | ForEach-Object { Write-Output $_ }
+          if ($exitCode -ne 0) { exit $exitCode }
+          $result = @($raw)[-1] | ConvertFrom-Json
+          if ($result.gateway_exit_code -ne 0 -or $result.command_exit_code -ne 0) { throw "ACL_PLAN_GATEWAY_NOT_SUCCESS" }
+          $proof = $result.stdout | ConvertFrom-Json
+          if ($proof.status -ne "planned" -or $proof.read_only -ne $true -or $proof.configuration_bytes_read -ne $false -or $proof.grants_changed -ne $false) { throw "ACL_PLAN_NOT_READ_ONLY" }
+          $folder = Join-Path $env:RUNNER_TEMP ("reqsys-owner-acl-plan-" + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          $file = Join-Path $folder "evidence.json"
+          $proof | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 -Path $file
+          "OWNER_ACL_PLAN_EVIDENCE_FILE=$file" | Add-Content $env:GITHUB_ENV
+
+      - name: Upload the read-only owner ACL plan metadata
+        if: always() && env.OWNER_ACL_PLAN_EVIDENCE_FILE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-owner-acl-plan-${{ github.run_id }}
+          path: ${{ env.OWNER_ACL_PLAN_EVIDENCE_FILE }}
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7
+
+      - name: Keep preparation blocked when the owner plan is unavailable
+        if: always() && steps.owner_plan.outcome == 'failure'
+        shell: powershell
+        run: |
+          throw "OWNER_PLAN_BLOCKED_NO_CANDIDATE_PREPARED"
 
   queue_watchdog:
-    needs: resolve_rules
+    needs: [resolve_rules, contract_linux, contract_windows]
     name: Dedicated runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2
@@ -170,9 +361,9 @@ jobs:
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
       TARGET_RUN_ID: ${{ github.run_id }}
-      TARGET_JOB_NAME: Inspect fixed Desktop DEV migration prerequisites
+      TARGET_JOB_NAME: Prepare isolated DEV through the fixed Desktop executor
       STALL_AFTER_SECONDS: "60"
-      CORRELATION_ID: reqsys-dev-preflight-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+      CORRELATION_ID: reqsys-dev-prepare-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout canonical progress watchdog
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
@@ -185,7 +376,7 @@ jobs:
 
       - name: Observe dedicated runner pickup
         id: observe
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
             const fs = require('fs');
@@ -197,7 +388,7 @@ jobs:
               repo: context.repo.repo,
               run_id: runId,
             });
-            const anchor = new Date(run.data.created_at || Date.now());
+            const anchor = new Date();
             while (true) {
               const response = await github.rest.actions.listJobsForWorkflowRun({
                 owner: context.repo.owner,
@@ -221,7 +412,7 @@ jobs:
               const noProgressMs = Date.now() - anchor.getTime();
               if (noProgressMs >= stallMs) {
                 fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
-                  task_id: job ? String(job.id) : 'reqsys-dev-preflight-job-not-created',
+                  task_id: job ? String(job.id) : 'reqsys-dev-prepare-job-not-created',
                   correlation_id: process.env.CORRELATION_ID,
                   state: 'queued',
                   last_material_progress_at: anchor.toISOString(),
@@ -242,7 +433,7 @@ jobs:
 
       - name: Fail closed and cancel stalled canary
         if: steps.watchdog.outcome == 'failure'
-        uses: actions/github-script@v7
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
             const fs = require('fs');
