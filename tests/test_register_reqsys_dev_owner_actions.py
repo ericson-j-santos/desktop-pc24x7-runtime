@@ -251,6 +251,7 @@ def readable_acl_fixture():
         private.sid: private.sid,
         "BA": "S-1-5-32-544", "SY": "S-1-5-18",
         "BU": "S-1-5-32-545", "AU": "S-1-5-11", "WD": "S-1-1-0",
+        "CO": "S-1-3-0", "CG": "S-1-3-1", "OW": "S-1-3-4",
     }
     private._canonical_sid = lambda value: aliases.get(value, value)
     return private
@@ -347,3 +348,58 @@ def test_real_windows_users_acl_rejected_before_config_bytes(monkeypatch, tmp_pa
     with pytest.raises(m.OperationError, match="configuration_acl_unknown_principal"):
         m.read_config(path, private)
     assert reads == []
+
+
+def test_acl_diagnostic_classifies_counts_without_exposing_identity_or_sddl():
+    private = readable_acl_fixture()
+    sddl = (
+        f"O:BAD:AI(A;ID;FA;;;{private.sid})(A;ID;FA;;;SY)(A;ID;FA;;;BA)"
+        "(A;OIIOID;FA;;;CO)(A;ID;FR;;;OW)(A;;FR;;;BU)(A;;FR;;;AU)"
+        "(A;ID;FR;;;WD)(A;;FR;;;S-1-5-21-999)(D;;FR;;;BU)"
+    )
+    observation = private._safe_acl_observation(sddl)
+    assert observation["owner_category"] == "administrators"
+    assert observation["dacl_protected"] is False
+    assert observation["dacl_auto_inherited"] is True
+    assert observation["ace_count"] == 10
+    assert observation["ace_types"] == {"allow": 9, "deny": 1, "other": 0}
+    assert observation["inherited_aces"] == 6
+    assert observation["inherit_only_aces"] == 1
+    assert observation["explicit_current_user_allow_present"] is False
+    assert observation["current_user_allow_present"] is True
+    assert observation["principal_categories"]["creator_owner"]["inherit_only"] == 1
+    assert observation["principal_categories"]["owner_rights"]["inherited"] == 1
+    assert observation["principal_categories"]["users"]["deny"] == 1
+    assert observation["principal_categories"]["custom_other"]["allow"] == 1
+    serialized = json.dumps(observation)
+    assert "S-1-" not in serialized
+    assert "O:BA" not in serialized
+    assert private.sid not in serialized
+    # Observation does not widen the read trust policy.
+    with pytest.raises(m.OperationError, match="configuration_acl_unknown_principal"):
+        private._validate_readable_sddl(sddl)
+
+def test_acl_diagnostic_explicit_current_owner_and_creator_group():
+    private = readable_acl_fixture()
+    sddl = f"O:{private.sid}D:P(A;;FA;;;{private.sid})(A;IO;FA;;;CG)"
+    observation = private._safe_acl_observation(sddl)
+    assert observation["owner_category"] == "current_user"
+    assert observation["explicit_current_user_allow_present"] is True
+    assert observation["principal_categories"]["creator_group"]["inherit_only"] == 1
+
+def test_acl_diagnostic_is_emitted_only_as_safe_failure_metadata(monkeypatch, tmp_path, capsys):
+    argv = prepare_main(monkeypatch, tmp_path)
+    private = readable_acl_fixture()
+    observation = private._safe_acl_observation(
+        f"O:BAD:P(A;;FA;;;{private.sid})(A;;FR;;;BU)"
+    )
+    def denied(*_):
+        failure = m.OperationError("configuration_acl_unknown_principal")
+        failure.acl_observation = observation
+        raise failure
+    monkeypatch.setattr(m, "read_config", denied)
+    assert m.main(argv) == 2
+    result = json.loads(capsys.readouterr().out)
+    assert result["code"] == "configuration_acl_unknown_principal"
+    assert result["private_acl_observation"] == observation
+    assert "S-1-" not in json.dumps(result)

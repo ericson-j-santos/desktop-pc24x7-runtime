@@ -284,7 +284,12 @@ class WindowsPrivateFiles:
             value = ctypes.wstring_at(text)
         finally:
             self.kernel.LocalFree(text)
-        self.readable_owner_category = self._validate_readable_sddl(value)
+        try:
+            self.readable_owner_category = self._validate_readable_sddl(value)
+        except OperationError as exc:
+            if exc.code == "configuration_acl_unknown_principal":
+                exc.acl_observation = self._safe_acl_observation(value)
+            raise
 
     def _validate_readable_sddl(self, value):
         match = re.fullmatch(r"O:([^:]+)D:(?:P)?(?:AR)?(?:AI)?((?:\([^()]+\))+)", value)
@@ -315,6 +320,69 @@ class WindowsPrivateFiles:
         if current_sid not in actual:
             raise OperationError("configuration_acl_current_user_access_missing")
         return "current_user" if owner_sid == current_sid else "administrators"
+
+    def _safe_acl_observation(self, value):
+        """Only category/count metadata from the already-read WinAPI descriptor."""
+        current = self._canonical_sid(self.sid)
+        known = {
+            current: "current_user",
+            "S-1-5-18": "system",
+            "S-1-5-32-544": "administrators",
+            "S-1-3-0": "creator_owner",
+            "S-1-3-1": "creator_group",
+            "S-1-3-4": "owner_rights",
+            "S-1-5-32-545": "users",
+            "S-1-5-11": "authenticated_users",
+            "S-1-1-0": "everyone",
+        }
+        def category(identity):
+            try:
+                return known.get(self._canonical_sid(identity), "custom_other")
+            except Exception:
+                return "unavailable"
+        match = re.fullmatch(r"O:([^:]+)D:((?:P)?(?:AR)?(?:AI)?)((?:\([^()]+\))+)", value)
+        if not match:
+            return {"descriptor_recognized": False}
+        entries = re.findall(r"\(([^()]*)\)", match.group(3))
+        observation = {
+            "descriptor_recognized": True,
+            "owner_category": category(match.group(1)),
+            "dacl_protected": "P" in match.group(2),
+            "dacl_auto_inherited": "AI" in match.group(2),
+            "ace_count": len(entries),
+            "counts_complete": len(entries) <= 64,
+            "ace_types": {"allow": 0, "deny": 0, "other": 0},
+            "inherited_aces": 0, "inherit_only_aces": 0,
+            "explicit_current_user_allow_present": False,
+            "current_user_allow_present": False,
+            "principal_categories": {},
+        }
+        for entry in entries[:64]:
+            fields = entry.split(";")
+            if len(fields) != 6:
+                observation["counts_complete"] = False
+                observation["ace_types"]["other"] += 1
+                continue
+            kind = "allow" if fields[0] == "A" else "deny" if fields[0] == "D" else "other"
+            identity = category(fields[5])
+            inherited = "ID" in fields[1]
+            inherit_only = "IO" in fields[1]
+            observation["ace_types"][kind] += 1
+            observation["inherited_aces"] += int(inherited)
+            observation["inherit_only_aces"] += int(inherit_only)
+            counts = observation["principal_categories"].setdefault(identity, {
+                "allow": 0, "deny": 0, "other": 0,
+                "inherited": 0, "inherit_only": 0, "explicit": 0,
+            })
+            counts[kind] += 1
+            counts["inherited"] += int(inherited)
+            counts["inherit_only"] += int(inherit_only)
+            counts["explicit"] += int(not inherited)
+            if identity == "current_user" and kind == "allow" and not inherit_only:
+                observation["current_user_allow_present"] = True
+                if not inherited:
+                    observation["explicit_current_user_allow_present"] = True
+        return observation
 
 
 def owner_fingerprint():
@@ -600,7 +668,10 @@ def main(argv=None):
         return 0
     except Exception as exc:
         code = exc.code if isinstance(exc, OperationError) else "registry_operation_failed"
-        print(json.dumps({"status": "blocked", "code": code}, sort_keys=True))
+        blocked = {"status": "blocked", "code": code}
+        if isinstance(exc, OperationError) and hasattr(exc, "acl_observation"):
+            blocked["private_acl_observation"] = exc.acl_observation
+        print(json.dumps(blocked, sort_keys=True))
         return 2
 
 if __name__ == "__main__":
