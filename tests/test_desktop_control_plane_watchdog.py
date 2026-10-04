@@ -27,7 +27,7 @@ def make_runner_home(tmp_path: Path) -> Path:
 
 def test_rejects_other_host(monkeypatch) -> None:
     monkeypatch.setattr(m.os, "name", "nt")
-    monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: "UNKNOWN-HOST")
     with pytest.raises(m.WatchdogError, match="host não autorizado"):
         m.require_windows_desktop()
 

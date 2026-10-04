@@ -29,7 +29,9 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
-EXPECTED_HOST = "DESKTOP-PDQK954"
+from pc24x7_host_policy import authorized_host
+
+EXPECTED_HOST = "DESKTOP-PDQK954"  # compatibility default; runtime identity comes from host policy
 EXPECTED_GITHUB_LOGIN = "ericson-j-santos"
 REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
 REPOSITORY_URL = f"https://github.com/{REPOSITORY}"
@@ -42,8 +44,8 @@ RUNNER_ASSET_URL = (
     f"v{RUNNER_VERSION}/actions-runner-win-x64-{RUNNER_VERSION}.zip"
 )
 RUNNER_ASSET_SHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
-RUNNER_NAME = "DESKTOP-PDQK954-runtime"
-RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev"
+RUNNER_NAME = "DESKTOP-PDQK954-runtime"  # compatibility default; resolved per authorized host
+RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev"  # compatibility default; resolved per authorized host
 REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev")
 
 DEDICATED_RUNNER_DIR = ("DesktopPC24x7", "GitHubRunner")
@@ -62,8 +64,10 @@ def validate_host() -> str:
     if os.name != "nt":
         raise ActivationError("windows_required", "Windows obrigatório")
     host = socket.gethostname()
-    if host.casefold() != EXPECTED_HOST.casefold():
-        raise ActivationError("host_not_authorized", f"host não autorizado: {host}")
+    try:
+        authorized_host(host)
+    except ValueError as exc:
+        raise ActivationError("host_not_authorized", str(exc)) from None
     if platform.machine().casefold() not in {"amd64", "x86_64"}:
         raise ActivationError("x64_required", "arquitetura x64 obrigatória")
     return host
@@ -718,6 +722,11 @@ def main() -> int:
     restart_evidence: dict[str, Any] | None = None
     try:
         host = validate_host()
+        profile = authorized_host(host)
+        global RUNNER_NAME, RUNNER_LABELS, REQUIRED_RUNNER_LABELS
+        RUNNER_NAME = profile.runner_name
+        RUNNER_LABELS = profile.runner_labels
+        REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", *tuple(x for x in profile.runner_labels.split(",") if x))
         repo_root = args.repo_root.resolve()
         source_sha = resolve_source_sha(repo_root, args.source_sha)
 

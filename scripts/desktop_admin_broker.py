@@ -29,7 +29,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-EXPECTED_HOST = "DESKTOP-PDQK954"
+from pc24x7_host_policy import authorized_host
+
+EXPECTED_HOST = "DESKTOP-PDQK954"  # compatibility default; authorization is host-policy driven
 EXPECTED_ACTOR = "ericson-j-santos"
 EXPECTED_ASSOCIATION = "OWNER"
 REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
@@ -91,8 +93,10 @@ def require_windows_desktop() -> str:
     if os.name != "nt":
         raise BrokerError("Windows obrigatório")
     host = socket.gethostname()
-    if host.casefold() != EXPECTED_HOST.casefold():
-        raise BrokerError(f"host não autorizado: {host}")
+    try:
+        authorized_host(host)
+    except ValueError as exc:
+        raise BrokerError(str(exc)) from None
     return host
 
 
