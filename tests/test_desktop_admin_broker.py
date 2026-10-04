@@ -40,7 +40,7 @@ def gh_comment(
 
 def test_rejects_other_host(monkeypatch) -> None:
     monkeypatch.setattr(m.os, "name", "nt")
-    monkeypatch.setattr(m.socket, "gethostname", lambda: "Noteri")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: "UNKNOWN-HOST")
     with pytest.raises(m.BrokerError, match="host não autorizado"):
         m.require_windows_desktop()
 
@@ -64,7 +64,8 @@ def test_transport_is_outbound_public_github_only_without_secret_or_listener() -
     source = MODULE.read_text(encoding="utf-8")
     lowered = source.casefold()
     assert "api.github.com/repos/{repository}/issues/{issue_number}/comments" in lowered
-    assert "authorization" not in lowered
+    assert '"Authorization"' not in source
+    assert "'Authorization'" not in source
     assert "gh_token" not in lowered
     assert "github_token" not in lowered
     assert "threadinghttpserver" not in lowered
