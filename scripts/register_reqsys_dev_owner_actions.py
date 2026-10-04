@@ -284,32 +284,37 @@ class WindowsPrivateFiles:
             value = ctypes.wstring_at(text)
         finally:
             self.kernel.LocalFree(text)
+        self.readable_owner_category = self._validate_readable_sddl(value)
+
+    def _validate_readable_sddl(self, value):
         match = re.fullmatch(r"O:([^:]+)D:(?:P)?(?:AR)?(?:AI)?((?:\([^()]+\))+)", value)
-        if not match or self._canonical_sid(match.group(1)) != self._canonical_sid(self.sid):
-            raise OperationError("configuration_acl_untrusted")
-        allowed = {
-            self._canonical_sid(self.sid),
-            self._canonical_sid("SY"),
-            self._canonical_sid("BA"),
-        }
+        if not match:
+            raise OperationError("configuration_acl_descriptor_unrecognized")
+        current_sid = self._canonical_sid(self.sid)
+        admin_sid = self._canonical_sid("BA")
+        owner_sid = self._canonical_sid(match.group(1))
+        if owner_sid not in {current_sid, admin_sid}:
+            raise OperationError("configuration_acl_owner_not_current_user_or_administrators")
+        allowed = {current_sid, self._canonical_sid("SY"), admin_sid}
         entries = re.findall(r"\(([^()]*)\)", match.group(2))
         if not entries or len(entries) > 64:
-            raise OperationError("configuration_acl_untrusted")
+            raise OperationError("configuration_acl_ace_structure_untrusted")
         actual = set()
         for entry in entries:
             fields = entry.split(";")
             if len(fields) != 6 or fields[0] != "A" or fields[3] or fields[4]:
-                raise OperationError("configuration_acl_untrusted")
+                raise OperationError("configuration_acl_ace_structure_untrusted")
             if not re.fullmatch(r"(?:OI|CI|NP|IO|ID)*", fields[1]):
-                raise OperationError("configuration_acl_untrusted")
+                raise OperationError("configuration_acl_ace_structure_untrusted")
             if not re.fullmatch(r"(?:0x[0-9a-fA-F]+|(?:FA|FR|FW|FX|RC|SD|WD|WO|GR|GW|GX|GA)+)", fields[2]):
-                raise OperationError("configuration_acl_untrusted")
+                raise OperationError("configuration_acl_ace_structure_untrusted")
             identity = self._canonical_sid(fields[5])
             if identity not in allowed:
-                raise OperationError("configuration_acl_untrusted")
+                raise OperationError("configuration_acl_unknown_principal")
             actual.add(identity)
-        if self._canonical_sid(self.sid) not in actual:
-            raise OperationError("configuration_acl_untrusted")
+        if current_sid not in actual:
+            raise OperationError("configuration_acl_current_user_access_missing")
+        return "current_user" if owner_sid == current_sid else "administrators"
 
 
 def owner_fingerprint():
@@ -580,6 +585,9 @@ def main(argv=None):
         proposed, evidence = build_plan(
             config, original, args.source_sha, digests, args.launcher_script_sha256,
             python, datetime.now(timezone.utc),
+        )
+        evidence["configuration_acl_owner_category"] = getattr(
+            private, "readable_owner_category", "not_reported"
         )
         if args.apply:
             authorize_apply(

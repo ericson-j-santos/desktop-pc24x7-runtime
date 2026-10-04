@@ -242,3 +242,108 @@ def test_real_windows_atomic_grant_file_acl(tmp_path):
     private.check(path)
     assert json.loads(path.read_text("ascii")) == proposed
     assert list(tmp_path.iterdir()) == [path]
+
+
+def readable_acl_fixture():
+    private = object.__new__(m.WindowsPrivateFiles)
+    private.sid = "S-1-5-21-100"
+    aliases = {
+        private.sid: private.sid,
+        "BA": "S-1-5-32-544", "SY": "S-1-5-18",
+        "BU": "S-1-5-32-545", "AU": "S-1-5-11", "WD": "S-1-1-0",
+    }
+    private._canonical_sid = lambda value: aliases.get(value, value)
+    return private
+
+@pytest.mark.parametrize("flags", ("", "P", "AI", "PAI"))
+def test_admin_owner_legacy_acl_is_readable_only_with_closed_principals(flags):
+    private = readable_acl_fixture()
+    sddl = (
+        f"O:BAD:{flags}(A;ID;FA;;;{private.sid})"
+        "(A;ID;FA;;;SY)(A;ID;FA;;;BA)"
+    )
+    assert private._validate_readable_sddl(sddl) == "administrators"
+
+@pytest.mark.parametrize("principal", ("BU", "AU", "WD", "S-1-5-21-999"))
+def test_public_or_unknown_ace_principal_is_rejected(principal):
+    private = readable_acl_fixture()
+    sddl = (
+        f"O:BAD:P(A;;FA;;;{private.sid})(A;;FA;;;SY)(A;;FA;;;BA)"
+        f"(A;;FR;;;{principal})"
+    )
+    with pytest.raises(m.OperationError, match="configuration_acl_unknown_principal"):
+        private._validate_readable_sddl(sddl)
+
+@pytest.mark.parametrize("owner", ("SY", "BU", "S-1-5-21-999"))
+def test_file_owner_is_closed_to_current_user_or_admins(owner):
+    private = readable_acl_fixture()
+    sddl = f"O:{owner}D:P(A;;FA;;;{private.sid})(A;;FA;;;SY)(A;;FA;;;BA)"
+    with pytest.raises(m.OperationError, match="configuration_acl_owner_not_current_user_or_administrators"):
+        private._validate_readable_sddl(sddl)
+
+def test_trusted_admin_owner_still_needs_current_user_ace():
+    private = readable_acl_fixture()
+    with pytest.raises(m.OperationError, match="configuration_acl_current_user_access_missing"):
+        private._validate_readable_sddl("O:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)")
+
+def set_actual_test_security(private, path, sddl, admin_owner=False):
+    descriptor = m.ctypes.c_void_p()
+    assert private.adv.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        sddl, 1, m.ctypes.byref(descriptor), None
+    )
+    try:
+        if not private.adv.SetFileSecurityW(str(path), 0x80000005, descriptor):
+            error = m.ctypes.get_last_error()
+            if admin_owner and error in (1307, 1314):
+                pytest.skip("CI token cannot assign Administrators file owner")
+            pytest.fail("Windows test security descriptor assignment failed")
+    finally:
+        private.kernel.LocalFree(descriptor)
+
+@pytest.mark.skipif(os.name != "nt", reason="actual legacy Windows Administrators owner")
+def test_real_windows_admin_owned_legacy_plan_is_read_only(monkeypatch, tmp_path):
+    path = tmp_path / m.CONFIG_NAME
+    current = config()
+    original = m.canonical(current)
+    path.write_bytes(original)
+    private = m.WindowsPrivateFiles()
+    set_actual_test_security(
+        private, path,
+        f"O:BAD:P(A;;FA;;;{private.sid})(A;;FA;;;SY)(A;;FA;;;BA)",
+        admin_owner=True,
+    )
+    monkeypatch.setattr(m, "owner_fingerprint", lambda: current["owner_fingerprint"])
+    private.check_readable(path)
+    assert private.readable_owner_category == "administrators"
+    raw, parsed = m.read_config(path, private)
+    assert raw == original
+    assert parsed == current
+    proposed, evidence = m.build_plan(
+        parsed, raw, SOURCE_SHA, DIGESTS, LAUNCHER_SHA, PYTHON, NOW
+    )
+    assert evidence["read_only"] is True
+    assert len(evidence["actions"]) == 1
+    assert proposed["development_mode"] == current["development_mode"]
+    assert proposed["actions"]["reqsys.selfhost.receiver.init.dev"] == current["actions"]["reqsys.selfhost.receiver.init.dev"]
+    assert parsed == current
+    assert path.read_bytes() == original
+    private.check_readable(path)
+    assert private.readable_owner_category == "administrators"
+
+@pytest.mark.skipif(os.name != "nt", reason="actual Windows untrusted Users DACL")
+def test_real_windows_users_acl_rejected_before_config_bytes(monkeypatch, tmp_path):
+    path = tmp_path / m.CONFIG_NAME
+    path.write_bytes(b"PRIVATE-CONFIG-SENTINEL")
+    private = m.WindowsPrivateFiles()
+    set_actual_test_security(
+        private, path,
+        f"O:{private.sid}D:P(A;;FA;;;{private.sid})(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)",
+    )
+    reads = []
+    def forbidden_read(_path):
+        reads.append(True)
+        raise AssertionError("untrusted DACL must fail before bytes")
+    monkeypatch.setattr(m.Path, "read_bytes", forbidden_read)
+    with pytest.raises(m.OperationError, match="configuration_acl_unknown_principal"):
+        m.read_config(path, private)
+    assert reads == []

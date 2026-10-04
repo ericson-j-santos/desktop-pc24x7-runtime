@@ -34,8 +34,10 @@ helper require --renew-expired plus
 Collisions and active grants bound to another source fail closed.
 
 The existing owner configuration must already be version 1 and enabled.
-Trusted legacy owner/SYSTEM/Administrators ACLs are read internally; unknown/public
-principals fail before bytes are read. Apply creates a private temporary file,
+Trusted legacy ACLs owned by the current user or Administrators are read internally;
+all ACEs must name only the current user, SYSTEM or Administrators, and explicit
+current-user access must exist. Unknown/public principals fail before bytes are read.
+The read-only plan reports only the owner category; it never changes a file or ACL. Apply creates a private temporary file,
 sets current OWNER and protected owner+SYSTEM DACL before writing any bytes,
 flushes/fsyncs, confirms the original reviewed bytes, then replaces atomically.
 The shared directory and audit files are never re-ACLed.
