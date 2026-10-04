@@ -115,7 +115,7 @@ jobs:
           path: _runtime
           persist-credentials: false
       - name: Verify native Windows backup and owner registry controls
-        run: python -m pytest _runtime/tests/test_backup_reqsys_current_dev_postgres.py _runtime/tests/test_register_reqsys_dev_owner_actions.py -q
+        run: python -m pytest _runtime/tests/test_backup_reqsys_current_dev_postgres.py _runtime/tests/test_register_reqsys_dev_owner_actions.py _runtime/tests/test_reqsys_registered_runner_metadata_preflight.py _runtime/tests/test_plan_owner_risk3_file_acl_repair.py -q
   e2e:
     needs: [resolve_rules, contract_linux, contract_windows]
     name: Prepare isolated DEV through the fixed Desktop executor
@@ -273,6 +273,8 @@ jobs:
           "REQSYS_MIGRATION_DEPENDENCIES=$site" | Add-Content $env:GITHUB_ENV
 
       - name: Review the narrow owner action plan without applying grants
+        id: owner_plan
+        continue-on-error: true
         shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
@@ -284,6 +286,69 @@ jobs:
           $launcherSha = (Get-FileHash (Join-Path $source "scripts\run_self_hosted_dev_owner_action.py") -Algorithm SHA256).Hash.ToLowerInvariant()
           & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-owner-plan" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $registry --source-sha $env:REQSYS_TARGET_SHA --prepare-script-sha256 $prepareSha --launcher-script-sha256 $launcherSha
           exit $LASTEXITCODE
+
+      - name: Inspect only the fixed ReqSys runner registration metadata
+        id: reqsys_registration
+        if: always() && steps.session.outcome == 'success'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $probe = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\reqsys_registered_runner_metadata_preflight.py"
+          $file = Join-Path $env:RUNNER_TEMP ("reqsys-registration-metadata-" + $env:GITHUB_RUN_ID + "\evidence.json")
+          "REQSYS_REGISTRATION_EVIDENCE_FILE=$file" | Add-Content $env:GITHUB_ENV
+          & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-reqsys-registration" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $probe --evidence-file $file
+          exit $LASTEXITCODE
+
+      - name: Upload public ReqSys runner metadata only
+        if: always() && env.REQSYS_REGISTRATION_EVIDENCE_FILE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-registration-metadata-${{ github.run_id }}
+          path: ${{ env.REQSYS_REGISTRATION_EVIDENCE_FILE }}
+          if-no-files-found: warn
+          retention-days: 7
+
+      - name: Plan a repair of the single owner file ACL without applying it
+        id: owner_acl_plan
+        if: always() && steps.session.outcome == 'success'
+        continue-on-error: true
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $probe = Join-Path "${{ steps.session.outputs.target_path }}" "scripts\plan_owner_risk3_file_acl_repair.py"
+          $raw = & python $gateway --policy $policy --correlation-id "$env:CORRELATION_ID-owner-acl-plan" run --cwd "${{ steps.session.outputs.target_path }}" --session-id "${{ steps.session.outputs.session_id }}" --risk 1 --timeout 120 --expected-head "${{ steps.session.outputs.anchor_sha }}" -- python $probe
+          $exitCode = $LASTEXITCODE
+          @($raw) | ForEach-Object { Write-Output $_ }
+          if ($exitCode -ne 0) { exit $exitCode }
+          $result = @($raw)[-1] | ConvertFrom-Json
+          if ($result.gateway_exit_code -ne 0 -or $result.command_exit_code -ne 0) { throw "ACL_PLAN_GATEWAY_NOT_SUCCESS" }
+          $proof = $result.stdout | ConvertFrom-Json
+          if ($proof.status -ne "planned" -or $proof.read_only -ne $true -or $proof.configuration_bytes_read -ne $false -or $proof.grants_changed -ne $false) { throw "ACL_PLAN_NOT_READ_ONLY" }
+          $folder = Join-Path $env:RUNNER_TEMP ("reqsys-owner-acl-plan-" + $env:GITHUB_RUN_ID)
+          New-Item -ItemType Directory -Path $folder -Force | Out-Null
+          $file = Join-Path $folder "evidence.json"
+          $proof | ConvertTo-Json -Depth 20 | Set-Content -Encoding UTF8 -Path $file
+          "OWNER_ACL_PLAN_EVIDENCE_FILE=$file" | Add-Content $env:GITHUB_ENV
+
+      - name: Upload the read-only owner ACL plan metadata
+        if: always() && env.OWNER_ACL_PLAN_EVIDENCE_FILE != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-owner-acl-plan-${{ github.run_id }}
+          path: ${{ env.OWNER_ACL_PLAN_EVIDENCE_FILE }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Keep preparation blocked when the owner plan is unavailable
+        if: always() && steps.owner_plan.outcome == 'failure'
+        shell: powershell
+        run: |
+          throw "OWNER_PLAN_BLOCKED_NO_CANDIDATE_PREPARED"
 
   queue_watchdog:
     needs: [resolve_rules, contract_linux, contract_windows]

@@ -388,8 +388,8 @@ def test_acl_diagnostic_explicit_current_owner_and_creator_group():
     assert observation["principal_categories"]["creator_group"]["inherit_only"] == 1
 
 def test_acl_diagnostic_is_emitted_only_as_safe_failure_metadata(monkeypatch, tmp_path, capsys):
-    argv = prepare_main(monkeypatch, tmp_path)
     private = readable_acl_fixture()
+    argv = prepare_main(monkeypatch, tmp_path)
     observation = private._safe_acl_observation(
         f"O:BAD:P(A;;FA;;;{private.sid})(A;;FR;;;BU)"
     )
