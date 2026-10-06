@@ -53,6 +53,7 @@ def test_allowlist_is_exact_and_has_no_shell_action() -> None:
         "/desktop-runtime admin recover-control-plane",
         "/desktop-runtime admin activate-watchdog",
         "/desktop-runtime admin refresh-self",
+        "/desktop-runtime admin windows-component-health",
     }
     source = MODULE.read_text(encoding="utf-8").casefold()
     assert "shell=true" not in source
@@ -137,6 +138,34 @@ def test_failed_command_is_recorded_and_not_replayed(monkeypatch, tmp_path: Path
     assert state["accepted"]["status"] == "failed"
     assert state["accepted"]["comment_id"] == 102
 
+
+
+def test_windows_component_health_is_fixed_idempotent_and_sanitized(monkeypatch, tmp_path: Path) -> None:
+    metadata={"runtime_root":str(tmp_path)}
+    monkeypatch.setattr(m.os,"name","nt")
+    monkeypatch.setattr(m.os,"environ",{**m.os.environ,"SystemRoot":str(tmp_path/"Windows")})
+    calls=[]
+    class Done:
+        returncode=0
+    monkeypatch.setattr(m.subprocess,"run",lambda argv,**kwargs: calls.append(argv) or Done())
+    first=m._windows_component_health(metadata,"desktop-admin-gh-comment-777")
+    second=m._windows_component_health(metadata,"desktop-admin-gh-comment-777")
+    assert first["handler"]=="windows-component-health" and first["reused"] is False
+    assert second["reused"] is True
+    assert calls==[
+        ["dism.exe","/Online","/Cleanup-Image","/CheckHealth"],
+        ["dism.exe","/Online","/Cleanup-Image","/ScanHealth"],
+        ["sfc.exe","/verifyonly"],
+    ]
+    raw=json.dumps(first)+json.dumps(second)
+    assert "stdout" not in raw and "stderr" not in raw
+    receipt=tmp_path/"evidence"/"desktop-admin-gh-comment-777.windows-component-health.json"
+    assert receipt.is_file()
+
+def test_windows_component_health_unknown_command_remains_rejected() -> None:
+    now=datetime.now(timezone.utc)
+    comment=gh_comment(body="/desktop-runtime admin windows-component-health --command whoami",created=now)
+    assert m.authorize_comment(comment,not_before=now-timedelta(seconds=5),reference_time=now) is None
 
 def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "source"
