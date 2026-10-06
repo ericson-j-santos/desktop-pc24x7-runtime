@@ -74,6 +74,7 @@ ALLOWED_COMMANDS = {
     "/desktop-runtime admin recover-control-plane": "recover-control-plane",
     "/desktop-runtime admin activate-watchdog": "activate-watchdog",
     "/desktop-runtime admin refresh-self": "refresh-self",
+    "/desktop-runtime admin windows-component-health": "windows-component-health",
 }
 
 
@@ -866,6 +867,43 @@ def _status(metadata: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _windows_component_health(metadata: dict[str, Any], correlation_id: str) -> dict[str, Any]:
+    runtime_root = Path(metadata["runtime_root"])
+    evidence = runtime_root / "evidence" / f"{correlation_id}.windows-component-health.json"
+    if evidence.is_file():
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        if payload.get("correlation_id") == correlation_id and payload.get("completed") is True:
+            return {"handler": "windows-component-health", "reused": True, "receipt": evidence.name,
+                    "checkhealth_exit": payload.get("checkhealth_exit"),
+                    "scanhealth_exit": payload.get("scanhealth_exit"),
+                    "sfc_verifyonly_exit": payload.get("sfc_verifyonly_exit"),
+                    "configci_present": payload.get("configci_present"),
+                    "cipolicy_schema_present": payload.get("cipolicy_schema_present")}
+    if os.name != "nt":
+        raise BrokerError("windows_component_health_requires_windows")
+    commands = (
+        ("checkhealth_exit", ["dism.exe", "/Online", "/Cleanup-Image", "/CheckHealth"], 180),
+        ("scanhealth_exit", ["dism.exe", "/Online", "/Cleanup-Image", "/ScanHealth"], 900),
+        ("sfc_verifyonly_exit", ["sfc.exe", "/verifyonly"], 900),
+    )
+    payload = {"schema": "desktop-windows-component-health/v1", "correlation_id": correlation_id,
+               "completed": False, "production_touched": False}
+    for key, argv, timeout in commands:
+        completed = subprocess.run(argv, capture_output=True, text=True, encoding="utf-8",
+                                   errors="replace", timeout=timeout, check=False)
+        payload[key] = completed.returncode
+    system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    payload["configci_present"] = (system_root / "System32" / "WindowsPowerShell" / "v1.0" / "Modules" / "ConfigCI").is_dir()
+    payload["cipolicy_schema_present"] = (system_root / "schemas" / "CodeIntegrity" / "cipolicy.xsd").is_file()
+    payload["completed"] = True
+    atomic_json(evidence, payload)
+    return {"handler": "windows-component-health", "reused": False, "receipt": evidence.name,
+            "checkhealth_exit": payload["checkhealth_exit"], "scanhealth_exit": payload["scanhealth_exit"],
+            "sfc_verifyonly_exit": payload["sfc_verifyonly_exit"],
+            "configci_present": payload["configci_present"],
+            "cipolicy_schema_present": payload["cipolicy_schema_present"]}
+
+
 def execute_action(action: str, metadata: dict[str, Any], comment_id: int) -> dict[str, Any]:
     correlation_id = f"desktop-admin-gh-comment-{comment_id}"
     if action == "status":
@@ -880,6 +918,8 @@ def execute_action(action: str, metadata: dict[str, Any], comment_id: int) -> di
         result = _activate_watchdog(metadata)
     elif action == "refresh-self":
         result = _self_refresh(metadata)
+    elif action == "windows-component-health":
+        result = _windows_component_health(metadata, correlation_id)
     else:
         raise BrokerError("action_id não allowlisted")
     return {
