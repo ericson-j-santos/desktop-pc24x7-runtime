@@ -183,7 +183,7 @@ def test_workflow_enforces_same_repo_and_gateway_only():
     assert "head.repo.full_name == github.repository" in workflow
     assert "scripts\\session_launcher.py" in workflow
     assert "scripts\\command_gateway.py" in workflow
-    assert '"--risk", "1"' in workflow
+    assert "'--risk', '1'" in workflow
     assert "PORTFOLIO_ENV: dev" in workflow
     assert "--execute" not in workflow
     assert "secrets." not in workflow
