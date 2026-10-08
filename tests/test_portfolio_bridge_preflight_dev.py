@@ -218,16 +218,21 @@ def test_watchdog_detects_missing_pickup_without_unbounded_retry():
     assert "needs: prepare_runner" in workflow
 
 
+
 def test_both_physical_jobs_fail_closed_before_checkout_on_wrong_host():
     workflow = (ROOT / ".github/workflows/portfolio-bridge-preflight-dev.yml").read_text(encoding="utf-8")
-    assert "runs-on: [self-hosted, Windows, X64]\\n" not in workflow
+    assert "runs-on: [self-hosted, Windows, X64]\n" not in workflow
     assert workflow.count("name: Assert exact Desktop host before checkout") == 2
     assert workflow.count("const expectedHost = 'DESKTOP-PDQK954';") == 2
     assert workflow.count("String(process.env.COMPUTERNAME || '').toUpperCase()") == 2
     assert workflow.count("core.setFailed('DESKTOP_BOOTSTRAP_HOST_MISMATCH')") == 2
 
-    for job_name in ("prepare_runner", "preflight"):
-        job = workflow.split(f"\\n  {job_name}:\\n", 1)[1].split("\\n  ", 1)[0]
+    job_boundaries = (
+        ("prepare_runner", "preflight"),
+        ("preflight", "prepare_runner_watchdog"),
+    )
+    for job_name, next_job in job_boundaries:
+        job = workflow.split(f"\n  {job_name}:\n", 1)[1].split(f"\n  {next_job}:\n", 1)[0]
         guard = job.index("name: Assert exact Desktop host before checkout")
         checkout = job.index("name: Checkout Desktop runtime exact SHA")
         assert guard < checkout
