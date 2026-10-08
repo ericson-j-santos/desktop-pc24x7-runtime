@@ -1,0 +1,107 @@
+name: Portfolio Bridge DEV Read-only Preflight
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - .github/workflows/portfolio-bridge-preflight-dev.yml
+      - scripts/portfolio_bridge_preflight_dev.py
+      - tests/test_portfolio_bridge_preflight_dev.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: portfolio-bridge-dev-preflight-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    name: Governed PC24x7 portfolio bridge dry-run
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 8
+    env:
+      RULES_SHA: cb340976ac9895fe572ff0321a4f68bbec99eceb
+      WORKER_POOL_SHA: 5dd070281f6016bf5ba05be93f2fd4cbf603ef1e
+      PORTFOLIO_ENV: dev
+      WORKER_POOL_ROOT: ${{ github.workspace }}/external/engineering-worker-pool
+      SESSION_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      SESSION_SYNC_REF: origin/${{ github.event.pull_request.head.ref || github.ref_name }}
+      CORRELATION_ID: portfolio-preflight-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout Desktop runtime exact SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SESSION_SOURCE_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Checkout canonical rules pinned to verified main
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout Worker Pool pinned to verified main
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_POOL_SHA }}
+          path: external/engineering-worker-pool
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap governed session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @(
+            '--policy', $policy,
+            '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'portfolio-readonly',
+            '--correlation-id', $env:CORRELATION_ID,
+            '--expected-head', $env:SESSION_SOURCE_SHA,
+            '--sync-ref', $env:SESSION_SYNC_REF,
+            '--require-runner-version-preflight'
+          )
+          $raw = & python $launcher @args
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or $session.state_validated -ne $true) { throw 'SESSION_LAUNCH_BLOCKED' }
+          if ($session.head -ne $env:SESSION_SOURCE_SHA) { throw 'SESSION_HEAD_MISMATCH' }
+          "target_path=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Inspect DEV token references and Worker Pool through Command Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $probe = Join-Path $env:GITHUB_WORKSPACE 'scripts\portfolio_bridge_preflight_dev.py'
+          $args = @(
+            '--policy', $policy,
+            '--correlation-id', $env:CORRELATION_ID,
+            'run',
+            '--cwd', $env:TARGET_PATH,
+            '--session-id', $env:SESSION_ID,
+            '--risk', '1',
+            '--timeout', '120',
+            '--expected-head', $env:SESSION_SOURCE_SHA,
+            '--', 'python', $probe
+          )
+          & python $gateway @args
+          exit $LASTEXITCODE
+
+      # Read-only: no task submission, no workflow tokens, and no deploy.
