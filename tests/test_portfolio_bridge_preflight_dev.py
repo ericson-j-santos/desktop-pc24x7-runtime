@@ -192,7 +192,7 @@ def test_runner_admission_before_preflight_is_explicit_and_bounded():
     workflow = (ROOT / ".github/workflows/portfolio-bridge-preflight-dev.yml").read_text(encoding="utf-8")
     assert workflow.count("\n  prepare_runner:\n") == 1
     assert workflow.count("\n  preflight:\n    needs: prepare_runner\n") == 1
-    assert "runs-on: [self-hosted, Windows, X64]\n" in workflow
+    assert workflow.count("runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]") == 2
     assert "name: Ensure dedicated Desktop runner labels" in workflow
     assert workflow.count("--require-runner-version-preflight") == 2
     assert "ACTIVATE-DESKTOP-RUNTIME-RUNNER" in workflow
@@ -216,3 +216,26 @@ def test_watchdog_detects_missing_pickup_without_unbounded_retry():
     assert "TARGET_JOB_NAME: Ensure dedicated Desktop runner labels" in workflow
     assert "TARGET_JOB_NAME: Governed PC24x7 portfolio bridge dry-run" in workflow
     assert "needs: prepare_runner" in workflow
+
+
+
+def test_both_physical_jobs_fail_closed_before_checkout_on_wrong_host():
+    workflow = (ROOT / ".github/workflows/portfolio-bridge-preflight-dev.yml").read_text(encoding="utf-8")
+    assert "runs-on: [self-hosted, Windows, X64]\n" not in workflow
+    assert workflow.count("name: Assert exact Desktop host before checkout") == 2
+    assert workflow.count("const expectedHost = 'DESKTOP-PDQK954';") == 2
+    assert workflow.count("String(process.env.COMPUTERNAME || '').toUpperCase()") == 2
+    assert workflow.count("core.setFailed('DESKTOP_BOOTSTRAP_HOST_MISMATCH')") == 2
+
+    job_boundaries = (
+        ("prepare_runner", "preflight"),
+        ("preflight", "prepare_runner_watchdog"),
+    )
+    for job_name, next_job in job_boundaries:
+        job = workflow.split(f"\n  {job_name}:\n", 1)[1].split(f"\n  {next_job}:\n", 1)[0]
+        guard = job.index("name: Assert exact Desktop host before checkout")
+        checkout = job.index("name: Checkout Desktop runtime exact SHA")
+        assert guard < checkout
+        assert "uses: actions/github-script@v7" in job[guard:checkout]
+        assert "shell: powershell" not in job[:checkout]
+    assert "ExecutionPolicy Bypass" not in workflow
