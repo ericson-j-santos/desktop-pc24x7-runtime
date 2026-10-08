@@ -26,7 +26,7 @@ jobs:
   prepare_runner:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     name: Ensure dedicated Desktop runner labels
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 10
     env:
       RULES_SHA: cb340976ac9895fe572ff0321a4f68bbec99eceb
@@ -34,19 +34,22 @@ jobs:
       SESSION_SYNC_REF: origin/${{ github.event_name == 'pull_request' && github.event.pull_request.head.ref || github.ref_name }}
       CORRELATION_ID: portfolio-runner-admission-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Assert exact Desktop host before checkout
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expectedHost = 'DESKTOP-PDQK954';
+            const actualHost = String(process.env.COMPUTERNAME || '').toUpperCase();
+            if (actualHost !== expectedHost) {
+              core.setFailed('DESKTOP_BOOTSTRAP_HOST_MISMATCH');
+            }
+
       - name: Checkout Desktop runtime exact SHA
         uses: actions/checkout@v4
         with:
           ref: ${{ env.SESSION_SOURCE_SHA }}
           fetch-depth: 0
           persist-credentials: false
-
-      - name: Assert exact Desktop bootstrap host
-        shell: powershell
-        run: |
-          if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") {
-            throw "DESKTOP_BOOTSTRAP_HOST_MISMATCH"
-          }
 
       - name: Checkout canonical operational rules exact SHA
         uses: actions/checkout@v4
@@ -130,6 +133,16 @@ jobs:
       SESSION_SYNC_REF: origin/${{ github.event.pull_request.head.ref || github.ref_name }}
       CORRELATION_ID: portfolio-preflight-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
+      - name: Assert exact Desktop host before checkout
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expectedHost = 'DESKTOP-PDQK954';
+            const actualHost = String(process.env.COMPUTERNAME || '').toUpperCase();
+            if (actualHost !== expectedHost) {
+              core.setFailed('DESKTOP_BOOTSTRAP_HOST_MISMATCH');
+            }
+
       - name: Checkout Desktop runtime exact SHA
         uses: actions/checkout@v4
         with:
