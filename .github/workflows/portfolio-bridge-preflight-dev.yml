@@ -104,4 +104,4 @@ jobs:
           & python $gateway @args
           exit $LASTEXITCODE
 
-      # Read-only by construction: no --execute, no workflow tokens/secrets and no deploy.
+      # Read-only: no task submission, no workflow tokens, and no deploy.
