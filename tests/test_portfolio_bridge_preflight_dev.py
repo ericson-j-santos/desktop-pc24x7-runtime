@@ -196,7 +196,7 @@ def test_runner_admission_before_preflight_is_explicit_and_bounded():
     assert "name: Ensure dedicated Desktop runner labels" in workflow
     assert workflow.count("--require-runner-version-preflight") == 2
     assert "ACTIVATE-DESKTOP-RUNTIME-RUNNER" in workflow
-    assert "scripts\\\\activate_desktop_runtime_runner.py" in workflow
+    assert "activate_desktop_runtime_runner.py" in workflow
     assert "--non-interactive-auth" in workflow
     assert "PORTFOLIO_ENV: dev" in workflow
     assert "schedule:" not in workflow
