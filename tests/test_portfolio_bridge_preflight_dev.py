@@ -187,3 +187,32 @@ def test_workflow_enforces_same_repo_and_gateway_only():
     assert "PORTFOLIO_ENV: dev" in workflow
     assert "--execute" not in workflow
     assert "secrets." not in workflow
+
+def test_runner_admission_before_preflight_is_explicit_and_bounded():
+    workflow = (ROOT / ".github/workflows/portfolio-bridge-preflight-dev.yml").read_text(encoding="utf-8")
+    assert workflow.count("\n  prepare_runner:\n") == 1
+    assert workflow.count("\n  preflight:\n    needs: prepare_runner\n") == 1
+    assert "runs-on: [self-hosted, Windows, X64]\n" in workflow
+    assert "name: Ensure dedicated Desktop runner labels" in workflow
+    assert workflow.count("--require-runner-version-preflight") == 2
+    assert "ACTIVATE-DESKTOP-RUNTIME-RUNNER" in workflow
+    assert "activate_desktop_runtime_runner.py" in workflow
+    assert "--non-interactive-auth" in workflow
+    assert "PORTFOLIO_ENV: dev" in workflow
+    assert "schedule:" not in workflow
+    assert "--execute" not in workflow
+
+
+def test_watchdog_detects_missing_pickup_without_unbounded_retry():
+    workflow = (ROOT / ".github/workflows/portfolio-bridge-preflight-dev.yml").read_text(encoding="utf-8")
+    assert workflow.count("\n  prepare_runner_watchdog:\n") == 1
+    assert workflow.count("\n  preflight_runner_watchdog:\n") == 1
+    assert workflow.count('STALL_AFTER_SECONDS: "300"') == 2
+    assert workflow.count("actions: write") == 2
+    assert workflow.count("actions.cancelWorkflowRun") == 2
+    assert workflow.count("scripts/progress_watchdog.py") == 2
+    assert workflow.count("continue-on-error: true") == 2
+    assert workflow.count("if: steps.watchdog.outcome == 'failure'") == 2
+    assert "TARGET_JOB_NAME: Ensure dedicated Desktop runner labels" in workflow
+    assert "TARGET_JOB_NAME: Governed PC24x7 portfolio bridge dry-run" in workflow
+    assert "needs: prepare_runner" in workflow
