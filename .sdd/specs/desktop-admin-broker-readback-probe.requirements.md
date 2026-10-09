@@ -30,3 +30,25 @@ do runner do Desktop, Noteri, RDC, GUI ou shell remoto.
   funcional;
 - ausência/falha do readback permanece estado bloqueado e não dispara retry de
   recovery automaticamente.
+
+## Rota de execução independente do Desktop — 09/10/2026
+
+Quando o conector não oferecer `workflow_dispatch` e a navegação do chat não
+conseguir ler a saída diagnóstica, usar o evento `push` já previsto pelo workflow
+`desktop-admin-broker-readback-probe.yml`, em branch isolada compatível com seu
+filtro e com uma alteração documental de escopo explícito. Não modificar a main,
+recriar a automação, aumentar permissões ou acionar o runner físico bloqueado.
+O workflow existente executa testes de contrato e uma leitura HTTPS limitada
+em `ubuntu-latest`; não executa comandos no Desktop.
+
+Esta retomada está vinculada a Runtime #31 e Orchestrator #47, para investigar
+por canal independente o bloqueio da tentativa
+`desktop-crlf-refresh-20261008-2116`. A leitura do último diagnóstico não substitui
+o recibo dessa tentativa: conferir `comment_id`, ação, frescor e SHA antes de
+relacionar uma mensagem à atualização. Mensagem ausente, antiga ou de outra ação
+não autoriza refresh, bootstrap ou repetição automática.
+
+Checkpoint da tentativa hospedada: `todo-supervisor-hosted-readback-20261009`.
+O resultado deve ser registrado com run/job/SHA na issue #31 após leitura dos
+logs e do efeito observado, inclusive quando for bloqueio. Não considerar a
+criação da branch ou a presença de um job como execução física concluída.
