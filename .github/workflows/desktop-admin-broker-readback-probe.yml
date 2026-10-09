@@ -61,9 +61,57 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: Wait once within existing broker polling window
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import time
+          
+          def wait_budget(now):
+              target = datetime(2026, 10, 9, 21, 45, 50, tzinfo=timezone.utc)
+              seconds = max(0.0, (target - now).total_seconds())
+              if seconds > 240:
+                  raise SystemExit("broker_wait_exceeds_budget")
+              return seconds
+          
+          time.sleep(wait_budget(datetime.now(timezone.utc)))
+          PY
+
       - name: Probe fixed ntfy readback
         run: |
           python scripts/desktop_admin_broker_readback_probe.py             --evidence-file artifacts/desktop-admin-broker-readback/evidence.json             --max-age-seconds 900             --timeout-seconds 10
+
+      - name: Require the exact new diagnostic request
+        run: |
+          python - <<'PY'
+          import json
+          from datetime import datetime, timezone
+          from pathlib import Path
+          
+          def verify(payload):
+              requested_at = datetime(2026, 10, 9, 21, 40, 45, tzinfo=timezone.utc)
+              try:
+                  generated = datetime.fromisoformat(payload["broker_generated_at"].replace("Z", "+00:00"))
+              except (KeyError, TypeError, ValueError, AttributeError):
+                  raise SystemExit("broker_timestamp_invalid") from None
+              matches = (
+                  type(payload.get("comment_id")) is int
+                  and payload["comment_id"] == 6089720133
+                  and payload.get("action") == "status"
+                  and payload.get("ok") is True
+                  and payload.get("trust") == "diagnostic_only"
+                  and payload.get("authoritative_success") is False
+                  and payload.get("host") == "DESKTOP-PDQK954"
+                  and generated.tzinfo is not None
+                  and generated >= requested_at
+              )
+              if not matches:
+                  raise SystemExit("broker_request_correlation_mismatch")
+          
+          payload = json.loads(Path("artifacts/desktop-admin-broker-readback/evidence.json").read_text(encoding="utf-8"))
+          verify(payload)
+          print(json.dumps({"correlated_status_observed": True, "comment_id": 6089720133, "authoritative_success": False}))
+          PY
 
       - name: Upload sanitized evidence
         if: always()
