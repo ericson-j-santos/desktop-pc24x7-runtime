@@ -179,6 +179,7 @@ def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Pat
         m.RDC_RECOVERY_SCRIPT,
         m.RUNNER_BOOTSTRAP_SCRIPT,
         m.READBACK_SCRIPT,
+        "pc24x7_host_policy.py",
     ):
         (scripts / name).write_text("# stub\n", encoding="utf-8")
     runtime = tmp_path / "runtime"
@@ -715,6 +716,7 @@ def test_install_uses_persisted_python_for_hkcu_and_immediate_start(
         m.RDC_RECOVERY_SCRIPT,
         m.RUNNER_BOOTSTRAP_SCRIPT,
         m.READBACK_SCRIPT,
+        "pc24x7_host_policy.py",
     ):
         (scripts / name).write_text("# stub\n", encoding="utf-8")
 
@@ -1620,3 +1622,61 @@ def test_status_exposes_runtime_readiness_without_promoting_uac_state(
     assert result["broker_runtime"]["admin_activation_pending"] is True
     assert result["broker_runtime"]["admin_channel_ready"] is False
     assert result["broker_runtime"]["fallback_autostart"]["readback_verified"] is True
+def test_legacy_release_starts_without_staged_host_policy(tmp_path: Path) -> None:
+    """The previously deployed copier omitted a now-imported module."""
+    import os
+    import sys
+    staged = tmp_path / "legacy_release" / "scripts"
+    staged.mkdir(parents=True)
+    (staged / "desktop_admin_broker.py").write_bytes(MODULE.read_bytes())
+    assert not (staged / "pc24x7_host_policy.py").exists()
+    result = subprocess.run(
+        [sys.executable, "-I", str(staged / "desktop_admin_broker.py"), "--help"],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": ""},
+        capture_output=True, text=True, check=False, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr[-250:]
+    assert "ModuleNotFoundError" not in result.stderr
+    assert not (staged / "pc24x7_host_policy.py").exists()
+
+
+def test_pinned_host_identity_does_not_require_external_policy(monkeypatch) -> None:
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: "desktop-pdqk954")
+    assert m.require_windows_desktop() == "desktop-pdqk954"
+
+
+@pytest.mark.parametrize("host", ["DESKTOP-RP23OGS", "NOTERI", "UNKNOWN-HOST"])
+def test_broker_rejects_other_hosts_even_if_generic_policy_knows_them(monkeypatch, host):
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: host)
+    with pytest.raises(m.BrokerError, match="host não autorizado"):
+        m.require_windows_desktop()
+
+
+def test_release_manifest_copies_host_policy_for_watchdog_and_runner(tmp_path: Path) -> None:
+    import shutil
+    src = tmp_path / "source" / "scripts"
+    src.mkdir(parents=True)
+    manifest = ("desktop_admin_broker.py", "desktop_admin_broker_uac_launcher.py",
+                m.WATCHDOG_SCRIPT, m.WATCHDOG_UAC_SCRIPT,
+                m.RDC_RECOVERY_SCRIPT, m.RUNNER_BOOTSTRAP_SCRIPT,
+                m.READBACK_SCRIPT, "pc24x7_host_policy.py")
+    for name in manifest:
+        shutil.copyfile(ROOT / "scripts" / name, src / name)
+    target = tmp_path / "releases" / ("a" * 40)
+    m._copy_release(src.parent, target)
+    staged = target / "scripts"
+    assert {path.name for path in staged.iterdir()} == set(manifest)
+    assert (staged / "pc24x7_host_policy.py").read_bytes() == (src / "pc24x7_host_policy.py").read_bytes()
+
+
+def test_missing_manifest_dependency_fails_closed(tmp_path: Path) -> None:
+    src = tmp_path / "source" / "scripts"
+    src.mkdir(parents=True)
+    for name in ("desktop_admin_broker.py", "desktop_admin_broker_uac_launcher.py",
+                 m.WATCHDOG_SCRIPT, m.WATCHDOG_UAC_SCRIPT,
+                 m.RDC_RECOVERY_SCRIPT, m.RUNNER_BOOTSTRAP_SCRIPT, m.READBACK_SCRIPT):
+        (src / name).write_text("# fixture\n", encoding="utf-8")
+    with pytest.raises(m.BrokerError, match="script obrigatório ausente: pc24x7_host_policy.py"):
+        m._copy_release(src.parent, tmp_path / "release")
