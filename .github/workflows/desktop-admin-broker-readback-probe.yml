@@ -66,7 +66,7 @@ jobs:
           python - <<'PY'
           from datetime import datetime, timezone
           import time
-          target = datetime(2026, 10, 11, 12, 31, 30, tzinfo=timezone.utc)
+          target = datetime(2026, 10, 11, 13, 57, 40, tzinfo=timezone.utc)
           duration = max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
           if duration > 600:
               raise SystemExit("legacy_receipt_probe_wait_limit")
@@ -84,12 +84,12 @@ jobs:
           from datetime import datetime, timezone
           from pathlib import Path
           content = json.loads(Path("artifacts/desktop-admin-broker-readback/evidence.json").read_text(encoding="utf-8"))
-          issued = datetime(2026, 10, 11, 12, 25, 11, tzinfo=timezone.utc)
+          issued = datetime(2026, 10, 11, 13, 52, 17, tzinfo=timezone.utc)
           stamp = datetime.fromisoformat(str(content.get("broker_generated_at") or "").replace("Z", "+00:00"))
           result = content.get("result_summary")
           if not (
               type(content.get("comment_id")) is int
-              and content["comment_id"] == 6108994401
+              and content["comment_id"] == 6109734361
               and content.get("action") == "status"
               and content.get("host") == "DESKTOP-PDQK954"
               and content.get("source_sha") == "c9a05797e046b11027ad4beb037307665de6ad5e"
@@ -109,7 +109,7 @@ jobs:
           ):
               raise SystemExit("desktop_supervisor_receipt_readback_unverified")
           print(json.dumps({
-              "comment_id": 6108994401,
+              "comment_id": 6109734361,
               "broker_source_sha": "c9a05797e046b11027ad4beb037307665de6ad5e",
               "supervisor_runtime_source_sha": result["supervisor_runtime_source_sha"],
               "supervisor_receipt_state": result["supervisor_receipt_state"],
