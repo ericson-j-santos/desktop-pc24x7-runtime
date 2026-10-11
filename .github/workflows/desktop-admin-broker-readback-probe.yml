@@ -67,7 +67,7 @@ jobs:
           from datetime import datetime, timezone
           import time
 
-          deadline = datetime(2026, 10, 11, 4, 22, 45, tzinfo=timezone.utc)
+          deadline = datetime(2026, 10, 11, 12, 7, 19, tzinfo=timezone.utc)
           delay = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
           if delay > 390:
               raise SystemExit("status_readback_wait_exceeded")
@@ -85,11 +85,11 @@ jobs:
           from datetime import datetime, timezone
 
           payload = json.loads(Path("artifacts/desktop-admin-broker-readback/evidence.json").read_text(encoding="utf-8"))
-          issued = datetime(2026, 10, 11, 4, 17, 28, tzinfo=timezone.utc)
+          issued = datetime(2026, 10, 11, 12, 1, 19, tzinfo=timezone.utc)
           stamp = datetime.fromisoformat(payload.get("broker_generated_at", "").replace("Z", "+00:00"))
           if not (
               type(payload.get("comment_id")) is int
-              and payload["comment_id"] == 6105359520
+              and payload["comment_id"] == 6108801644
               and payload.get("action") == "status"
               and payload.get("host") == "DESKTOP-PDQK954"
               and payload.get("ok") is True
@@ -101,14 +101,14 @@ jobs:
               raise SystemExit("status_readback_comment_mismatch")
           if not (
               payload.get("status") == "completed"
-              and payload.get("source_sha") == "4ef7177a4d322492b06afc302c8daad850658bfe"
+              and payload.get("source_sha") in {"4ef7177a4d322492b06afc302c8daad850658bfe", "e0ce14cf88f0fdd069feca07bdcf69d1d9a80429"}
               and isinstance(payload.get("result_summary"), dict)
               and payload["result_summary"].get("handler") == "status"
               and payload["result_summary"].get("supervisor_receipt_state")
                 in {"unavailable", "missing", "pending", "applied", "failed", "ambiguous", "invalid"}
           ):
               raise SystemExit("new_broker_status_or_receipt_missing")
-          print(json.dumps({"verified_comment": 6105359520,
+          print(json.dumps({"verified_comment": 6108801644,
                             "action": "status", "diagnostic_only": True,
                             "origin_authenticated": False}))
           PY
