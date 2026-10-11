@@ -106,3 +106,15 @@ def test_real_file_stat_and_fstat_stable_at_bootstrap(tmp_path):
     after = target.lstat()
     assert module._fingerprint(before) == module._fingerprint(during)
     assert module._fingerprint(after_handle) == module._fingerprint(after)
+
+
+def test_posix_fingerprint_tracks_ctime_even_with_birthtime(monkeypatch):
+    """A POSIX metadata change must not be masked by an optional birthtime."""
+    from types import SimpleNamespace
+
+    attributes = {"st_dev": 1, "st_ino": 17, "st_size": 128,
+                  "st_mtime_ns": 500, "st_birthtime_ns": 200}
+    before = SimpleNamespace(**attributes, st_ctime_ns=700)
+    changed = SimpleNamespace(**attributes, st_ctime_ns=701)
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="posix"))
+    assert module._fingerprint(before) != module._fingerprint(changed)
