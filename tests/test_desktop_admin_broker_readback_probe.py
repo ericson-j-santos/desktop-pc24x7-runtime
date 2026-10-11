@@ -171,3 +171,43 @@ def test_probe_retains_self_refresh_summary() -> None:
     assert result["result_summary"]["target_source_sha"] == "b" * 40
     assert result["result_summary"]["new_broker_started"] is True
     assert "ignored_path" not in raw
+def test_status_receipt_summary_allows_only_static_state_and_error_codes() -> None:
+    reference = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    event = message_event(generated_at="2026-09-27T13:44:30+00:00")
+    payload = json.loads(event["message"])
+    payload["result"] = {
+        "handler": "status", "supervisor_receipt_state": "failed",
+        "supervisor_receipt_error_code": "bootstrap_unavailable",
+        "raw_error": "SECRET_TOKEN_OR_FILE_PATH",
+    }
+    event["message"] = json.dumps(payload)
+    observed = m.validate_message(event, max_age_seconds=900, reference_time=reference)
+    summary = observed["result_summary"]
+    assert summary["supervisor_receipt_state"] == "failed"
+    assert summary["supervisor_receipt_error_code"] == "bootstrap_unavailable"
+    assert "SECRET_TOKEN_OR_FILE_PATH" not in json.dumps(observed)
+    assert observed["authoritative_success"] is False
+
+
+@pytest.mark.parametrize("state,code", [
+    ("READY", "bootstrap_unavailable"),
+    ("failed", "C:/private/secret"),
+    ({"not": "a string"}, "unknown"),
+    ("applied", "unknown"),
+])
+def test_status_receipt_summary_rejects_unapproved_values(state, code) -> None:
+    reference = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    event = message_event(generated_at="2026-09-27T13:44:30+00:00")
+    payload = json.loads(event["message"])
+    payload["result"] = {
+        "handler": "status", "supervisor_receipt_state": state,
+        "supervisor_receipt_error_code": code,
+        "private": "SECRET_PATH",
+    }
+    event["message"] = json.dumps(payload)
+    observed = m.validate_message(event, max_age_seconds=900, reference_time=reference)
+    raw = json.dumps(observed)
+    assert "SECRET_PATH" not in raw and "C:/private/secret" not in raw
+    assert "READY" not in raw
+    assert "supervisor_receipt_error_code" not in observed["result_summary"]
+    assert observed["authoritative_success"] is False

@@ -60,7 +60,20 @@ def _parse_iso(value: Any) -> datetime:
 def _safe_result(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {key: value[key] for key in SAFE_RESULT_KEYS if key in value}
+    allowed = {key: value[key] for key in SAFE_RESULT_KEYS if key in value}
+    if value.get("handler") == "status":
+        state = value.get("supervisor_receipt_state")
+        safe_states = {"unavailable", "missing", "pending", "applied",
+                       "failed", "ambiguous", "invalid"}
+        safe_errors = {"bootstrap_unavailable", "bootstrap_import_failed",
+                       "bootstrap_contract_invalid", "bootstrap_failed",
+                       "readback_mismatch", "origin_mismatch", "request_expired", "unknown"}
+        if type(state) is str and state in safe_states:
+            allowed["supervisor_receipt_state"] = state
+            error = value.get("supervisor_receipt_error_code")
+            if state == "failed" and type(error) is str and error in safe_errors:
+                allowed["supervisor_receipt_error_code"] = error
+    return allowed
 
 
 def validate_message(
