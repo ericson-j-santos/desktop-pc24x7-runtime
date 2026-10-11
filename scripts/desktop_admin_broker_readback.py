@@ -75,6 +75,17 @@ def _safe_result_summary(accepted: dict[str, Any]) -> dict[str, Any]:
                 code = receipt.get("error_code")
                 if state == "failed" and type(code) is str and code in set(_ERROR_CODES.values()) | {"unknown"}:
                     summary["supervisor_receipt_error_code"] = code
+    if result.get("handler") == "status":
+        receipt = result.get("supervisor_receipt")
+        if isinstance(receipt, dict):
+            state = receipt.get("state")
+            if type(state) is str and state in _RECEIPT_STATES:
+                sha = receipt.get("runtime_source_sha")
+                if type(sha) is str and _SHA40.fullmatch(sha):
+                    summary["supervisor_runtime_source_sha"] = sha
+                legacy = receipt.get("legacy_uncorrelated_expired")
+                if type(legacy) is bool:
+                    summary["supervisor_legacy_uncorrelated_expired"] = legacy
     return summary
 
 
@@ -172,6 +183,7 @@ _SUPERVISOR_CONTROL = Path(r"C:\dev\chatgpt-workers\reqsys-orchestrator-24x7-run
 _SUPERVISOR_CORRELATION = "desktop-crlf-refresh-20261008-2116"
 _SUPERVISOR_SHA = "0426ea5283a511e7e98b8396e65fc6cf6cb1e620"
 _FAILURE_RECEIPT = re.compile(r"refresh-runtime\.failed\.\d{1,16}\.json\Z")
+_SHA40 = re.compile(r"^[0-9a-f]{40}$")
 _RECEIPT_STATES = frozenset({"unavailable", "missing", "pending", "applied", "failed", "ambiguous", "invalid"})
 _ERROR_CODES = {
     "stable bootstrap unavailable": "bootstrap_unavailable",
@@ -241,4 +253,83 @@ def _status_of_fixed_receipt(control: Path) -> dict[str, str]:
 def supervisor_receipt_status() -> dict[str, str]:
     if os.name != "nt" or socket.gethostname().casefold() != EXPECTED_HOST.casefold():
         return {"state": "unavailable"}
-    return _status_of_fixed_receipt(_SUPERVISOR_CONTROL)
+    observed = _status_of_fixed_receipt(_SUPERVISOR_CONTROL)
+    observed.update(_orchestrator_legacy_snapshot(_SUPERVISOR_CONTROL))
+    return observed
+# Fixed DEV root. This metadata is diagnostic only, never an authorized
+# recovery verdict: old versions could write FAILED without correlation_id.
+def _safe_read_supervisor_json(path: Path, max_bytes: int = 8192) -> dict | None:
+    try:
+        if path.is_symlink():
+            return None
+        before = path.lstat()
+        import stat as stat_module
+        if (not stat_module.S_ISREG(before.st_mode) or before.st_size > max_bytes
+                or getattr(before, "st_file_attributes", 0) & 0x400):
+            return None
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, "rb") as handle:
+            opened = os.fstat(handle.fileno())
+            if not stat_module.S_ISREG(opened.st_mode) or opened.st_size != before.st_size:
+                return None
+            raw = handle.read(max_bytes + 1)
+            after_handle = os.fstat(handle.fileno())
+        after = path.lstat()
+        if (len(raw) > max_bytes or after.st_size != before.st_size
+                or after.st_mtime_ns != before.st_mtime_ns
+                or after_handle.st_mtime_ns != before.st_mtime_ns
+                or after_handle.st_size != before.st_size):
+            return None
+
+        def unique_fields(pairs):
+            obj = {}
+            for key, value in pairs:
+                if key in obj:
+                    raise ValueError("duplicate_json_key")
+                obj[key] = value
+            return obj
+
+        obj = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_fields)
+        return obj if isinstance(obj, dict) else None
+    except (OSError, ValueError, UnicodeError, json.JSONDecodeError):
+        return None
+
+
+def _orchestrator_legacy_snapshot(control: Path) -> dict[str, object]:
+    """Fixed-path nonsecret telemetry. Uncorrelated events are not evidence
+    of the original refresh, even when one expired request is found.
+    """
+    output: dict[str, object] = {}
+    root = control.parent.parent
+    try:
+        if (not root.is_dir() or root.is_symlink()
+                or getattr(root.lstat(), "st_file_attributes", 0) & 0x400):
+            return output
+        version = _safe_read_supervisor_json(root / "runtime-version.json", 2048)
+        if version and version.get("schema_version") == 1:
+            sha = version.get("source_sha")
+            if type(sha) is str and _SHA40.fullmatch(sha):
+                output["runtime_source_sha"] = sha
+
+        if (not control.is_dir() or control.is_symlink()
+                or getattr(control.lstat(), "st_file_attributes", 0) & 0x400):
+            return output
+        orphaned = False
+        with os.scandir(control) as items:
+            for index, entry in enumerate(items):
+                if index >= 256:
+                    return {"runtime_source_sha": output["runtime_source_sha"]} if "runtime_source_sha" in output else {}
+                if not _FAILURE_RECEIPT.fullmatch(entry.name):
+                    continue
+                record = _safe_read_supervisor_json(control / entry.name)
+                if record is None:
+                    return {"runtime_source_sha": output["runtime_source_sha"]} if "runtime_source_sha" in output else {}
+                if (record.get("schema_version") == 1
+                        and record.get("error") == "runtime refresh request expired"
+                        and record.get("correlation_id") is None):
+                    orphaned = True
+        output["legacy_uncorrelated_expired"] = orphaned
+        return output
+    except (OSError, ValueError):
+        return output
