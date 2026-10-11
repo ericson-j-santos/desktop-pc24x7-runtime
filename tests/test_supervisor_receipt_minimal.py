@@ -75,3 +75,34 @@ def test_wrong_target_fails_closed(fixture_root):
     make_receipt(fixture_root, expected_sha="f" * 40)
     with pytest.raises(module.ReceiptError, match="receipt_identity_mismatch"):
         module._collect(fixture_root)
+def test_windows_fingerprint_uses_birthtime_instead_of_ambiguous_ctime(monkeypatch):
+    from types import SimpleNamespace
+
+    before = SimpleNamespace(st_dev=1, st_ino=123, st_size=20,
+                             st_mtime_ns=500, st_ctime_ns=111, st_birthtime_ns=222)
+    opened = SimpleNamespace(st_dev=1, st_ino=123, st_size=20,
+                             st_mtime_ns=500, st_ctime_ns=777, st_birthtime_ns=222)
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    assert module._fingerprint(before) == module._fingerprint(opened)
+
+    modified = SimpleNamespace(st_dev=1, st_ino=123, st_size=20,
+                               st_mtime_ns=600, st_ctime_ns=777, st_birthtime_ns=222)
+    replaced = SimpleNamespace(st_dev=1, st_ino=124, st_size=20,
+                               st_mtime_ns=500, st_ctime_ns=777, st_birthtime_ns=222)
+    assert module._fingerprint(before) != module._fingerprint(modified)
+    assert module._fingerprint(before) != module._fingerprint(replaced)
+
+
+def test_real_file_stat_and_fstat_stable_at_bootstrap(tmp_path):
+    import os
+
+    target = tmp_path / "stat-fstat.json"
+    target.write_text('{"safe": true}', encoding="utf-8")
+    before = target.lstat()
+    with target.open("rb") as opened:
+        during = os.fstat(opened.fileno())
+        assert opened.read() == b'{"safe": true}'
+        after_handle = os.fstat(opened.fileno())
+    after = target.lstat()
+    assert module._fingerprint(before) == module._fingerprint(during)
+    assert module._fingerprint(after_handle) == module._fingerprint(after)

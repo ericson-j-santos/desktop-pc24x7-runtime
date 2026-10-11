@@ -68,7 +68,16 @@ def _guard_path(path: Path, *, directory: bool) -> os.stat_result:
 
 
 def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    # Windows path stat and handle fstat may disagree about st_ctime_ns
+    # (creation time versus metadata change time). Python >=3.12 provides
+    # st_birthtime_ns for the same stable creation timestamp on both.
+    # Preserve inode, size and mtime checks to fail closed on replaced files.
+    timestamp = (
+        getattr(info, "st_birthtime_ns", info.st_ctime_ns)
+        if os.name == "nt"
+        else info.st_ctime_ns
+    )
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, timestamp)
 
 
 def _invalid_number(_value: str) -> None:
