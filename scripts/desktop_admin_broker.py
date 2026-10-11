@@ -29,9 +29,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pc24x7_host_policy import authorized_host
-
-EXPECTED_HOST = "DESKTOP-PDQK954"  # compatibility default; authorization is host-policy driven
+EXPECTED_HOST = "DESKTOP-PDQK954"  # broker bound to exactly this host
 EXPECTED_ACTOR = "ericson-j-santos"
 EXPECTED_ASSOCIATION = "OWNER"
 REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
@@ -94,10 +92,8 @@ def require_windows_desktop() -> str:
     if os.name != "nt":
         raise BrokerError("Windows obrigatório")
     host = socket.gethostname()
-    try:
-        authorized_host(host)
-    except ValueError as exc:
-        raise BrokerError(str(exc)) from None
+    if host.casefold() != EXPECTED_HOST.casefold():
+        raise BrokerError("host não autorizado")
     return host
 
 
@@ -1464,6 +1460,7 @@ def _copy_release(source_root: Path, release_root: Path) -> None:
         RDC_RECOVERY_SCRIPT,
         RUNNER_BOOTSTRAP_SCRIPT,
         READBACK_SCRIPT,
+        "pc24x7_host_policy.py",
     ):
         source = source_root / "scripts" / name
         if not source.is_file():

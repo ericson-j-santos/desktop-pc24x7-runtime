@@ -68,7 +68,11 @@ def _guard_path(path: Path, *, directory: bool) -> os.stat_result:
 
 
 def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int]:
-    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+    # Windows path stat and descriptor fstat can disagree on deprecated ctime.
+    # Compare stable birth time when present; preserve device/inode/size/mtime
+    # so a real concurrent modification still rejects the receipt.
+    created = getattr(info, "st_birthtime_ns", info.st_ctime_ns)
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, created)
 
 
 def _invalid_number(_value: str) -> None:

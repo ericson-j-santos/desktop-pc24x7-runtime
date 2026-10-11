@@ -75,3 +75,14 @@ def test_wrong_target_fails_closed(fixture_root):
     make_receipt(fixture_root, expected_sha="f" * 40)
     with pytest.raises(module.ReceiptError, match="receipt_identity_mismatch"):
         module._collect(fixture_root)
+
+
+def test_windows_stat_ctime_mismatch_with_equal_birthtime_is_stable():
+    """A path stat and an opened descriptor may disagree only on Windows ctime."""
+    from types import SimpleNamespace
+    common = {"st_dev": 42, "st_ino": 4711, "st_size": 80, "st_mtime_ns": 9999, "st_birthtime_ns": 100}
+    path_stat = SimpleNamespace(**common, st_ctime_ns=100)
+    opened_stat = SimpleNamespace(**common, st_ctime_ns=222)
+    assert module._fingerprint(path_stat) == module._fingerprint(opened_stat)
+    changed = SimpleNamespace(**{**common, "st_mtime_ns": 10001}, st_ctime_ns=222)
+    assert module._fingerprint(path_stat) != module._fingerprint(changed)
