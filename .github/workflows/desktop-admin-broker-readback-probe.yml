@@ -53,7 +53,7 @@ jobs:
     name: Read latest broker diagnostic
     needs: contract
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
     steps:
       - name: Checkout exact SHA
         uses: actions/checkout@v4
@@ -61,9 +61,48 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: One bounded wait for the existing broker poll window
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import time
+
+          deadline = datetime(2026, 10, 11, 4, 9, 40, tzinfo=timezone.utc)
+          delay = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
+          if delay > 390:
+              raise SystemExit("status_readback_wait_exceeded")
+          time.sleep(delay)
+          PY
+
       - name: Probe fixed ntfy readback
         run: |
           python scripts/desktop_admin_broker_readback_probe.py             --evidence-file artifacts/desktop-admin-broker-readback/evidence.json             --max-age-seconds 900             --timeout-seconds 10
+      - name: Require the exact owner status comment
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from datetime import datetime, timezone
+
+          payload = json.loads(Path("artifacts/desktop-admin-broker-readback/evidence.json").read_text(encoding="utf-8"))
+          issued = datetime(2026, 10, 11, 4, 4, 20, tzinfo=timezone.utc)
+          stamp = datetime.fromisoformat(payload.get("broker_generated_at", "").replace("Z", "+00:00"))
+          if not (
+              type(payload.get("comment_id")) is int
+              and payload["comment_id"] == 6105266603
+              and payload.get("action") == "status"
+              and payload.get("host") == "DESKTOP-PDQK954"
+              and payload.get("ok") is True
+              and payload.get("authoritative_success") is False
+              and payload.get("trust") == "diagnostic_only"
+              and stamp.tzinfo is not None
+              and stamp >= issued
+          ):
+              raise SystemExit("status_readback_comment_mismatch")
+          print(json.dumps({"verified_comment": 6105266603,
+                            "action": "status", "diagnostic_only": True,
+                            "origin_authenticated": False}))
+          PY
 
       - name: Upload sanitized evidence
         if: always()
