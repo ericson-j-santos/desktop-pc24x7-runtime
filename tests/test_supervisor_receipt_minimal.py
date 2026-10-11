@@ -75,14 +75,46 @@ def test_wrong_target_fails_closed(fixture_root):
     make_receipt(fixture_root, expected_sha="f" * 40)
     with pytest.raises(module.ReceiptError, match="receipt_identity_mismatch"):
         module._collect(fixture_root)
-
-
-def test_windows_stat_ctime_mismatch_with_equal_birthtime_is_stable():
-    """A path stat and an opened descriptor may disagree only on Windows ctime."""
+def test_windows_fingerprint_uses_birthtime_instead_of_ambiguous_ctime(monkeypatch):
     from types import SimpleNamespace
-    common = {"st_dev": 42, "st_ino": 4711, "st_size": 80, "st_mtime_ns": 9999, "st_birthtime_ns": 100}
-    path_stat = SimpleNamespace(**common, st_ctime_ns=100)
-    opened_stat = SimpleNamespace(**common, st_ctime_ns=222)
-    assert module._fingerprint(path_stat) == module._fingerprint(opened_stat)
-    changed = SimpleNamespace(**{**common, "st_mtime_ns": 10001}, st_ctime_ns=222)
-    assert module._fingerprint(path_stat) != module._fingerprint(changed)
+
+    before = SimpleNamespace(st_dev=1, st_ino=123, st_size=20,
+                             st_mtime_ns=500, st_ctime_ns=111, st_birthtime_ns=222)
+    opened = SimpleNamespace(st_dev=1, st_ino=123, st_size=20,
+                             st_mtime_ns=500, st_ctime_ns=777, st_birthtime_ns=222)
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="nt"))
+    assert module._fingerprint(before) == module._fingerprint(opened)
+
+    modified = SimpleNamespace(st_dev=1, st_ino=123, st_size=20,
+                               st_mtime_ns=600, st_ctime_ns=777, st_birthtime_ns=222)
+    replaced = SimpleNamespace(st_dev=1, st_ino=124, st_size=20,
+                               st_mtime_ns=500, st_ctime_ns=777, st_birthtime_ns=222)
+    assert module._fingerprint(before) != module._fingerprint(modified)
+    assert module._fingerprint(before) != module._fingerprint(replaced)
+
+
+def test_real_file_stat_and_fstat_stable_at_bootstrap(tmp_path):
+    import os
+
+    target = tmp_path / "stat-fstat.json"
+    target.write_text('{"safe": true}', encoding="utf-8")
+    before = target.lstat()
+    with target.open("rb") as opened:
+        during = os.fstat(opened.fileno())
+        assert opened.read() == b'{"safe": true}'
+        after_handle = os.fstat(opened.fileno())
+    after = target.lstat()
+    assert module._fingerprint(before) == module._fingerprint(during)
+    assert module._fingerprint(after_handle) == module._fingerprint(after)
+
+
+def test_posix_fingerprint_tracks_ctime_even_with_birthtime(monkeypatch):
+    """A POSIX metadata change must not be masked by an optional birthtime."""
+    from types import SimpleNamespace
+
+    attributes = {"st_dev": 1, "st_ino": 17, "st_size": 128,
+                  "st_mtime_ns": 500, "st_birthtime_ns": 200}
+    before = SimpleNamespace(**attributes, st_ctime_ns=700)
+    changed = SimpleNamespace(**attributes, st_ctime_ns=701)
+    monkeypatch.setattr(module, "os", SimpleNamespace(name="posix"))
+    assert module._fingerprint(before) != module._fingerprint(changed)

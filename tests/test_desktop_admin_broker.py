@@ -1622,58 +1622,61 @@ def test_status_exposes_runtime_readiness_without_promoting_uac_state(
     assert result["broker_runtime"]["admin_activation_pending"] is True
     assert result["broker_runtime"]["admin_channel_ready"] is False
     assert result["broker_runtime"]["fallback_autostart"]["readback_verified"] is True
-
-
-def test_old_release_style_broker_import_is_self_contained(tmp_path: Path) -> None:
-    """The legacy refresher copies no host-policy module into the next release."""
+def test_legacy_release_starts_without_staged_host_policy(tmp_path: Path) -> None:
+    """The previously deployed copier omitted a now-imported module."""
+    import os
     import sys
-    isolated = tmp_path / "old-stager-copy"
-    isolated.mkdir()
-    script = isolated / "desktop_admin_broker.py"
-    script.write_text(MODULE.read_text(encoding="utf-8"), encoding="utf-8")
-    assert not (isolated / "pc24x7_host_policy.py").exists()
-    completed = subprocess.run(
-        [sys.executable, "-I", "-c",
-         "import runpy,sys;runpy.run_path(sys.argv[1],run_name='_broker_import_probe_')",
-         str(script)],
-        cwd=tmp_path, capture_output=True, text=True, timeout=15, check=False)
-    assert completed.returncode == 0, completed.stderr[:250]
+    staged = tmp_path / "legacy_release" / "scripts"
+    staged.mkdir(parents=True)
+    (staged / "desktop_admin_broker.py").write_bytes(MODULE.read_bytes())
+    assert not (staged / "pc24x7_host_policy.py").exists()
+    result = subprocess.run(
+        [sys.executable, "-I", str(staged / "desktop_admin_broker.py"), "--help"],
+        cwd=tmp_path, env={**os.environ, "PYTHONPATH": ""},
+        capture_output=True, text=True, check=False, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr[-250:]
+    assert "ModuleNotFoundError" not in result.stderr
+    assert not (staged / "pc24x7_host_policy.py").exists()
 
 
-def test_fixed_broker_host_denies_other_authorized_platform_hosts(monkeypatch) -> None:
+def test_pinned_host_identity_does_not_require_external_policy(monkeypatch) -> None:
     monkeypatch.setattr(m.os, "name", "nt")
-    monkeypatch.setattr(m.socket, "gethostname", lambda: "NOTERI")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: "desktop-pdqk954")
+    assert m.require_windows_desktop() == "desktop-pdqk954"
+
+
+@pytest.mark.parametrize("host", ["DESKTOP-RP23OGS", "NOTERI", "UNKNOWN-HOST"])
+def test_broker_rejects_other_hosts_even_if_generic_policy_knows_them(monkeypatch, host):
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: host)
     with pytest.raises(m.BrokerError, match="host não autorizado"):
         m.require_windows_desktop()
 
 
-def test_future_release_contains_host_policy_dependency(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    scripts = source / "scripts"
-    scripts.mkdir(parents=True)
-    required = (
-        "desktop_admin_broker.py", "desktop_admin_broker_uac_launcher.py",
-        m.WATCHDOG_SCRIPT, m.WATCHDOG_UAC_SCRIPT,
-        m.RDC_RECOVERY_SCRIPT, m.RUNNER_BOOTSTRAP_SCRIPT,
-        m.READBACK_SCRIPT, "pc24x7_host_policy.py",
-    )
-    for name in required:
-        (scripts / name).write_bytes(b"# synthetic\n")
-    release = tmp_path / "release"
-    m._copy_release(source, release)
-    assert {p.name for p in (release / "scripts").iterdir()} == set(required)
-    assert (release / "scripts" / "pc24x7_host_policy.py").read_bytes() == b"# synthetic\n"
+def test_release_manifest_copies_host_policy_for_watchdog_and_runner(tmp_path: Path) -> None:
+    import shutil
+    src = tmp_path / "source" / "scripts"
+    src.mkdir(parents=True)
+    manifest = ("desktop_admin_broker.py", "desktop_admin_broker_uac_launcher.py",
+                m.WATCHDOG_SCRIPT, m.WATCHDOG_UAC_SCRIPT,
+                m.RDC_RECOVERY_SCRIPT, m.RUNNER_BOOTSTRAP_SCRIPT,
+                m.READBACK_SCRIPT, "pc24x7_host_policy.py")
+    for name in manifest:
+        shutil.copyfile(ROOT / "scripts" / name, src / name)
+    target = tmp_path / "releases" / ("a" * 40)
+    m._copy_release(src.parent, target)
+    staged = target / "scripts"
+    assert {path.name for path in staged.iterdir()} == set(manifest)
+    assert (staged / "pc24x7_host_policy.py").read_bytes() == (src / "pc24x7_host_policy.py").read_bytes()
 
 
-def test_missing_host_policy_refuses_incomplete_future_release(tmp_path: Path) -> None:
-    source = tmp_path / "source"
-    scripts = source / "scripts"
-    scripts.mkdir(parents=True)
-    for name in (
-        "desktop_admin_broker.py", "desktop_admin_broker_uac_launcher.py",
-        m.WATCHDOG_SCRIPT, m.WATCHDOG_UAC_SCRIPT,
-        m.RDC_RECOVERY_SCRIPT, m.RUNNER_BOOTSTRAP_SCRIPT, m.READBACK_SCRIPT,
-    ):
-        (scripts / name).write_bytes(b"# synthetic\n")
-    with pytest.raises(m.BrokerError, match="pc24x7_host_policy"):
-        m._copy_release(source, tmp_path / "release")
+def test_missing_manifest_dependency_fails_closed(tmp_path: Path) -> None:
+    src = tmp_path / "source" / "scripts"
+    src.mkdir(parents=True)
+    for name in ("desktop_admin_broker.py", "desktop_admin_broker_uac_launcher.py",
+                 m.WATCHDOG_SCRIPT, m.WATCHDOG_UAC_SCRIPT,
+                 m.RDC_RECOVERY_SCRIPT, m.RUNNER_BOOTSTRAP_SCRIPT, m.READBACK_SCRIPT):
+        (src / name).write_text("# fixture\n", encoding="utf-8")
+    with pytest.raises(m.BrokerError, match="script obrigatório ausente: pc24x7_host_policy.py"):
+        m._copy_release(src.parent, tmp_path / "release")
