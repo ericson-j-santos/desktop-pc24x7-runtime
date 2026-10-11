@@ -53,7 +53,7 @@ jobs:
     name: Read latest broker diagnostic
     needs: contract
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 11
     steps:
       - name: Checkout exact SHA
         uses: actions/checkout@v4
@@ -61,9 +61,57 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: One bounded wait for the fixed broker poll interval
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import time
+          target = datetime(2026, 10, 11, 12, 24, 30, tzinfo=timezone.utc)
+          wait = max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
+          if wait > 600:
+              raise SystemExit("broker_diagnostic_wait_outside_budget")
+          time.sleep(wait)
+          PY
+
       - name: Probe fixed ntfy readback
         run: |
           python scripts/desktop_admin_broker_readback_probe.py             --evidence-file artifacts/desktop-admin-broker-readback/evidence.json             --max-age-seconds 900             --timeout-seconds 10
+      - name: Correlate owner refresh request and validated target SHA
+        run: |
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          from datetime import datetime, timezone
+          data = json.loads(Path("artifacts/desktop-admin-broker-readback/evidence.json").read_text(encoding="utf-8"))
+          issued = datetime(2026, 10, 11, 12, 17, 14, tzinfo=timezone.utc)
+          try:
+              generated = datetime.fromisoformat(str(data.get("broker_generated_at") or "").replace("Z", "+00:00"))
+          except ValueError:
+              raise SystemExit("broker_diagnostic_timestamp_invalid")
+          result = data.get("result_summary")
+          if not (
+              type(data.get("comment_id")) is int
+              and data["comment_id"] == 6108930731
+              and data.get("host") == "DESKTOP-PDQK954"
+              and data.get("action") == "refresh-self"
+              and data.get("status") == "completed"
+              and data.get("trust") == "diagnostic_only"
+              and data.get("authoritative_success") is False
+              and data.get("production_touched") is False
+              and data.get("secrets_read") is False
+              and generated.tzinfo is not None and generated >= issued
+              and isinstance(result, dict)
+              and result.get("handler") == "refresh-self"
+              and result.get("target_source_sha") == "c9a05797e046b11027ad4beb037307665de6ad5e"
+              and result.get("refresh_state") == "updated"
+              and result.get("new_broker_started") is True
+          ):
+              raise SystemExit("broker_refresh_readback_blocked")
+          print(json.dumps({"correlated_comment_id": 6108930731,
+                            "sha_target": "c9a05797e046b11027ad4beb037307665de6ad5e",
+                            "outcome": "diagnostic_new_broker_started",
+                            "origin_authenticated": False}, sort_keys=True))
+          PY
 
       - name: Upload sanitized evidence
         if: always()
