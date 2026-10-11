@@ -853,8 +853,13 @@ def _status(metadata: dict[str, Any]) -> dict[str, Any]:
                 heartbeat = candidate
         except (OSError, json.JSONDecodeError):
             heartbeat = {}
+    try:
+        supervisor_receipt = _readback_module(metadata).supervisor_receipt_status()
+    except Exception:
+        supervisor_receipt = {"state": "unavailable"}
     return {
         "handler": "status",
+        "supervisor_receipt": supervisor_receipt,
         "broker_task": task_status(),
         "watchdog_state": watchdog_state,
         "broker_runtime": {
