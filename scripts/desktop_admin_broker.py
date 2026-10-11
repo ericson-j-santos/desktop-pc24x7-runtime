@@ -690,6 +690,47 @@ def _reconcile_activation_metadata_file(
     raise BrokerError("metadata_reconcile_contention")
 
 
+def _restore_previous_release_after_failed_start(
+    *,
+    metadata_path: Path,
+    runtime_root: Path,
+    python_executable: Path,
+    previous: dict[str, Any],
+    attempted: dict[str, Any],
+    activation_launcher: Path,
+) -> None:
+    """Roll back only our exact metadata write; never overwrite another writer.
+
+    This restores local metadata and the fixed activation launcher. It does NOT
+    claim that either broker process is alive or that a physical runner recovered.
+    """
+    handle = _acquire_metadata_lock(metadata_path)
+    try:
+        observed = load_installed_metadata(metadata_path)["metadata"]
+        if observed != attempted:
+            raise BrokerError("self_refresh_rollback_conflict")
+        previous_sha = validate_sha(str(previous["source_sha"]))
+        previous_release = (runtime_root / "releases" / previous_sha).resolve()
+        if (
+            Path(str(previous["release_root"])).resolve() != previous_release
+            or not (previous_release / "scripts" / "desktop_admin_broker.py").is_file()
+        ):
+            raise BrokerError("self_refresh_previous_release_unavailable")
+        restored_launcher = _write_uac_activation_launcher(
+            runtime_root,
+            release_root=previous_release,
+            python_executable=python_executable,
+            metadata_path=metadata_path,
+        )
+        if Path(restored_launcher).resolve() != Path(activation_launcher).resolve():
+            raise BrokerError("self_refresh_rollback_launcher_mismatch")
+        atomic_json(metadata_path, previous)
+        if load_installed_metadata(metadata_path)["metadata"] != previous:
+            raise BrokerError("self_refresh_rollback_readback_failed")
+    finally:
+        _release_broker_lock(handle)
+
+
 def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
     require_windows_desktop()
     current_sha = validate_sha(str(metadata["source_sha"]))
@@ -779,10 +820,23 @@ def _self_refresh(metadata: dict[str, Any]) -> dict[str, Any]:
         finally:
             _release_broker_lock(lock_handle)
 
-    start = start_user_broker(
-        python_executable=python_executable,
-        launcher=launcher,
-    )
+    try:
+        start = start_user_broker(
+            python_executable=python_executable,
+            launcher=launcher,
+        )
+        if start.get("startup_survived") is not True:
+            raise BrokerError("user_broker_start_not_confirmed")
+    except Exception:
+        _restore_previous_release_after_failed_start(
+            metadata_path=metadata_path,
+            runtime_root=runtime_root,
+            python_executable=python_executable,
+            previous=latest_metadata,
+            attempted=updated,
+            activation_launcher=activation_launcher,
+        )
+        raise
     return {
         "handler": "refresh-self",
         "refresh_state": "updated",
