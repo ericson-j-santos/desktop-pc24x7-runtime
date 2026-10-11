@@ -171,3 +171,47 @@ def test_probe_retains_self_refresh_summary() -> None:
     assert result["result_summary"]["target_source_sha"] == "b" * 40
     assert result["result_summary"]["new_broker_started"] is True
     assert "ignored_path" not in raw
+def test_status_summary_retains_fixed_runtime_and_legacy_marker() -> None:
+    reference = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    event = message_event(generated_at="2026-09-27T13:44:30+00:00")
+    payload = json.loads(event["message"])
+    payload["result"] = {
+        "handler": "status", "supervisor_receipt_state": "missing",
+        "supervisor_runtime_source_sha": "b" * 40,
+        "supervisor_legacy_uncorrelated_expired": True,
+        "raw_error": "PRIVATE_ERROR_DETAIL",
+    }
+    event["message"] = json.dumps(payload)
+    result = m.validate_message(event, max_age_seconds=900, reference_time=reference)
+    summary = result["result_summary"]
+    assert summary["supervisor_receipt_state"] == "missing"
+    assert summary["supervisor_runtime_source_sha"] == "b" * 40
+    assert summary["supervisor_legacy_uncorrelated_expired"] is True
+    assert "PRIVATE_ERROR_DETAIL" not in json.dumps(result)
+    assert result["trust"] == "diagnostic_only"
+    assert result["authoritative_success"] is False
+
+
+@pytest.mark.parametrize("state,sha,orphan", [
+    ("READY", "b" * 40, True),
+    ("missing", "PRIVATE_CREDENTIAL", 1),
+    ("missing", "B" * 40, "yes"),
+    ({"not": "string"}, "a" * 40, None),
+])
+def test_status_summary_rejects_invalid_external_fields(state, sha, orphan) -> None:
+    reference = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    event = message_event(generated_at="2026-09-27T13:44:30+00:00")
+    payload = json.loads(event["message"])
+    payload["result"] = {
+        "handler": "status", "supervisor_receipt_state": state,
+        "supervisor_runtime_source_sha": sha,
+        "supervisor_legacy_uncorrelated_expired": orphan,
+        "arbitrary_path": "PRIVATE_PATH",
+    }
+    event["message"] = json.dumps(payload)
+    result = m.validate_message(event, max_age_seconds=900, reference_time=reference)
+    safe = json.dumps(result)
+    assert "PRIVATE_PATH" not in safe
+    assert "PRIVATE_CREDENTIAL" not in safe
+    assert "READY" not in safe
+    assert result["authoritative_success"] is False

@@ -53,7 +53,7 @@ jobs:
     name: Read latest broker diagnostic
     needs: contract
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 11
     steps:
       - name: Checkout exact SHA
         uses: actions/checkout@v4
@@ -61,9 +61,63 @@ jobs:
           ref: ${{ github.sha }}
           persist-credentials: false
 
+      - name: One bounded wait for the fixed Desktop broker poll
+        run: |
+          python - <<'PY'
+          from datetime import datetime, timezone
+          import time
+          target = datetime(2026, 10, 11, 12, 31, 30, tzinfo=timezone.utc)
+          duration = max(0.0, (target - datetime.now(timezone.utc)).total_seconds())
+          if duration > 600:
+              raise SystemExit("legacy_receipt_probe_wait_limit")
+          time.sleep(duration)
+          PY
+
       - name: Probe fixed ntfy readback
         run: |
           python scripts/desktop_admin_broker_readback_probe.py             --evidence-file artifacts/desktop-admin-broker-readback/evidence.json             --max-age-seconds 900             --timeout-seconds 10
+      - name: Check exactly the new owner status and fixed receipt inventory
+        run: |
+          python - <<'PY'
+          import json
+          import re
+          from datetime import datetime, timezone
+          from pathlib import Path
+          content = json.loads(Path("artifacts/desktop-admin-broker-readback/evidence.json").read_text(encoding="utf-8"))
+          issued = datetime(2026, 10, 11, 12, 25, 11, tzinfo=timezone.utc)
+          stamp = datetime.fromisoformat(str(content.get("broker_generated_at") or "").replace("Z", "+00:00"))
+          result = content.get("result_summary")
+          if not (
+              type(content.get("comment_id")) is int
+              and content["comment_id"] == 6108994401
+              and content.get("action") == "status"
+              and content.get("host") == "DESKTOP-PDQK954"
+              and content.get("source_sha") == "c9a05797e046b11027ad4beb037307665de6ad5e"
+              and content.get("status") == "completed"
+              and content.get("trust") == "diagnostic_only"
+              and content.get("authoritative_success") is False
+              and content.get("production_touched") is False
+              and content.get("secrets_read") is False
+              and stamp.tzinfo is not None and stamp >= issued
+              and isinstance(result, dict)
+              and result.get("handler") == "status"
+              and result.get("supervisor_receipt_state") in
+                   {"unavailable", "missing", "pending", "applied", "failed", "ambiguous", "invalid"}
+              and isinstance(result.get("supervisor_runtime_source_sha"), str)
+              and re.fullmatch(r"[0-9a-f]{40}", result["supervisor_runtime_source_sha"])
+              and type(result.get("supervisor_legacy_uncorrelated_expired")) is bool
+          ):
+              raise SystemExit("desktop_supervisor_receipt_readback_unverified")
+          print(json.dumps({
+              "comment_id": 6108994401,
+              "broker_source_sha": "c9a05797e046b11027ad4beb037307665de6ad5e",
+              "supervisor_runtime_source_sha": result["supervisor_runtime_source_sha"],
+              "supervisor_receipt_state": result["supervisor_receipt_state"],
+              "legacy_uncorrelated_expired": result["supervisor_legacy_uncorrelated_expired"],
+              "origin_authenticated": False,
+              "authoritative_success": False,
+          }, sort_keys=True))
+          PY
 
       - name: Upload sanitized evidence
         if: always()

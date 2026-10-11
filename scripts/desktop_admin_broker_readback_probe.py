@@ -60,7 +60,20 @@ def _parse_iso(value: Any) -> datetime:
 def _safe_result(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         return {}
-    return {key: value[key] for key in SAFE_RESULT_KEYS if key in value}
+    sanitized = {key: value[key] for key in SAFE_RESULT_KEYS if key in value}
+    if value.get("handler") == "status":
+        state = value.get("supervisor_receipt_state")
+        accepted_states = {"unavailable", "missing", "pending", "applied",
+                           "failed", "ambiguous", "invalid"}
+        if type(state) is str and state in accepted_states:
+            sanitized["supervisor_receipt_state"] = state
+            sha = value.get("supervisor_runtime_source_sha")
+            if type(sha) is str and SHA_RE.fullmatch(sha):
+                sanitized["supervisor_runtime_source_sha"] = sha
+            legacy = value.get("supervisor_legacy_uncorrelated_expired")
+            if type(legacy) is bool:
+                sanitized["supervisor_legacy_uncorrelated_expired"] = legacy
+    return sanitized
 
 
 def validate_message(
