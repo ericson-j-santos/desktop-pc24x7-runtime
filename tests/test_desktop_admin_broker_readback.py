@@ -174,3 +174,90 @@ def test_self_refresh_summary_is_sanitized() -> None:
     assert payload["result"]["new_broker_started"] is True
     assert "ignored_path" not in raw
     assert "secret/path" not in raw
+
+
+def test_supervisor_receipt_classifies_fixed_historical_attempt(tmp_path: Path) -> None:
+    import time
+    control = tmp_path
+    sample = {
+        "schema_version": 1,
+        "target_host": m.EXPECTED_HOST,
+        "expected_sha": m._SUPERVISOR_SHA,
+        "correlation_id": m._SUPERVISOR_CORRELATION,
+        "failed_at_epoch": time.time() - 20,
+        "error_type": "ValueError",
+        "error": "stable bootstrap unavailable",
+    }
+    (control / "refresh-runtime.failed.1791500000.json").write_text(json.dumps(sample), encoding="utf-8")
+    assert m._status_of_fixed_receipt(control) == {"state": "failed", "error_code": "bootstrap_unavailable"}
+    assert m._status_of_fixed_receipt(control) == {"state": "failed", "error_code": "bootstrap_unavailable"}
+
+
+def test_supervisor_receipt_omits_private_error_data(tmp_path: Path) -> None:
+    import time
+    sample = {"schema_version": 1, "target_host": m.EXPECTED_HOST, "expected_sha": m._SUPERVISOR_SHA,
+              "correlation_id": m._SUPERVISOR_CORRELATION, "failed_at_epoch": time.time() - 20,
+              "error_type": "RuntimeError", "error": "private path and credential string",
+              "additional": {"authorization": "private example"}}
+    (tmp_path / "refresh-runtime.failed.1791500000.json").write_text(json.dumps(sample))
+    output = m._status_of_fixed_receipt(tmp_path)
+    assert output == {"state": "failed", "error_code": "unknown"}
+    assert "private" not in json.dumps(output)
+
+
+@pytest.mark.parametrize("bad", [
+    {"target_host": "other"}, {"expected_sha": "f" * 40},
+    {"schema_version": 9}, {"failed_at_epoch": True}, {"failed_at_epoch": -1},
+])
+def test_supervisor_receipt_fails_closed_on_wrong_identity(tmp_path: Path, bad: dict) -> None:
+    import time
+    sample = {"schema_version": 1, "target_host": m.EXPECTED_HOST, "expected_sha": m._SUPERVISOR_SHA,
+              "correlation_id": m._SUPERVISOR_CORRELATION, "failed_at_epoch": time.time() - 20,
+              "error": "stable bootstrap unavailable"}
+    sample.update(bad)
+    (tmp_path / "refresh-runtime.failed.1791500000.json").write_text(json.dumps(sample))
+    assert m._status_of_fixed_receipt(tmp_path) == {"state": "invalid"}
+
+
+def test_supervisor_receipt_rejects_ambiguous_results(tmp_path: Path) -> None:
+    import time
+    base = {"schema_version": 1, "target_host": m.EXPECTED_HOST, "expected_sha": m._SUPERVISOR_SHA,
+            "correlation_id": m._SUPERVISOR_CORRELATION}
+    failure = dict(base, failed_at_epoch=time.time() - 20, error="stable bootstrap unavailable")
+    applied = dict(base, applied_at_epoch=time.time() - 20, source_sha=m._SUPERVISOR_SHA, readback_verified=True)
+    (tmp_path / "refresh-runtime.failed.1791500000.json").write_text(json.dumps(failure))
+    (tmp_path / "refresh-runtime.applied.json").write_text(json.dumps(applied))
+    assert m._status_of_fixed_receipt(tmp_path) == {"state": "ambiguous"}
+
+
+def test_supervisor_receipt_missing_or_unavailable_is_never_ready(tmp_path: Path) -> None:
+    assert m._status_of_fixed_receipt(tmp_path) == {"state": "missing"}
+    assert m._status_of_fixed_receipt(tmp_path / "unavailable") == {"state": "unavailable"}
+
+
+def test_supervisor_receipt_blocks_invalid_file(tmp_path: Path) -> None:
+    (tmp_path / "refresh-runtime.failed.1791500000.json").write_bytes(b"x" * 9000)
+    assert m._status_of_fixed_receipt(tmp_path) == {"state": "invalid"}
+
+
+def test_public_readback_whitelists_only_static_receipt_status() -> None:
+    accepted = {"comment_id": 12345, "action": "status", "status": "completed",
+                "outcome": {"result": {"handler": "status",
+                           "supervisor_receipt": {"state": "failed", "error_code": "unknown",
+                                   "path": "private-file", "raw_error": "private-detail"}}}}
+    payload = m.build_payload(accepted=accepted, source_sha="a" * 40, host=m.EXPECTED_HOST)
+    summary = payload["result"]
+    assert summary["supervisor_receipt_state"] == "failed"
+    assert summary["supervisor_receipt_error_code"] == "unknown"
+    assert "private" not in json.dumps(payload)
+    assert payload["authoritative_success"] is False
+    assert payload["trust"] == "diagnostic_only"
+
+
+def test_public_readback_blocks_forged_status_and_error_code() -> None:
+    accepted = {"comment_id": 12345, "action": "status", "status": "completed",
+                "outcome": {"result": {"handler": "status",
+                           "supervisor_receipt": {"state": "ready", "error_code": "anything"}}}}
+    output = m.build_payload(accepted=accepted, source_sha="a" * 40, host=m.EXPECTED_HOST)
+    assert "supervisor_receipt_state" not in output["result"]
+    assert output["authoritative_success"] is False
