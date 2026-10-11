@@ -30,3 +30,23 @@ do runner do Desktop, Noteri, RDC, GUI ou shell remoto.
   funcional;
 - ausência/falha do readback permanece estado bloqueado e não dispara retry de
   recovery automaticamente.
+
+## One-shot de verificação após atualização controlada — READBACK-REFRESH-20261011-C6105145352
+
+O broker instalado recebeu um pedido exato `/desktop-runtime admin refresh-self`
+na issue #2, comentário `6105145352`, após a CI pós-merge validar a revisão
+`1e0b5b3e17d89910f05824b5b4174d6bc34ccaa0` do runtime. A publicação
+deste documento em uma branch isolada apenas dispara a sonda HTTPS hospedada
+já existente. Não cria novos comandos de manutenção, não altera o supervisor,
+não lê segredos nem exige runner self-hosted.
+
+**Aceite estrito do diagnóstico**: conferir `action=refresh-self`,
+`comment_id=6105145352`, host e janela, e verificar que
+`target_source_sha` corresponda ao SHA acima e que o broker tenha executado
+o início da nova instância. O canal ntfy permanece `diagnostic_only`, sem
+assinatura da origem e sem autoridade para recuperar ou declarar READY.
+
+**Se ausente, divergente, falho ou antigo**: registrar bloqueio. Não repetir o
+refresh nem usar o retorno público como prova de implantação. Somente o
+readback autenticado pelo plano de controle e uma verificação independente
+na máquina autorizada podem concluir a instalação.
