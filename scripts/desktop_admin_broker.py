@@ -29,7 +29,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pc24x7_host_policy import authorized_host
 
 EXPECTED_HOST = "DESKTOP-PDQK954"  # compatibility default; authorization is host-policy driven
 EXPECTED_ACTOR = "ericson-j-santos"
@@ -94,10 +93,10 @@ def require_windows_desktop() -> str:
     if os.name != "nt":
         raise BrokerError("Windows obrigatório")
     host = socket.gethostname()
-    try:
-        authorized_host(host)
-    except ValueError as exc:
-        raise BrokerError(str(exc)) from None
+    # The pinned Desktop remains authorized even when a legacy updater staged
+    # a release without pc24x7_host_policy.py; every other host fails closed.
+    if host.casefold() != EXPECTED_HOST.casefold():
+        raise BrokerError("host não autorizado: " + host)
     return host
 
 
@@ -1464,6 +1463,7 @@ def _copy_release(source_root: Path, release_root: Path) -> None:
         RDC_RECOVERY_SCRIPT,
         RUNNER_BOOTSTRAP_SCRIPT,
         READBACK_SCRIPT,
+        "pc24x7_host_policy.py",  # consumed by runner and watchdog
     ):
         source = source_root / "scripts" / name
         if not source.is_file():
