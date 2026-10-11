@@ -20,7 +20,7 @@ def fixture_root(tmp_path):
     return tmp_path
 
 
-def make_receipt(root, *, kind="failed", correlation=None):
+def make_receipt(root, *, kind="failed", correlation=None, **changes):
     control = root / "data" / "control"
     identity = correlation or module.CORRELATION_ID
     record = {"schema_version": 1, "correlation_id": identity,
@@ -36,6 +36,7 @@ def make_receipt(root, *, kind="failed", correlation=None):
     else:
         name = "refresh-runtime.request.json"
         record.update({"version": 1, "requested_at_epoch": time.time() - 20})
+    record.update(changes)
     (control / name).write_text(json.dumps(record), encoding="utf-8")
     return name
 
@@ -71,10 +72,6 @@ def test_sensitive_exception_message_is_omitted(fixture_root):
 
 
 def test_wrong_target_fails_closed(fixture_root):
-    name = make_receipt(fixture_root)
-    path = fixture_root / "data" / "control" / name
-    record = json.loads(path.read_text())
-    record["expected_sha"] = "f" * 40
-    path.write_text(json.dumps(record))
+    make_receipt(fixture_root, expected_sha="f" * 40)
     with pytest.raises(module.ReceiptError, match="receipt_identity_mismatch"):
         module._collect(fixture_root)
