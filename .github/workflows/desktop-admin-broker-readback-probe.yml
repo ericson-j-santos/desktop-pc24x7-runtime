@@ -67,7 +67,7 @@ jobs:
           from datetime import datetime, timezone
           import time
 
-          deadline = datetime(2026, 10, 11, 4, 9, 40, tzinfo=timezone.utc)
+          deadline = datetime(2026, 10, 11, 4, 16, 50, tzinfo=timezone.utc)
           delay = max(0.0, (deadline - datetime.now(timezone.utc)).total_seconds())
           if delay > 390:
               raise SystemExit("status_readback_wait_exceeded")
@@ -85,12 +85,12 @@ jobs:
           from datetime import datetime, timezone
 
           payload = json.loads(Path("artifacts/desktop-admin-broker-readback/evidence.json").read_text(encoding="utf-8"))
-          issued = datetime(2026, 10, 11, 4, 4, 20, tzinfo=timezone.utc)
+          issued = datetime(2026, 10, 11, 4, 11, 34, tzinfo=timezone.utc)
           stamp = datetime.fromisoformat(payload.get("broker_generated_at", "").replace("Z", "+00:00"))
           if not (
               type(payload.get("comment_id")) is int
-              and payload["comment_id"] == 6105266603
-              and payload.get("action") == "status"
+              and payload["comment_id"] == 6105318992
+              and payload.get("action") == "refresh-self"
               and payload.get("host") == "DESKTOP-PDQK954"
               and payload.get("ok") is True
               and payload.get("authoritative_success") is False
@@ -99,8 +99,16 @@ jobs:
               and stamp >= issued
           ):
               raise SystemExit("status_readback_comment_mismatch")
-          print(json.dumps({"verified_comment": 6105266603,
-                            "action": "status", "diagnostic_only": True,
+          if not (
+              payload.get("status") == "completed"
+              and isinstance(payload.get("result_summary"), dict)
+              and payload["result_summary"].get("refresh_state") == "updated"
+              and payload["result_summary"].get("new_broker_started") is True
+              and payload["result_summary"].get("target_source_sha") == "4ef7177a4d322492b06afc302c8daad850658bfe"
+          ):
+              raise SystemExit("broker_refresh_failed_or_mismatched_target")
+          print(json.dumps({"verified_comment": 6105318992,
+                            "action": "refresh-self", "diagnostic_only": True,
                             "origin_authenticated": False}))
           PY
 
