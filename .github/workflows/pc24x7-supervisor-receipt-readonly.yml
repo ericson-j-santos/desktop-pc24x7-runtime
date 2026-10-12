@@ -131,6 +131,13 @@ jobs:
                   $safe = ([string]$event.stdout) | ConvertFrom-Json
                   if ($safe.result -eq 'SUPERVISOR_RECEIPT_BLOCKED') {
                     $evidence.blocker_code = 'collector_returned_blocked'
+                    $codes = @('matching_receipt_missing', 'receipt_identity_mismatch',
+                      'ambiguous_receipts', 'host_not_authorized', 'receipt_invalid',
+                      'receipt_file_missing', 'receipt_access_denied',
+                      'receipt_io_or_format_error')
+                    if ([string]$safe.blocker_code -in $codes) {
+                      $evidence.collector_code = [string]$safe.blocker_code
+                    }
                   }
                 } catch {}
               }
