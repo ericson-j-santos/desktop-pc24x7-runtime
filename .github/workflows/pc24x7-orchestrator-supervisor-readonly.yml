@@ -6,7 +6,9 @@ on:
       - fix/desktop-orchestrator-supervisor-readonly-20261012
     paths:
       - scripts/orchestrator_supervisor_readonly_probe.py
+      - scripts/orchestrator_supervisor_failure_inventory.py
       - tests/test_orchestrator_supervisor_readonly_probe.py
+      - tests/test_orchestrator_supervisor_failure_inventory.py
       - .github/workflows/pc24x7-orchestrator-supervisor-readonly.yml
 
 permissions:
@@ -33,7 +35,7 @@ jobs:
         run: |
           python -m py_compile scripts/orchestrator_supervisor_readonly_probe.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s tests -p test_orchestrator_supervisor_readonly_probe.py -v
+          python -m unittest discover -s tests -p test_orchestrator_supervisor_*.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   physical_readback:
