@@ -132,16 +132,22 @@ def _read_journal(home: Path) -> dict[str, Any] | None:
         raise CutoverFailure("JOURNAL_INVALID") from None
     if (not isinstance(obj, dict) or obj.get("schema") != 1
         or obj.get("old_sha") != OLD_SHA or obj.get("target_sha") != TARGET_SHA
-        or obj.get("state") not in ("SWITCHING", "VERIFYING", "COMMITTED")):
+        or obj.get("state") not in ("SWITCHING", "VERIFYING", "COMMITTED")
+        or not isinstance(obj.get("old_digest"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", obj["old_digest"])
+        or not isinstance(obj.get("target_digest"), str)
+        or not re.fullmatch(r"[0-9a-f]{64}", obj["target_digest"])):
         raise CutoverFailure("JOURNAL_INVALID")
     return obj
 
 
-def _write_journal(home: Path, state: str, *, correlation_id: str) -> None:
+def _write_journal(home: Path, state: str, *, correlation_id: str,
+                   old_digest: str, target_digest: str) -> None:
     payload = {
         "schema": 1, "state": state,
         "old_sha": OLD_SHA, "target_sha": TARGET_SHA,
         "correlation_id": correlation_id,
+        "old_digest": old_digest, "target_digest": target_digest,
     }
     temp = home / ".transaction-journal.tmp"
     if temp.exists() or temp.is_symlink():
@@ -186,7 +192,9 @@ def simulate_transaction(
         if state["state"] != "COMMITTED":
             raise CutoverFailure("INCOMPLETE_TRANSACTION_REQUIRES_RECOVERY")
         if (_read_sha(current) == TARGET_SHA and _read_sha(previous) == OLD_SHA
-            and state.get("correlation_id") == correlation_id):
+            and state.get("correlation_id") == correlation_id
+            and _digest(current) == state["target_digest"]
+            and _digest(previous) == state["old_digest"]):
             return {
                 "result": "SIMULATED_REPLAY", "replayed": True,
                 "service_restarted": False, "recovery_allowed": False,
@@ -204,7 +212,8 @@ def simulate_transaction(
         raise CutoverFailure("TRANSACTION_LOCKED") from None
     os.close(fd)
     try:
-        _write_journal(home, "SWITCHING", correlation_id=correlation_id)
+        _write_journal(home, "SWITCHING", correlation_id=correlation_id,
+                       old_digest=old_digest, target_digest=target_digest)
         try:
             current.rename(previous)
             if inject_at == "after_old_move":
@@ -212,7 +221,8 @@ def simulate_transaction(
             incoming.rename(current)
             if inject_at == "after_new_move":
                 raise CutoverFailure("INJECTED_SWITCH_FAILURE")
-            _write_journal(home, "VERIFYING", correlation_id=correlation_id)
+            _write_journal(home, "VERIFYING", correlation_id=correlation_id,
+                           old_digest=old_digest, target_digest=target_digest)
             outcome = health(TARGET_SHA)
             if (inject_at == "health_failed"
                 or outcome.get("ready") is not True
@@ -230,7 +240,8 @@ def simulate_transaction(
                 raise CutoverFailure("ROLLBACK_NOT_VERIFIED", restored=False) from None
             # Deliberately keep failed journal to prevent unsafe automatic retry.
             raise CutoverFailure("SIMULATED_ROLLBACK_VERIFIED", restored=True) from None
-        _write_journal(home, "COMMITTED", correlation_id=correlation_id)
+        _write_journal(home, "COMMITTED", correlation_id=correlation_id,
+                       old_digest=old_digest, target_digest=target_digest)
         return {
             "result": "SIMULATED_SWITCH_COMMITTED",
             "old_digest": old_digest,
