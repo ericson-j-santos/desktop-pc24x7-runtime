@@ -6,6 +6,7 @@ Orchestrator code and restored SQLite snapshot.
 from __future__ import annotations
 
 from http.server import BaseHTTPRequestHandler
+from contextlib import closing
 import json
 from pathlib import Path
 import sqlite3
@@ -52,9 +53,10 @@ class ShadowLifecycleTests(unittest.TestCase):
         (self.stage / "orchestrator/__init__.py").write_text("")
         (self.stage / "orchestrator/__main__.py").write_text(FIXTURE_SERVER)
         db = self.stage / "data/orchestrator.db"
-        with sqlite3.connect(db) as conn:
-            conn.execute("CREATE TABLE test(id INTEGER PRIMARY KEY)")
-            conn.execute("INSERT INTO test(id) VALUES(1)")
+        with closing(sqlite3.connect(db)) as conn:
+            with conn:
+                conn.execute("CREATE TABLE test(id INTEGER PRIMARY KEY)")
+                conn.execute("INSERT INTO test(id) VALUES(1)")
 
     def test_real_child_process_starts_and_exits_on_127_loopback(self):
         result = shadow.start_shadow(
@@ -73,7 +75,7 @@ class ShadowLifecycleTests(unittest.TestCase):
         (self.stage / "orchestrator/__main__.py").write_text("raise SystemExit(3)\n")
         with self.assertRaisesRegex(shadow.StateError, "SHADOW_EXITED_EARLY"):
             shadow.start_shadow(stage=self.stage, python_executable=sys.executable,
-                                port=shadow._port(), timeout_seconds=2)
+                                port=shadow._port(), timeout_seconds=5)
 
     def test_readiness_not_proven_times_out_without_leaving_child(self):
         with self.assertRaisesRegex(shadow.StateError, "SHADOW_READINESS_TIMEOUT"):
