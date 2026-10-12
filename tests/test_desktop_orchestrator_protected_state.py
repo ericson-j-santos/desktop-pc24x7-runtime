@@ -136,7 +136,7 @@ class ProtectedStateTest(unittest.TestCase):
             real.symlink_to(link)
         except OSError:
             self.skipTest("Symlink creation restricted on runner")
-        with self.assertRaisesRegex(m.StateError, "FIXED_PATH_REDIRECTED"):
+        with self.assertRaisesRegex(ValueError, "FIXED_PATH_REDIRECTED"):
             self.execute()
 
     def test_tampering_with_encrypted_snapshot_is_detected_on_replay(self):
