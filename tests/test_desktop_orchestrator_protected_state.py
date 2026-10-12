@@ -15,13 +15,14 @@ import desktop_orchestrator_protected_state as m
 
 
 def toy_protect(data: bytes) -> bytes:
-    return b"TEST_ENVELOPE:" + data
+    # Synthetic obfuscation for isolated logic tests only; production uses DPAPI.
+    return b"TEST_ENVELOPE:" + bytes(value ^ 0xA5 for value in data)
 
 
 def toy_unprotect(data: bytes) -> bytes:
     if not data.startswith(b"TEST_ENVELOPE:"):
         raise m.StateError("SNAPSHOT_UNPROTECT_FAILED")
-    return data[len(b"TEST_ENVELOPE:"):]
+    return bytes(value ^ 0xA5 for value in data[len(b"TEST_ENVELOPE:"):])
 
 
 class ProtectedStateTest(unittest.TestCase):
