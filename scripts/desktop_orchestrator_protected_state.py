@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+from contextlib import closing
 from ctypes import wintypes
 import hashlib
 import json
@@ -161,14 +162,11 @@ def _sqlite_consistent_bytes(db: Path) -> bytes:
         raise StateError("SQLITE_SIZE_INVALID")
     try:
         uri = "file:" + quote(db.as_posix(), safe="/:") + "?mode=ro"
-        with sqlite3.connect(uri, uri=True, timeout=5.0) as source:
-            target = sqlite3.connect(":memory:")
-            try:
+        with closing(sqlite3.connect(uri, uri=True, timeout=5.0)) as source:
+            with closing(sqlite3.connect(":memory:")) as target:
                 source.execute("PRAGMA busy_timeout=5000")
                 source.backup(target, pages=128, sleep=0.02)
                 serialized = bytearray(target.serialize())
-            finally:
-                target.close()
         if (len(serialized) > MAX_SQLITE_BYTES or
             len(serialized) < 100 or bytes(serialized[:16]) != b"SQLite format 3\x00"):
             raise StateError("SQLITE_IMAGE_INVALID")
