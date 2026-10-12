@@ -90,6 +90,9 @@ jobs:
           $evidence = [ordered]@{
             schema_version = 1
             result = 'FIXED_RECEIPT_BLOCKED'
+            phase = 'not_started'
+            blocker_code = 'not_checked'
+            gateway_exit_code = $null
             host = 'DESKTOP-PDQK954'
             source_sha = $env:GITHUB_SHA
             runner_name = $env:RUNNER_NAME
@@ -102,20 +105,39 @@ jobs:
             origin_cryptographically_attested = $false
           }
           try {
+            $evidence.phase = 'runner_identity'
+            $evidence.blocker_code = 'runner_identity_invalid'
             if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'RUNNER_IDENTITY_MISMATCH' }
             $gatewayArgs = @('--policy', $policy, '--correlation-id', "fixed-receipt-$env:GITHUB_RUN_ID",
               'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
               '--risk', '1', '--timeout', '30', '--expected-head', $env:GITHUB_SHA,
               '--', 'python', 'scripts/supervisor_refresh_receipt_probe.py',
               '--confirm', 'READ-RECORDED-SUPERVISOR-REFRESH')
+            $evidence.phase = 'gateway_invocation'
+            $evidence.blocker_code = 'gateway_response_missing'
             $raw = @(& $python $gateway @gatewayArgs)
             $exitCode = $LASTEXITCODE
             if (-not $raw) { throw 'GATEWAY_RESPONSE_MISSING' }
             $event = @($raw)[-1] | ConvertFrom-Json
+            $evidence.phase = 'gateway_response'
+            if ($null -ne $event.gateway_exit_code) {
+              $evidence.gateway_exit_code = [int]$event.gateway_exit_code
+            }
             if (($exitCode -ne 0) -or ($event.gateway_exit_code -ne 0) -or
                 ($event.state_changed -ne $false) -or ($event.result -ne 'ok')) {
+              $evidence.blocker_code = 'gateway_or_collector_failed'
+              if ($event.stdout) {
+                try {
+                  $safe = ([string]$event.stdout) | ConvertFrom-Json
+                  if ($safe.result -eq 'SUPERVISOR_RECEIPT_BLOCKED') {
+                    $evidence.blocker_code = 'collector_returned_blocked'
+                  }
+                } catch {}
+              }
               throw 'FIXED_RECEIPT_NOT_OBSERVED'
             }
+            $evidence.phase = 'collector_contract'
+            $evidence.blocker_code = 'collector_contract_invalid'
             $receipt = ([string]$event.stdout) | ConvertFrom-Json
             if (($receipt.result -ne 'SUPERVISOR_RECEIPT_OBSERVED') -or
                 ($receipt.host -ne 'DESKTOP-PDQK954') -or
@@ -128,6 +150,8 @@ jobs:
               throw 'FIXED_RECEIPT_CONTRACT_INVALID'
             }
             $evidence.result = 'FIXED_RECEIPT_OBSERVED'
+            $evidence.phase = 'completed'
+            $evidence.blocker_code = 'none'
             $evidence.receipt_state = [string]$receipt.receipt_state
             $evidence.receipt_sha256 = [string]$receipt.receipt_sha256
             $evidence.receipt_at_epoch = $receipt.receipt_at_epoch
