@@ -1,0 +1,148 @@
+name: Desktop Orchestrator Isolated Rollback Verification
+
+on:
+  push:
+    branches:
+      - fix/desktop-orchestrator-isolated-rollback-20261012
+    paths:
+      - scripts/desktop_orchestrator_isolated_rollback.py
+      - tests/test_desktop_orchestrator_isolated_rollback.py
+      - .github/workflows/desktop-orchestrator-isolated-rollback.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-orchestrator-isolated-rollback-20261012
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Windows isolated restore positive, negative and replay
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify syntax and filesystem restore tests
+        shell: powershell
+        run: |
+          python -m py_compile scripts/desktop_orchestrator_isolated_rollback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_desktop_orchestrator_isolated_rollback.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  physical_backup:
+    name: Copy fixed code backup and verify isolated restore on Desktop
+    needs: contract
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 9
+    steps:
+      - name: Checkout immutable Desktop source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Checkout exact canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: f6ccb143a581e28650e9b640226f9ef671d469f2
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap exclusive worktree and validated runtime identity
+        shell: powershell
+        id: session
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'FIXED_RUNNER_INVALID' }
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'isolated-rollback',
+            '--correlation-id', "isolated-rollback-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/desktop-orchestrator-isolated-rollback-20261012',
+            '--require-runner-version-preflight')
+          $raw = @(& $python $launcher @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or $session.state_validated -ne $true -or
+              $session.head -ne $env:GITHUB_SHA -or $session.host -ne 'DESKTOP-PDQK954' -or
+              $session.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_INVALID' }
+          "target_path=$($session.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Backup only code and validate restore in isolated scratch
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $folder = Join-Path $env:TARGET_PATH 'artifacts\isolated-rollback'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $file = Join-Path $folder 'evidence.json'
+          $correlation = "isolated-rollback-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $result = [ordered]@{
+            schema_version = 1
+            result = 'ISOLATED_ROLLBACK_BLOCKED'
+            host = 'DESKTOP-PDQK954'
+            repository = 'ericson-j-santos/desktop-pc24x7-runtime'
+            source_sha = $env:GITHUB_SHA
+            correlation_id = $correlation
+            blocker_code = 'gateway_unavailable'
+            current_service_rollback_verified = $false
+            recovery_allowed = $false
+            production_touched = $false
+            secrets_read = $false
+          }
+          try {
+            $args = @('--policy', $policy, '--correlation-id', $correlation,
+              'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+              '--risk', '2', '--timeout', '180', '--expected-head', $env:GITHUB_SHA,
+              '--', 'python', 'scripts/desktop_orchestrator_isolated_rollback.py',
+              '--confirm', 'VERIFY-DESKTOP-ORCHESTRATOR-ISOLATED-ROLLBACK-DEV')
+            $raw = @(& $python $gateway @args)
+            $gatewayExit = $LASTEXITCODE
+            if (-not $raw) { throw 'GATEWAY_RESPONSE_MISSING' }
+            $event = @($raw)[-1] | ConvertFrom-Json
+            if (-not $event.stdout) { throw 'SNAPSHOT_PROBE_OUTPUT_MISSING' }
+            $observed = ([string]$event.stdout) | ConvertFrom-Json
+            if ($observed.host -ne 'DESKTOP-PDQK954' -or
+                $observed.source_sha -ne $env:GITHUB_SHA -or
+                $observed.recovery_allowed -ne $false -or
+                $observed.secrets_read -ne $false -or
+                $observed.production_touched -ne $false) { throw 'PROBE_IDENTITY_INVALID' }
+            $result = $observed
+            $result | Add-Member -MemberType NoteProperty -Name repository -Value 'ericson-j-santos/desktop-pc24x7-runtime'
+            $result | Add-Member -MemberType NoteProperty -Name correlation_id -Value $correlation
+            if ($gatewayExit -ne 0 -or $event.gateway_exit_code -ne 0 -or
+                $event.result -ne 'ok' -or
+                $observed.result -ne 'ISOLATED_ROLLBACK_VERIFIED' -or
+                $observed.isolated_restore_verified -ne $true -or
+                $observed.current_service_rollback_verified -ne $false) {
+              throw 'ISOLATED_RESTORE_NOT_VERIFIED'
+            }
+            Write-Host 'ISOLATED_RESTORE_VERIFIED'
+          } catch {
+            Write-Host 'ISOLATED_RESTORE_BLOCKED'
+          } finally {
+            $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $file -Encoding UTF8
+          }
+          if ($result.result -ne 'ISOLATED_ROLLBACK_VERIFIED') { throw 'ISOLATED_RESTORE_BLOCKED' }
+      - name: Publish sanitized backup validation only
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-orchestrator-isolated-rollback-evidence
+          path: ${{ steps.session.outputs.target_path }}/artifacts/isolated-rollback/evidence.json
+          if-no-files-found: warn
+          retention-days: 7
