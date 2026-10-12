@@ -21,7 +21,10 @@ import tempfile
 import time
 from typing import Any
 
-from scripts import desktop_orchestrator_cutover_model as transaction
+if __package__:
+    from . import desktop_orchestrator_cutover_model as transaction
+else:
+    import desktop_orchestrator_cutover_model as transaction
 
 CONFIRM = "VERIFY-ISOLATED-ORCHESTRATOR-SERVICE-CYCLE"
 REPO = "ericson-j-santos/desktop-pc24x7-runtime"
