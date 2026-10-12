@@ -87,3 +87,32 @@ def test_workflow_uses_one_explicit_sync_ref_argument():
     assert '$syncRef = "origin/$env:GITHUB_REF_NAME"' in workflow
     assert "'--sync-ref', $syncRef," in workflow
     assert "'origin/' + $env:GITHUB_REF_NAME" not in workflow
+
+
+def test_legacy_watchdog_source_order_and_runner_layout(tmp_path):
+    sha="1"*40
+    root=tmp_path/"DesktopControlPlaneWatchdog"
+    release=root/"releases"/sha/"scripts"
+    release.mkdir(parents=True)
+    runner=root/"fake_runner";(runner/"bin").mkdir(parents=True)
+    for part in (".runner","run.cmd","bin/Runner.Listener.exe"):
+        p=runner/part;p.write_text("test",encoding="utf-8")
+    python=root/"python.exe";python.write_text("test",encoding="utf-8")
+    (root/"metadata.json").write_text(__import__("json").dumps({
+        "source_sha":sha,"host":probe.EXPECTED_HOST,
+        "release_root":str(release.parent),"runner_home":str(runner),
+        "python_executable":str(python)}),encoding="utf-8")
+    src=release/"desktop_control_plane_watchdog.py"
+    src.write_text("def cycle(meta):\n  a = recover_rdc(meta)\n  b = start_runner(meta)\n\ndef other():\n  pass\n",encoding="utf-8")
+    a=probe.legacy_watchdog_readback(root)
+    assert a["installed_recovery_order"]=="rdc_first" and not a["runner_recovery_independent"]
+    src.write_text("def cycle(meta):\n  b = start_runner(meta)\n  a = recover_rdc(meta)\n\ndef other():\n  pass\n",encoding="utf-8")
+    b=probe.legacy_watchdog_readback(root)
+    assert b["installed_recovery_order"]=="runner_first" and b["runner_recovery_independent"]
+
+def test_legacy_watchdog_invalid_metadata_fails_closed(tmp_path):
+    root=tmp_path/"DesktopControlPlaneWatchdog";root.mkdir()
+    (root/"metadata.json").write_text('{"source_sha":"bogus"}',encoding="utf-8")
+    result=probe.legacy_watchdog_readback(root)
+    assert not result["runner_recovery_independent"]
+    assert result["state"]=="invalid_or_inaccessible"

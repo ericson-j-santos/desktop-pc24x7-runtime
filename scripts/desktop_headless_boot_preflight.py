@@ -161,6 +161,65 @@ def classify(tasks: dict, services: dict) -> dict:
                   else "HEADLESS_RECOVERY_NOT_PROVEN",
     }
 
+
+def legacy_watchdog_readback(root: Path | None = None) -> dict:
+    """Validate installed legacy watchdog's frozen runner recovery chain only."""
+    if root is None:
+        profile = os.environ.get("LOCALAPPDATA")
+        if not profile:
+            return {"state": "profile_unavailable", "runner_recovery_independent": False}
+        root = Path(profile) / "ReqSys" / "DesktopControlPlaneWatchdog"
+    metadata_path = root / "metadata.json"
+    if not metadata_path.is_file() or metadata_path.stat().st_size > 65536:
+        return {"state": "metadata_missing_or_invalid", "runner_recovery_independent": False}
+    try:
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        sha = str(metadata.get("source_sha", "")).casefold()
+        if not SHA.fullmatch(sha) or metadata.get("host", "").casefold() != EXPECTED_HOST.casefold():
+            raise Blocked("metadata_identity_invalid")
+        release = Path(metadata["release_root"]).resolve()
+        if release != (root / "releases" / sha).resolve():
+            raise Blocked("release_location_invalid")
+        runner = Path(metadata["runner_home"]).resolve()
+        python = Path(metadata["python_executable"])
+        candidates = (runner / ".runner", runner / "run.cmd", runner / "bin" / "Runner.Listener.exe")
+        layout_ok = all(p.is_file() for p in candidates)
+        code = release / "scripts" / "desktop_control_plane_watchdog.py"
+        if not code.is_file() or code.stat().st_size > 400000:
+            raise Blocked("installed_code_missing")
+        script = code.read_text(encoding="utf-8")
+        start = script.find("def cycle(")
+        if start < 0:
+            raise Blocked("installed_cycle_missing")
+        end = script.find("\ndef ", start + len("def cycle("))
+        snippet = script[start:end if end > 0 else len(script)]
+        runner_at = snippet.find("start_runner(")
+        rdc_at = snippet.find("recover_rdc(")
+        order = ("runner_first" if runner_at >= 0 and rdc_at >= 0 and runner_at < rdc_at
+                 else "rdc_first" if rdc_at >= 0 and runner_at >= 0 else "unknown")
+        state_path = root / "state.json"
+        state_recent = False
+        last_ok = None
+        if state_path.is_file() and state_path.stat().st_size <= 65536:
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            last_ok = state.get("ok") is True
+            when = datetime.fromisoformat(str(state.get("generated_at", "")).replace("Z", "+00:00"))
+            if when.tzinfo is not None:
+                seconds = (datetime.now(timezone.utc) - when.astimezone(timezone.utc)).total_seconds()
+                state_recent = 0 <= seconds <= 300
+        return {
+            "state": "observed",
+            "release_valid": True,
+            "python_exists": python.is_file(),
+            "runner_layout_present": layout_ok,
+            "installed_recovery_order": order,
+            "watchdog_last_state_fresh": state_recent,
+            "watchdog_last_cycle_ok": last_ok,
+            "runner_recovery_independent": bool(layout_ok and python.is_file() and order == "runner_first"),
+        }
+    except (OSError, KeyError, ValueError, TypeError, json.JSONDecodeError, Blocked):
+        return {"state": "invalid_or_inaccessible", "runner_recovery_independent": False}
+
 def audit() -> dict:
     if (os.name != "nt" or socket.gethostname().casefold() != EXPECTED_HOST.casefold()
             or os.environ.get("GITHUB_ACTIONS") != "true"
@@ -173,6 +232,7 @@ def audit() -> dict:
         raise Blocked("github_execution_identity_invalid")
     snapshots = {key: querytask(name) for key, name in TASKS.items()}
     services = runner_services()
+    legacy = legacy_watchdog_readback()
     decision = classify(snapshots, services)
     try:
         import ctypes.wintypes as wt
@@ -189,6 +249,7 @@ def audit() -> dict:
         "uptime_seconds": uptime_seconds,
         "task_readbacks": snapshots,
         "runner_service_readback": services,
+        "legacy_watchdog_readback": legacy,
         **decision,
         "environment": "local/dev",
         "secrets_read": False, "task_actions_read": False, "mutation_performed": False,
