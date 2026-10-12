@@ -65,7 +65,7 @@ jobs:
           persist-credentials: false
       - name: Bootstrap exact-session Command Gateway
         id: session
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         run: |
           $ErrorActionPreference = 'Stop'
           $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
@@ -86,7 +86,7 @@ jobs:
           "session_id=$($session.session_id)" >> $env:GITHUB_OUTPUT
           'SESSION_LAUNCH_OK'
       - name: Read ChatGPT Startup indicators via Gateway
-        shell: pwsh
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
           SESSION_ID: ${{ steps.session.outputs.session_id }}

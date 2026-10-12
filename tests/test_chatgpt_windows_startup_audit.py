@@ -75,3 +75,11 @@ def test_no_accidental_destructive_apis():
     calls = [ast.unparse(node.func) for node in ast.walk(root) if isinstance(node, ast.Call)]
     assert all(not any(forbidden in call for forbidden in (
         "os.system", "winreg.SetValue", "winreg.Delete", "Popen", "shutdown")) for call in calls)
+
+
+def test_physical_windows_workflow_uses_native_powershell():
+    workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
+                "chatgpt-windows-startup-readonly.yml").read_text(encoding="utf-8")
+    physical = workflow.split("  physical-read:", 1)[1]
+    assert physical.count("shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}") == 2
+    assert "shell: pwsh" not in physical
