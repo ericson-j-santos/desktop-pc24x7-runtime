@@ -1,0 +1,148 @@
+name: Desktop Orchestrator Supervisor Read-only Preflight
+
+on:
+  push:
+    branches:
+      - fix/desktop-orchestrator-supervisor-readonly-20261012
+    paths:
+      - scripts/orchestrator_supervisor_readonly_probe.py
+      - tests/test_orchestrator_supervisor_readonly_probe.py
+      - .github/workflows/pc24x7-orchestrator-supervisor-readonly.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-orchestrator-supervisor-readonly-20261012
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Check read-only probe and negative controls
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile and exercise read-only probe
+        shell: powershell
+        run: |
+          python -m py_compile scripts/orchestrator_supervisor_readonly_probe.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_orchestrator_supervisor_readonly_probe.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  physical_readback:
+    needs: contract
+    name: Inspect fixed supervisor version on dedicated Desktop runner
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 7
+    steps:
+      - name: Checkout fixed Desktop source revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Checkout approved session rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: f6ccb143a581e28650e9b640226f9ef671d469f2
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap fixed identity, head, and session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'WRONG_RUNNER' }
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'orch-supervisor-readonly',
+            '--correlation-id', "orch-supervisor-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/desktop-orchestrator-supervisor-readonly-20261012',
+            '--require-runner-version-preflight')
+          $raw = @(& $python $launcher @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or $session.state_validated -ne $true -or
+              $session.head -ne $env:GITHUB_SHA -or $session.host -ne 'DESKTOP-PDQK954' -or
+              $session.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_INVALID' }
+          "target_path=$($session.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Read only fixed version, status, pending marker and local worker
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $folder = Join-Path $env:TARGET_PATH 'artifacts\orch-supervisor-readonly'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $file = Join-Path $folder 'evidence.json'
+          $correlation = "orch-supervisor-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $result = [ordered]@{
+            schema_version = 1
+            result = 'SUPERVISOR_READBACK_BLOCKED'
+            host = 'DESKTOP-PDQK954'
+            source_sha = $env:GITHUB_SHA
+            correlation_id = $correlation
+            blocker_code = 'gateway_unavailable'
+            read_only = $true
+            recovery_allowed = $false
+            origin_cryptographically_attested = $false
+            production_touched = $false
+            secrets_read = $false
+          }
+          try {
+            $args = @('--policy', $policy, '--correlation-id', $correlation,
+              'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+              '--risk', '1', '--timeout', '45', '--expected-head', $env:GITHUB_SHA,
+              '--', 'python', 'scripts/orchestrator_supervisor_readonly_probe.py',
+              '--confirm', 'READ-DESKTOP-ORCHESTRATOR-RUNTIME-DEV',
+              '--correlation-id', $correlation)
+            $raw = @(& $python $gateway @args)
+            $gatewayExit = $LASTEXITCODE
+            if (-not $raw) { throw 'GATEWAY_EMPTY' }
+            $event = @($raw)[-1] | ConvertFrom-Json
+            if (-not $event.stdout) { throw 'GATEWAY_STDOUT_MISSING' }
+            $observation = ([string]$event.stdout) | ConvertFrom-Json
+            if ($observation.host -ne 'DESKTOP-PDQK954' -or
+                $observation.repository -ne 'ericson-j-santos/desktop-pc24x7-runtime' -or
+                $observation.source_sha -ne $env:GITHUB_SHA -or
+                $observation.correlation_id -ne $correlation -or
+                $observation.read_only -ne $true -or
+                $observation.recovery_allowed -ne $false -or
+                $observation.production_touched -ne $false -or
+                $observation.secrets_read -ne $false) { throw 'PROBE_IDENTITY_INVALID' }
+            $result = $observation
+            if ($gatewayExit -ne 0 -or $event.gateway_exit_code -ne 0 -or
+                $event.result -ne 'ok' -or $event.state_changed -ne $false -or
+                $observation.result -ne 'SUPERVISOR_READBACK_OBSERVED') {
+              throw 'READBACK_NOT_READY'
+            }
+            Write-Host 'SUPERVISOR_READBACK_OBSERVED'
+          } catch {
+            Write-Host 'SUPERVISOR_READBACK_BLOCKED'
+          } finally {
+            $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $file -Encoding utf8
+          }
+          if ($result.result -ne 'SUPERVISOR_READBACK_OBSERVED') { throw 'SUPERVISOR_READBACK_BLOCKED' }
+      - name: Preserve only sanitized read-only evidence
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-orchestrator-supervisor-readonly
+          path: ${{ steps.session.outputs.target_path }}/artifacts/orch-supervisor-readonly/evidence.json
+          if-no-files-found: warn
+          retention-days: 7
