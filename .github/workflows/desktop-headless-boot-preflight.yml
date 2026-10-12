@@ -1,0 +1,126 @@
+name: Desktop Unattended Boot Readiness - Read Only
+
+on:
+  push:
+    branches:
+      - fix/desktop-unattended-boot-readiness-20261012
+    paths:
+      - scripts/desktop_headless_boot_preflight.py
+      - tests/test_desktop_headless_boot_preflight.py
+      - .github/workflows/desktop-headless-boot-preflight.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-headless-boot-readiness-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contracts:
+    name: Test headless-boot fixed-scope contracts
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Test compile and fail-closed cases
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check pytest==8.4.2
+          if ($LASTEXITCODE -ne 0) { throw 'DEPENDENCY_FAILED' }
+          python -m py_compile scripts/desktop_headless_boot_preflight.py tests/test_desktop_headless_boot_preflight.py
+          if ($LASTEXITCODE -ne 0) { throw 'PYTHON_COMPILE_FAILED' }
+          python -m pytest tests/test_desktop_headless_boot_preflight.py -q
+          if ($LASTEXITCODE -ne 0) { throw 'CONTRACTS_FAILED' }
+
+  physical:
+    needs: contracts
+    name: Desktop physical read-only boot readiness
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 7
+    env:
+      RULES_SHA: f6ccb143a581e28650e9b640226f9ef671d469f2
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Checkout exact operational rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Start governed session at exact SHA
+        id: session
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $launcher = Join-Path $rules 'scripts\session_launcher.py'
+          $policy = Join-Path $rules 'config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'unattended-boot-preflight',
+            '--correlation-id', "desktop-preboot-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-head', '${{ github.sha }}', '--sync-ref', 'origin/' + $env:GITHUB_REF_NAME,
+            '--require-runner-version-preflight')
+          $raw = & python $launcher @args
+          if ($LASTEXITCODE -ne 0) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or $session.state_validated -ne $true -or
+              $session.head -ne '${{ github.sha }}' -or $session.runner_version_preflight.ok -ne $true) {
+            throw 'SESSION_VALIDATION_BLOCKED'
+          }
+          "target_path=$($session.target_path)" >> $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" >> $env:GITHUB_OUTPUT
+          'SESSION_LAUNCH_OK'
+      - name: Inspect fixed boot tasks and runner-service startup
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy,
+            '--correlation-id', "desktop-preboot-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '90', '--expected-head', '${{ github.sha }}',
+            '--', 'python', 'scripts/desktop_headless_boot_preflight.py',
+            '--confirm', 'AUDIT-DESKTOP-HEADLESS-BOOT-ONLY')
+          $raw = @(& python $gateway @args)
+          $gatewayExit = $LASTEXITCODE
+          if (-not $raw) { throw 'PREFLIGHT_GATEWAY_EMPTY' }
+          $record = @($raw)[-1] | ConvertFrom-Json
+          if ([string]$record.stdout -notmatch '^HEADLESS_PREFLIGHT=') { throw 'PREFLIGHT_EVIDENCE_MISSING' }
+          $evidence = ([string]$record.stdout).Substring('HEADLESS_PREFLIGHT='.Length) | ConvertFrom-Json
+          if ($gatewayExit -ne 0 -or $record.gateway_exit_code -ne 0 -or
+              $evidence.schema -ne 'desktop-headless-readiness/v1' -or
+              $evidence.source_sha -ne '${{ github.sha }}' -or
+              $evidence.host -ne 'DESKTOP-PDQK954' -or
+              $evidence.reboot_performed -ne $false -or
+              $evidence.mutation_performed -ne $false -or $evidence.secrets_read -ne $false) {
+            throw 'PREFLIGHT_IDENTITY_OR_SAFETY_INVALID'
+          }
+          "Pre-boot observation: $($evidence.result)"
+          "Startup tasks verified: $($evidence.headless_entrypoints_observed)"
+          "Reboot: NOT PERFORMED"
+          # An E2E after reboot is always a separate gate. Do not authorize reboot here.
+      - name: Upload sanitized fixed boot inventory
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-headless-readiness-${{ github.run_id }}
+          path: ${{ runner.temp }}/desktop-headless-readiness.json
+          if-no-files-found: warn
+          retention-days: 14
