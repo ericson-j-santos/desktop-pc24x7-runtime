@@ -223,9 +223,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.parse_args(argv)
     try:
         result = collect_current_host()
-    except (ReceiptError, OSError, ValueError):
-        # Do not reflect exception/path/receipt contents in stdout or stderr.
+    except (ReceiptError, OSError, ValueError) as failure:
+        # Only closed-set categories leave the host; no raw exception messages.
+        if isinstance(failure, ReceiptError):
+            reason = failure.args[0] if len(failure.args) == 1 else None
+            code = reason if reason in {
+                "matching_receipt_missing",
+                "receipt_identity_mismatch",
+                "ambiguous_receipts",
+                "host_not_authorized",
+            } else "receipt_invalid"
+        elif isinstance(failure, FileNotFoundError):
+            code = "receipt_file_missing"
+        elif isinstance(failure, PermissionError):
+            code = "receipt_access_denied"
+        else:
+            code = "receipt_io_or_format_error"
         result = {"result": "SUPERVISOR_RECEIPT_BLOCKED", "read_only": True,
+                  "blocker_code": code,
                   "trust": "local_collection_unattested", "authoritative_success": False,
                   "recovery_allowed": False}
         print(json.dumps(result, sort_keys=True))
