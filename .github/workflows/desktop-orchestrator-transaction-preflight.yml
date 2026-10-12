@@ -7,6 +7,8 @@ on:
     paths:
       - scripts/desktop_orchestrator_cutover_model.py
       - tests/test_desktop_orchestrator_cutover_model.py
+      - scripts/desktop_orchestrator_service_cycle.py
+      - tests/test_desktop_orchestrator_service_cycle.py
       - docs/orchestrator-transaction-cutover-gates.md
       - .github/workflows/desktop-orchestrator-transaction-preflight.yml
 
@@ -35,6 +37,8 @@ jobs:
           python -m py_compile scripts/desktop_orchestrator_cutover_model.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_desktop_orchestrator_cutover_model.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_desktop_orchestrator_service_cycle.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   read_only_physical:
@@ -80,6 +84,93 @@ jobs:
               $session.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_INVALID' }
           "target_path=$($session.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
           "session_id=$($session.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Rehearse only disposable local process cycles through Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $folder = Join-Path $env:TARGET_PATH 'artifacts\orchestrator-transaction-readonly'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $file = Join-Path $folder 'process-cycle.json'
+          $e = [ordered]@{
+            schema_version = 1
+            result = 'DISPOSABLE_CYCLE_BLOCKED'
+            host = 'DESKTOP-PDQK954'
+            repository = 'ericson-j-santos/desktop-pc24x7-runtime'
+            source_sha = $env:GITHUB_SHA
+            scenarios_passed = @()
+            all_disposable_children_stopped = $false
+            live_supervisor_restarted = $false
+            service_rollback_verified = $false
+            recovery_allowed = $false
+            production_touched = $false
+            secrets_read = $false
+          }
+          try {
+            $scenarios = @('success', 'startup_exit', 'readiness_timeout', 'crash_after_health',
+                           'wrong_process_identity', 'postcondition_failure')
+            foreach ($scenario in $scenarios) {
+              $correlation = "orchestrator-cycle-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT-$scenario"
+              $args = @('--policy', $policy, '--correlation-id', $correlation,
+                'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+                '--risk', '2', '--timeout', '85', '--expected-head', $env:GITHUB_SHA,
+                '--', 'python', 'scripts/desktop_orchestrator_service_cycle.py',
+                '--confirm', 'VERIFY-ISOLATED-ORCHESTRATOR-SERVICE-CYCLE',
+                '--scenario', $scenario)
+              $raw = @(& $python $gateway @args)
+              $gatewayExit = $LASTEXITCODE
+              if (-not $raw) { throw 'CYCLE_GATEWAY_EMPTY' }
+              $event = @($raw)[-1] | ConvertFrom-Json
+              if (-not $event.stdout) { throw 'CYCLE_STDOUT_MISSING' }
+              $observed = ([string]$event.stdout) | ConvertFrom-Json
+              $expectedResult = if ($scenario -eq 'success') {
+                'ISOLATED_PROCESS_SWITCH_AND_REPLAY_VERIFIED'
+              } else {
+                'ISOLATED_PROCESS_ROLLBACK_VERIFIED'
+              }
+              if ($gatewayExit -ne 0 -or $event.gateway_exit_code -ne 0 -or
+                  $event.result -ne 'ok' -or $event.state_changed -ne $false -or
+                  $observed.result -ne $expectedResult -or
+                  $observed.host -ne 'DESKTOP-PDQK954' -or
+                  $observed.repository -ne 'ericson-j-santos/desktop-pc24x7-runtime' -or
+                  $observed.source_sha -ne $env:GITHUB_SHA -or
+                  $observed.scenario -ne $scenario -or
+                  $observed.old_process_verified -ne $true -or
+                  $observed.all_owned_processes_terminated -ne $true -or
+                  $observed.only_disposable_service_instances -ne $true -or
+                  $observed.simulated_worker_identity_only -ne $true -or
+                  $observed.live_supervisor_restarted -ne $false -or
+                  $observed.service_rollback_verified -ne $false -or
+                  $observed.recovery_allowed -ne $false -or
+                  $observed.production_touched -ne $false -or
+                  $observed.secrets_read -ne $false) { throw 'PROCESS_CYCLE_FAILED' }
+              if ($scenario -eq 'success' -and
+                  ($observed.replay_verified -ne $true -or
+                   $observed.target_process_verified -ne $true)) {
+                throw 'CYCLE_REPLAY_OR_TARGET_INVALID'
+              }
+              if ($scenario -ne 'success' -and $observed.old_process_recovered -ne $true) {
+                throw 'ISOLATED_OLD_PROCESS_NOT_RECOVERED'
+              }
+              $e.scenarios_passed += $scenario
+            }
+            if ($e.scenarios_passed.Count -ne 6) { throw 'SCENARIO_COUNT_INVALID' }
+            $e.result = 'DISPOSABLE_SERVICE_CYCLE_VERIFIED'
+            $e.all_disposable_children_stopped = $true
+            Write-Host 'DISPOSABLE_SERVICE_CYCLE_VERIFIED'
+          } catch {
+            Write-Host 'DISPOSABLE_CYCLE_BLOCKED'
+          } finally {
+            $e | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -LiteralPath $file
+          }
+          if ($e.result -ne 'DISPOSABLE_SERVICE_CYCLE_VERIFIED') {
+            throw 'DISPOSABLE_CYCLE_BLOCKED'
+          }
       - name: Read only installed revision and worker state through Gateway
         shell: powershell
         env:
@@ -148,6 +239,6 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-orchestrator-cutover-readonly-preflight
-          path: ${{ steps.session.outputs.target_path }}/artifacts/orchestrator-transaction-readonly/result.json
+          path: ${{ steps.session.outputs.target_path }}/artifacts/orchestrator-transaction-readonly/
           if-no-files-found: warn
           retention-days: 7
