@@ -1,0 +1,153 @@
+name: Desktop Orchestrator Transaction Read-only Preflight
+
+on:
+  push:
+    branches:
+      - fix/orchestrator-cutover-transaction-gates-20261012
+    paths:
+      - scripts/desktop_orchestrator_cutover_model.py
+      - tests/test_desktop_orchestrator_cutover_model.py
+      - docs/orchestrator-transaction-cutover-gates.md
+      - .github/workflows/desktop-orchestrator-transaction-preflight.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-orchestrator-transaction-preflight-20261012
+  cancel-in-progress: false
+
+jobs:
+  model_contract:
+    name: Positive, negative and idempotent disposable cutover model
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile and run model positive/negative tests
+        shell: powershell
+        run: |
+          python -m py_compile scripts/desktop_orchestrator_cutover_model.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_desktop_orchestrator_cutover_model.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  read_only_physical:
+    name: Confirm still healthy old Orchestrator, no recovery
+    needs: model_contract
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 7
+    steps:
+      - name: Checkout exact transaction model revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Checkout exact canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: f6ccb143a581e28650e9b640226f9ef671d469f2
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap validated source identity and unique session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'WRONG_RUNNER' }
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'orch-cutover-readonly',
+            '--correlation-id', "orch-cutover-readonly-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/orchestrator-cutover-transaction-gates-20261012',
+            '--require-runner-version-preflight')
+          $raw = @(& $python $launcher @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or
+              $session.state_validated -ne $true -or
+              $session.head -ne $env:GITHUB_SHA -or
+              $session.host -ne 'DESKTOP-PDQK954' -or
+              $session.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_INVALID' }
+          "target_path=$($session.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Read only installed revision and worker state through Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $folder = Join-Path $env:TARGET_PATH 'artifacts\orchestrator-transaction-readonly'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $out = Join-Path $folder 'result.json'
+          $correlation = "orch-cutover-readonly-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $e = [ordered]@{
+            schema_version = 1
+            result = 'CUTOVER_PREFLIGHT_BLOCKED'
+            host = 'DESKTOP-PDQK954'
+            source_sha = $env:GITHUB_SHA
+            correlation_id = $correlation
+            expected_installed_sha = '33f312d0ac4c25d8420d4589fa0e8bc21d943ebd'
+            live_old_revision_verified = $false
+            recovery_allowed = $false
+            service_restarted = $false
+            production_touched = $false
+            secrets_read = $false
+          }
+          try {
+            $args = @('--policy', $policy, '--correlation-id', $correlation,
+              'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+              '--risk', '1', '--timeout', '45', '--expected-head', $env:GITHUB_SHA,
+              '--', 'python', 'scripts/orchestrator_supervisor_readonly_probe.py',
+              '--confirm', 'READ-DESKTOP-ORCHESTRATOR-RUNTIME-DEV',
+              '--correlation-id', $correlation)
+            $raw = @(& $python $gateway @args)
+            $exit = $LASTEXITCODE
+            if (-not $raw) { throw 'GATEWAY_EMPTY' }
+            $event = @($raw)[-1] | ConvertFrom-Json
+            if (-not $event.stdout) { throw 'GATEWAY_STDOUT_MISSING' }
+            $observed = ([string]$event.stdout) | ConvertFrom-Json
+            if ($exit -ne 0 -or $event.gateway_exit_code -ne 0 -or
+                $event.result -ne 'ok' -or $event.state_changed -ne $false -or
+                $observed.result -ne 'SUPERVISOR_READBACK_OBSERVED' -or
+                $observed.host -ne 'DESKTOP-PDQK954' -or
+                $observed.source_sha -ne $env:GITHUB_SHA -or
+                $observed.correlation_id -ne $correlation -or
+                $observed.installed_source_sha -ne $e.expected_installed_sha -or
+                $observed.live_state_consistent -ne $true -or
+                $observed.file_worker_sha_match -ne $true -or
+                $observed.pending_refresh_present -ne $false -or
+                $observed.worker.runtime_source_sha -ne $e.expected_installed_sha -or
+                $observed.recovery_allowed -ne $false -or
+                $observed.production_touched -ne $false -or
+                $observed.secrets_read -ne $false) { throw 'CUTOVER_PREFLIGHT_MISMATCH' }
+            $e.result = 'OLD_ORCHESTRATOR_HEALTHY_READONLY'
+            $e.live_old_revision_verified = $true
+            Write-Host 'OLD_ORCHESTRATOR_HEALTHY_READONLY'
+          } catch {
+            Write-Host 'CUTOVER_PREFLIGHT_BLOCKED'
+          } finally {
+            $e | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 -LiteralPath $out
+          }
+          if ($e.result -ne 'OLD_ORCHESTRATOR_HEALTHY_READONLY') { throw 'CUTOVER_PREFLIGHT_BLOCKED' }
+      - name: Upload only sanitized read-only preflight
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-orchestrator-cutover-readonly-preflight
+          path: ${{ steps.session.outputs.target_path }}/artifacts/orchestrator-transaction-readonly/result.json
+          if-no-files-found: warn
+          retention-days: 7
