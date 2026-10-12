@@ -23,8 +23,8 @@ from typing import Any, Callable
 from urllib.parse import quote
 
 from desktop_orchestrator_isolated_rollback import (
-    CODE_DIRS, EXPECTED_INSTALLED_SHA, HOST, REPO, RUNNER, RUNTIME_ROOT,
-    _guard, _manifest_digest, code_manifest,
+    EXPECTED_INSTALLED_SHA, HOST, REPO, RUNNER, RUNTIME_ROOT,
+    _guard, code_manifest,
 )
 
 CONFIRM = "VERIFY-DESKTOP-ORCHESTRATOR-PROTECTED-STATE-DEV"
@@ -246,7 +246,7 @@ def _code_snapshot_ok(root: Path, backup_root: Path) -> bool:
     if (manifest.get("runtime_sha") != EXPECTED_INSTALLED_SHA or
         not _same_manifest(manifest, code_manifest(root)) or
         not _same_manifest(manifest, code_manifest(existing)) or
-        code_digest(manifest) != code_digest(code_manifest(root))):
+        code_digest(code_manifest(root)) != "b6ac3457718c1d6ed1ff4b09967b527254105ab75be5dd23031ca5fa5377f62f"):
         raise StateError("CODE_BACKUP_MISMATCH")
     return True
 
