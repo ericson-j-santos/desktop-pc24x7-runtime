@@ -259,6 +259,76 @@ def _console_username_matches_runner() -> bool | None:
         return None
 
 
+
+class _ProcessEntry(ctypes.Structure):
+    """Win32 PROCESSENTRY32W; only the executable name and session are consulted."""
+    _fields_ = [
+        ("dwSize", wintypes.DWORD),
+        ("cntUsage", wintypes.DWORD),
+        ("th32ProcessID", wintypes.DWORD),
+        ("th32DefaultHeapID", ctypes.c_size_t),
+        ("th32ModuleID", wintypes.DWORD),
+        ("cntThreads", wintypes.DWORD),
+        ("th32ParentProcessID", wintypes.DWORD),
+        ("pcPriClassBase", wintypes.LONG),
+        ("dwFlags", wintypes.DWORD),
+        ("szExeFile", ctypes.c_wchar * 260),
+    ]
+
+
+def _running_candidate_processes() -> tuple[list[dict], bool]:
+    """Read process names and console session only; no handles to other processes."""
+    if os.name != "nt":
+        return [], False
+    try:
+        kernel = ctypes.windll.kernel32
+        snapshot_fn = kernel.CreateToolhelp32Snapshot
+        snapshot_fn.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        snapshot_fn.restype = wintypes.HANDLE
+        # TH32CS_SNAPPROCESS. A read-only snapshot; not a process open.
+        snapshot = snapshot_fn(0x00000002, 0)
+        if not snapshot or snapshot == ctypes.c_void_p(-1).value:
+            return [], False
+        first = kernel.Process32FirstW
+        next_process = kernel.Process32NextW
+        first.argtypes = next_process.argtypes = [
+            wintypes.HANDLE, ctypes.POINTER(_ProcessEntry)]
+        first.restype = next_process.restype = wintypes.BOOL
+        process_session = kernel.ProcessIdToSessionId
+        process_session.argtypes = [wintypes.DWORD, ctypes.POINTER(wintypes.DWORD)]
+        process_session.restype = wintypes.BOOL
+        kernel.WTSGetActiveConsoleSessionId.restype = wintypes.DWORD
+        kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel.CloseHandle.restype = wintypes.BOOL
+        console = int(kernel.WTSGetActiveConsoleSessionId())
+        try:
+            item = _ProcessEntry()
+            item.dwSize = ctypes.sizeof(_ProcessEntry)
+            if not first(snapshot, ctypes.byref(item)):
+                return [], False
+            found, seen = set(), 0
+            while True:
+                seen += 1
+                if seen > 16384:
+                    return [], False
+                kind = candidate_kind(item.szExeFile)
+                if kind:
+                    process_sid = wintypes.DWORD()
+                    same = (console != 0xFFFFFFFF and
+                            bool(process_session(item.th32ProcessID,
+                                                 ctypes.byref(process_sid))) and
+                            process_sid.value == console)
+                    found.add((kind, bool(same)))
+                if not next_process(snapshot, ctypes.byref(item)):
+                    break
+            return ([{"kind": kind, "in_active_console": same,
+                      "image_identity_verified": False}
+                     for kind, same in sorted(found)]), True
+        finally:
+            kernel.CloseHandle(snapshot)
+    except (AttributeError, OSError, ValueError):
+        return [], False
+
 def collect() -> dict:
     if os.name != "nt" or socket.gethostname().casefold() != HOST.casefold():
         raise AuditBlocked("host_or_platform_not_authorized")
@@ -323,6 +393,7 @@ def collect() -> dict:
     checked.extend(folder_checks)
     session_id, console_id, console_match = _session_context()
     same_user = _console_username_matches_runner()
+    running_processes, processes_enumerated = _running_candidate_processes()
     payload = {
         "schema_version": "chatgpt-startup-audit/v1", "environment": "local/dev",
         "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -333,6 +404,8 @@ def collect() -> dict:
         "runner_matches_active_console": console_match,
         "runner_account_matches_console_username": same_user,
         "installation_candidates": installed + filesystem,
+        "running_candidate_processes": running_processes,
+        "process_snapshot_valid": processes_enumerated,
         "candidate_name_families": sorted({item["kind"] for item in installed + filesystem}),
         "auto_admin_logon_flag": _autologon(winreg),
         "package_current_user": _package_present(winreg),

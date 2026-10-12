@@ -137,3 +137,19 @@ def test_directory_scan_does_not_follow_external_symlinks(tmp_path, monkeypatch)
     monkeypatch.setenv("LOCALAPPDATA", str(local))
     matches, _ = module._directory_candidates()
     assert all(match["kind"] != "chatgpt" for match in matches)
+
+
+def test_process_audit_is_readonly_for_non_windows():
+    if module.os.name != "nt":
+        assert module._running_candidate_processes() == ([], False)
+
+
+def test_process_struct_does_not_request_binary_path_or_security_token():
+    fields = [field[0] for field in module._ProcessEntry._fields_]
+    assert "szExeFile" in fields
+    assert "path" not in fields and "token" not in fields
+    audit = ast.parse(p.read_text(encoding="utf-8"))
+    calls = [ast.unparse(node.func) for node in ast.walk(audit) if isinstance(node, ast.Call)]
+    assert "kernel.OpenProcess" not in calls
+    assert "kernel.TerminateProcess" not in calls
+    assert "winreg.SetValueEx" not in calls
