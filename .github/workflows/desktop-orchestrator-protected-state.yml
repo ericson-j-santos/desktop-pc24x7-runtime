@@ -1,0 +1,241 @@
+name: Desktop Protected Orchestrator State Recovery Gate
+
+on:
+  push:
+    branches:
+      - fix/desktop-orchestrator-protected-state-20261012
+    paths:
+      - scripts/desktop_orchestrator_protected_state.py
+      - scripts/desktop_orchestrator_shadow_service.py
+      - tests/test_desktop_orchestrator_protected_state.py
+      - tests/test_desktop_orchestrator_shadow_service.py
+      - .github/workflows/desktop-orchestrator-protected-state.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-protected-orchestrator-state-20261012
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Windows DPAPI and SQLite backup negative controls
+    runs-on: windows-latest
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Compile and run native Windows DPAPI tests
+        shell: powershell
+        run: |
+          python -m py_compile scripts/desktop_orchestrator_protected_state.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_desktop_orchestrator_protected_state.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_desktop_orchestrator_shadow_service.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  physical_state:
+    name: Protected local config and SQLite backup on dedicated Desktop
+    needs: contract
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 9
+    steps:
+      - name: Checkout immutable source SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Checkout approved session rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: f6ccb143a581e28650e9b640226f9ef671d469f2
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap exclusive validated session and runner version
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'DEDICATED_RUNNER_REQUIRED' }
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'protected-orchestrator-state',
+            '--correlation-id', "protected-state-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/desktop-orchestrator-protected-state-20261012',
+            '--require-runner-version-preflight')
+          $raw = @(& $python $launcher @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or $session.state_validated -ne $true -or
+              $session.head -ne $env:GITHUB_SHA -or $session.host -ne 'DESKTOP-PDQK954' -or
+              $session.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_INVALID' }
+          "target_path=$($session.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Backup protected local state and independently replay readback
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $folder = Join-Path $env:TARGET_PATH 'artifacts\protected-state'
+          New-Item -ItemType Directory -Force -Path $folder | Out-Null
+          $output = Join-Path $folder 'result.json'
+          $evidence = [ordered]@{
+            schema = 1
+            result = 'PROTECTED_STATE_RESTORE_BLOCKED'
+            host = 'DESKTOP-PDQK954'
+            repository = 'ericson-j-santos/desktop-pc24x7-runtime'
+            source_sha = $env:GITHUB_SHA
+            correlation_id = "protected-state-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+            encrypted_state_verified = $false
+            replay_verified = $false
+            raw_content_uploaded = $false
+            recovery_allowed = $false
+            production_touched = $false
+            service_rollback_verified = $false
+          }
+          try {
+            $manifests = @()
+            for ($index = 1; $index -le 2; $index++) {
+              $correlation = "$($evidence.correlation_id)-$index"
+              $args = @('--policy', $policy, '--correlation-id', $correlation,
+                'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+                '--risk', '2', '--timeout', '170', '--expected-head', $env:GITHUB_SHA,
+                '--', 'python', 'scripts/desktop_orchestrator_protected_state.py',
+                '--confirm', 'VERIFY-DESKTOP-ORCHESTRATOR-PROTECTED-STATE-DEV')
+              $raw = @(& $python $gateway @args)
+              $exit = $LASTEXITCODE
+              if (-not $raw) { throw 'GATEWAY_RESPONSE_MISSING' }
+              $response = @($raw)[-1] | ConvertFrom-Json
+              if (-not $response.stdout) { throw 'GATEWAY_STDOUT_MISSING' }
+              $observation = ([string]$response.stdout) | ConvertFrom-Json
+              if ($exit -ne 0 -or $response.gateway_exit_code -ne 0 -or
+                  $response.result -ne 'ok' -or $response.state_changed -ne $false -or
+                  $observation.host -ne 'DESKTOP-PDQK954' -or
+                  $observation.repository -ne 'ericson-j-santos/desktop-pc24x7-runtime' -or
+                  $observation.source_sha -ne $env:GITHUB_SHA -or
+                  $observation.result -ne 'PROTECTED_STATE_RESTORE_VERIFIED' -or
+                  $observation.user_scoped_dpapi -ne $true -or
+                  $observation.sqlite_restore_in_memory -ne $true -or
+                  $observation.config_items_verified -ne 4 -or
+                  $observation.recovery_allowed -ne $false -or
+                  $observation.raw_content_uploaded -ne $false -or
+                  $observation.service_rollback_verified -ne $false) { throw 'STATE_VERIFICATION_INVALID' }
+              if (($index -eq 1 -and $observation.replayed -ne $false) -or
+                  ($index -eq 2 -and $observation.replayed -ne $true)) {
+                throw 'IDEMPOTENT_REPLAY_INVALID'
+              }
+              $manifests += [string]$observation.snapshot_manifest_sha256
+              if ($index -eq 1) {
+                $evidence.encrypted_state_verified = $true
+                $evidence.config_items_verified = 4
+                $evidence.sqlite_table_count = [int]$observation.sqlite_table_count
+              } else {
+                $evidence.replay_verified = $true
+              }
+            }
+            if ($manifests.Count -ne 2 -or $manifests[0] -ne $manifests[1]) {
+              throw 'MANIFEST_REPLAY_MISMATCH'
+            }
+            $evidence.result = 'PROTECTED_STATE_RESTORE_VERIFIED'
+            $evidence.snapshot_manifest_sha256 = $manifests[0]
+            Write-Host 'PROTECTED_STATE_RESTORE_VERIFIED'
+          } catch {
+            Write-Host 'PROTECTED_STATE_RESTORE_BLOCKED'
+          } finally {
+            $evidence | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -LiteralPath $output
+          }
+          if ($evidence.result -ne 'PROTECTED_STATE_RESTORE_VERIFIED') {
+            throw 'PROTECTED_STATE_RESTORE_BLOCKED'
+          }
+      - name: Start and stop only a recovered loopback shadow service
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $folder = Join-Path $env:TARGET_PATH 'artifacts\protected-state'
+          $file = Join-Path $folder 'shadow-result.json'
+          $correlation = "orchestrator-shadow-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $result = [ordered]@{
+            schema = 1
+            result = 'SHADOW_ORCHESTRATOR_BLOCKED'
+            host = 'DESKTOP-PDQK954'
+            repository = 'ericson-j-santos/desktop-pc24x7-runtime'
+            source_sha = $env:GITHUB_SHA
+            correlation_id = $correlation
+            recovery_allowed = $false
+            service_rollback_verified = $false
+            raw_content_uploaded = $false
+            production_touched = $false
+          }
+          try {
+            $args = @('--policy', $policy, '--correlation-id', $correlation,
+              'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+              '--risk', '2', '--timeout', '170', '--expected-head', $env:GITHUB_SHA,
+              '--', 'python', 'scripts/desktop_orchestrator_shadow_service.py',
+              '--confirm', 'VERIFY-DESKTOP-ORCHESTRATOR-SHADOW-SERVICE-DEV')
+            $raw = @(& $python $gateway @args)
+            $exit = $LASTEXITCODE
+            if (-not $raw) { throw 'SHADOW_GATEWAY_RESPONSE_MISSING' }
+            $event = @($raw)[-1] | ConvertFrom-Json
+            if (-not $event.stdout) { throw 'SHADOW_GATEWAY_STDOUT_MISSING' }
+            $observation = ([string]$event.stdout) | ConvertFrom-Json
+            if ($exit -ne 0 -or $event.gateway_exit_code -ne 0 -or
+                $event.result -ne 'ok' -or $event.state_changed -ne $false -or
+                $observation.result -ne 'SHADOW_ORCHESTRATOR_READY_VERIFIED' -or
+                $observation.host -ne 'DESKTOP-PDQK954' -or
+                $observation.repository -ne 'ericson-j-santos/desktop-pc24x7-runtime' -or
+                $observation.source_sha -ne $env:GITHUB_SHA -or
+                $observation.shadow_ready -ne $true -or
+                $observation.shadow_health -ne $true -or
+                $observation.shadow_bind -ne '127.0.0.1' -or
+                $observation.shadow_process_terminated -ne $true -or
+                $observation.temporary_database_removed -ne $true -or
+                $observation.worker_started -ne $false -or
+                $observation.live_service_restarted -ne $false -or
+                $observation.service_rollback_verified -ne $false -or
+                $observation.recovery_allowed -ne $false -or
+                $observation.raw_content_uploaded -ne $false -or
+                $observation.production_touched -ne $false) { throw 'SHADOW_READBACK_INVALID' }
+            $result.shadow_ready = $true
+            $result.shadow_health = $true
+            $result.shadow_process_terminated = $true
+            $result.temporary_database_removed = $true
+            $result.restored_sqlite_tables = [int]$observation.restored_sqlite_tables
+            $result.result = 'SHADOW_ORCHESTRATOR_READY_VERIFIED'
+            Write-Host 'SHADOW_ORCHESTRATOR_READY_VERIFIED'
+          } catch {
+            Write-Host 'SHADOW_ORCHESTRATOR_BLOCKED'
+          } finally {
+            $result | ConvertTo-Json -Depth 6 | Set-Content -Encoding UTF8 -LiteralPath $file
+          }
+          if ($result.result -ne 'SHADOW_ORCHESTRATOR_READY_VERIFIED') {
+            throw 'SHADOW_ORCHESTRATOR_BLOCKED'
+          }
+      - name: Upload only sanitized result without database or configs
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: desktop-protected-orchestrator-state-evidence
+          path: ${{ steps.session.outputs.target_path }}/artifacts/protected-state/
+          if-no-files-found: warn
+          retention-days: 7
