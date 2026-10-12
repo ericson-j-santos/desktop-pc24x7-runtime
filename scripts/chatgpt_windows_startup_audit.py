@@ -17,7 +17,7 @@ from pathlib import Path
 
 HOST = "DESKTOP-PDQK954"
 CORRELATION_PREFIX = "chatgpt-autostart-"
-NAME = re.compile(r"chatgpt", re.IGNORECASE)
+NAME = re.compile(r"chatgpt|codex|openai", re.IGNORECASE)
 MAX_REGISTRY_VALUES = 512
 MAX_PACKAGE_KEYS = 2048
 
@@ -47,9 +47,13 @@ def classify(evidence: dict) -> str:
     verified_context = evidence.get("runner_matches_active_console") is True
     package_seen = evidence.get("package_current_user") is True
     if not entries:
+        if evidence.get("installation_candidates"):
+            return "inconclusive_installation_hint_without_enabled_startup"
         return "inconclusive_no_matching_registration_in_scanned_sources"
     eligible = [e for e in entries if e.get("registration") == "run" and e.get("approval") == "enabled"]
-    if eligible and verified_context and package_seen and any(e["scope"] == "current_user" for e in eligible):
+    if (eligible and verified_context and package_seen
+            and evidence.get("runner_account_matches_console_username") is True
+            and any(e["scope"] == "current_user" for e in eligible)):
         return "startup_registration_enabled_for_current_interactive_runner"
     if all(e.get("approval") == "disabled" for e in entries):
         return "registered_but_disabled_in_scanned_sources"
@@ -136,6 +140,125 @@ def _autologon(winreg) -> str:
         return "unknown"
 
 
+
+def candidate_kind(name: str) -> str | None:
+    """Return a product family only, never raw filenames or user identities."""
+    if not isinstance(name, str):
+        return None
+    value = name.casefold().replace(" ", "").replace("-", "").replace("_", "")
+    if "chatgpt" in value:
+        return "chatgpt"
+    if "codex" in value:
+        return "codex"
+    if "openai" in value:
+        return "openai_unresolved"
+    return None
+
+
+def _package_candidates(winreg) -> tuple[list[dict], list[str]]:
+    roots = (
+        ("current_user", winreg.HKEY_CURRENT_USER,
+         r"Software\Classes\Local Settings\Software\Microsoft\Windows"
+         r"\CurrentVersion\AppModel\Repository\Packages"),
+        ("machine", winreg.HKEY_LOCAL_MACHINE,
+         r"SOFTWARE\Microsoft\Windows\CurrentVersion\Appx\AppxAllUserStore\Applications"),
+    )
+    results, checks = [], []
+    for scope, hive, path in roots:
+        try:
+            with winreg.OpenKey(hive, path, 0, winreg.KEY_READ) as key:
+                count = winreg.QueryInfoKey(key)[0]
+                if count > MAX_PACKAGE_KEYS:
+                    checks.append("package_" + scope + "_limit_exceeded")
+                    continue
+                checks.append("package_" + scope)
+                for index in range(count):
+                    kind = candidate_kind(winreg.EnumKey(key, index))
+                    if kind:
+                        results.append({"scope": scope, "kind": kind,
+                                        "signal": "package_registry_name_only"})
+        except FileNotFoundError:
+            checks.append("package_" + scope + "_not_present")
+        except (PermissionError, OSError):
+            checks.append("package_" + scope + "_not_readable")
+    return results, checks
+
+
+def _directory_candidates() -> tuple[list[dict], list[str]]:
+    """Only fixed app locations; never dereference shortcuts or read file bodies."""
+    candidates, checks = [], []
+    locations = (
+        ("user_programs", "LOCALAPPDATA", ("Programs",)),
+        ("user_app_aliases", "LOCALAPPDATA", ("Microsoft", "WindowsApps")),
+        ("user_start_menu", "APPDATA", ("Microsoft", "Windows", "Start Menu", "Programs")),
+        ("all_users_start_menu", "PROGRAMDATA",
+         ("Microsoft", "Windows", "Start Menu", "Programs")),
+    )
+    for label, variable, suffix in locations:
+        root = os.environ.get(variable)
+        if not root or not Path(root).is_absolute():
+            checks.append(label + "_root_unavailable")
+            continue
+        folder = Path(root).joinpath(*suffix)
+        try:
+            if not folder.is_dir() or folder.is_symlink():
+                checks.append(label + "_not_present")
+                continue
+            checks.append(label)
+            children = list(folder.iterdir())
+            if len(children) > 800:
+                checks.append(label + "_limit_exceeded")
+                continue
+            for child in children:
+                kind = candidate_kind(child.name)
+                if not kind or child.is_symlink():
+                    continue
+                if child.is_dir() or child.suffix.casefold() in {".exe", ".lnk", ".url"}:
+                    candidates.append({"scope": label, "kind": kind,
+                                       "signal": "filename_only"})
+        except (OSError, PermissionError):
+            checks.append(label + "_not_readable")
+    return candidates, checks
+
+
+def _console_username_matches_runner() -> bool | None:
+    """Compare Windows user names internally; emit only an equality flag."""
+    if os.name != "nt":
+        return None
+    try:
+        kernel = ctypes.windll.kernel32
+        kernel.WTSGetActiveConsoleSessionId.restype = wintypes.DWORD
+        console = int(kernel.WTSGetActiveConsoleSessionId())
+        if console == 0xFFFFFFFF:
+            return None
+        library = ctypes.windll.wtsapi32
+        query = library.WTSQuerySessionInformationW
+        query.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_int,
+                          ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.DWORD)]
+        query.restype = wintypes.BOOL
+        library.WTSFreeMemory.argtypes = [ctypes.c_void_p]
+        library.WTSFreeMemory.restype = None
+        buffer, length = ctypes.c_void_p(), wintypes.DWORD()
+        # WTSUserName = 5; only the active console is queried.
+        if not query(None, console, 5, ctypes.byref(buffer), ctypes.byref(length)):
+            return None
+        try:
+            observed = ctypes.wstring_at(buffer).casefold() if buffer else ""
+        finally:
+            if buffer:
+                library.WTSFreeMemory(buffer)
+        own = ctypes.create_unicode_buffer(256)
+        own_size = wintypes.DWORD(len(own))
+        get_user = ctypes.windll.advapi32.GetUserNameW
+        get_user.argtypes = [wintypes.LPWSTR, ctypes.POINTER(wintypes.DWORD)]
+        get_user.restype = wintypes.BOOL
+        if not get_user(own, ctypes.byref(own_size)) or not observed:
+            return None
+        return own.value.casefold() == observed
+    except (AttributeError, OSError, ValueError):
+        return None
+
+
 def collect() -> dict:
     if os.name != "nt" or socket.gethostname().casefold() != HOST.casefold():
         raise AuditBlocked("host_or_platform_not_authorized")
@@ -194,7 +317,12 @@ def collect() -> dict:
                                 "approval": _approval(winreg, hive, "StartupTasks", name),
                                 "target_verified": False})
 
+    installed, package_checks = _package_candidates(winreg)
+    filesystem, folder_checks = _directory_candidates()
+    checked.extend(package_checks)
+    checked.extend(folder_checks)
     session_id, console_id, console_match = _session_context()
+    same_user = _console_username_matches_runner()
     payload = {
         "schema_version": "chatgpt-startup-audit/v1", "environment": "local/dev",
         "observed_at": datetime.now(timezone.utc).isoformat(),
@@ -203,6 +331,9 @@ def collect() -> dict:
         "correlation_id": CORRELATION_PREFIX + run_id,
         "runner_session_id": session_id, "active_console_session_id": console_id,
         "runner_matches_active_console": console_match,
+        "runner_account_matches_console_username": same_user,
+        "installation_candidates": installed + filesystem,
+        "candidate_name_families": sorted({item["kind"] for item in installed + filesystem}),
         "auto_admin_logon_flag": _autologon(winreg),
         "package_current_user": _package_present(winreg),
         "entries": entries, "sources_checked": sorted(checked),

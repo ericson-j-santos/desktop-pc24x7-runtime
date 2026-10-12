@@ -16,7 +16,8 @@ spec.loader.exec_module(module)
 
 def fixture(entries=None, match=True, package=True, confirmed=True):
     return {"host_confirmed": confirmed, "entries": entries or [],
-            "runner_matches_active_console": match, "package_current_user": package}
+            "runner_matches_active_console": match, "runner_account_matches_console_username": True,
+            "package_current_user": package}
 
 
 def test_approval_flags_fail_closed():
@@ -83,3 +84,56 @@ def test_physical_windows_workflow_uses_native_powershell():
     physical = workflow.split("  physical-read:", 1)[1]
     assert physical.count("shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}") == 2
     assert "shell: pwsh" not in physical
+
+
+def test_candidate_kind_distinguishes_chatgpt_codex_and_generic_openai():
+    assert module.candidate_kind("OpenAI.Codex_1.2.3_x64") == "codex"
+    assert module.candidate_kind("ChatGPT.exe") == "chatgpt"
+    assert module.candidate_kind("OpenAI Desktop.lnk") == "openai_unresolved"
+    assert module.candidate_kind("OtherApp.exe") is None
+
+
+def test_console_identity_unknown_does_not_authorize_autostart():
+    good = {"scope": "current_user", "registration": "run", "approval": "enabled"}
+    value = fixture([good])
+    value["runner_account_matches_console_username"] = None
+    assert module.classify(value).startswith("inconclusive")
+    value["runner_account_matches_console_username"] = False
+    assert module.classify(value).startswith("inconclusive")
+
+
+def test_installation_hint_not_equivalent_to_startup():
+    value = fixture([])
+    value["installation_candidates"] = [{"scope": "current_user", "kind": "codex",
+                                          "signal": "package_registry_name_only"}]
+    assert module.classify(value) == "inconclusive_installation_hint_without_enabled_startup"
+
+
+def test_directory_search_reports_only_fixed_match_names(tmp_path, monkeypatch):
+    appdata = tmp_path / "local"
+    installed = appdata / "Programs"
+    installed.mkdir(parents=True)
+    (installed / "OpenAI.Codex").mkdir()
+    (installed / "NonTarget").mkdir()
+    monkeypatch.setenv("LOCALAPPDATA", str(appdata))
+    monkeypatch.delenv("APPDATA", raising=False)
+    monkeypatch.delenv("PROGRAMDATA", raising=False)
+    entries, checked = module._directory_candidates()
+    assert entries == [{"scope": "user_programs", "kind": "codex",
+                        "signal": "filename_only"}]
+    assert "user_programs" in checked
+
+
+def test_directory_scan_does_not_follow_external_symlinks(tmp_path, monkeypatch):
+    local = tmp_path / "local"
+    programs = local / "Programs"
+    programs.mkdir(parents=True)
+    target = tmp_path / "ChatGPT.exe"
+    target.write_text("invalid", encoding="utf-8")
+    try:
+        (programs / "ChatGPT.exe").symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("fixture symlinks unsupported")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    matches, _ = module._directory_candidates()
+    assert all(match["kind"] != "chatgpt" for match in matches)
