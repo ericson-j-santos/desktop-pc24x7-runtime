@@ -136,7 +136,9 @@ def _autologon(winreg) -> str:
         with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path, 0, winreg.KEY_READ) as key:
             value, _ = winreg.QueryValueEx(key, "AutoAdminLogon")
         return "enabled" if str(value).strip() == "1" else "disabled"
-    except (FileNotFoundError, PermissionError, OSError):
+    except FileNotFoundError:
+        return "not_configured"
+    except (PermissionError, OSError):
         return "unknown"
 
 

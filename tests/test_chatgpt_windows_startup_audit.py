@@ -153,3 +153,41 @@ def test_process_struct_does_not_request_binary_path_or_security_token():
     assert "kernel.OpenProcess" not in calls
     assert "kernel.TerminateProcess" not in calls
     assert "winreg.SetValueEx" not in calls
+
+
+def test_autologon_absent_distinct_from_access_denied():
+    class FakeHandle:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+
+    class FakeReg:
+        HKEY_LOCAL_MACHINE = "hklm"
+        KEY_READ = 1
+        @staticmethod
+        def OpenKey(*args): return FakeHandle()
+        @staticmethod
+        def QueryValueEx(key, name): raise FileNotFoundError(name)
+
+    assert module._autologon(FakeReg) == "not_configured"
+    class DeniedReg(FakeReg):
+        @staticmethod
+        def QueryValueEx(key, name): raise PermissionError(name)
+    assert module._autologon(DeniedReg) == "unknown"
+
+
+def test_autologon_flag_is_only_an_indicator():
+    class FakeHandle:
+        def __enter__(self): return self
+        def __exit__(self, *args): return False
+    class FakeReg:
+        HKEY_LOCAL_MACHINE = "hklm"
+        KEY_READ = 1
+        @staticmethod
+        def OpenKey(*args): return FakeHandle()
+        @staticmethod
+        def QueryValueEx(key, name): return ("1", 1)
+    assert module._autologon(FakeReg) == "enabled"
+    class OffReg(FakeReg):
+        @staticmethod
+        def QueryValueEx(key, name): return ("0", 1)
+    assert module._autologon(OffReg) == "disabled"
