@@ -1,0 +1,130 @@
+name: Desktop legacy ReqSys listener identity read-only
+on:
+  push:
+    branches:
+      - fix/pc24x7-supervisor-receipt-readonly-20261012
+    paths:
+      - .github/workflows/pc24x7-legacy-listener-readonly.yml
+      - config/reqsys-legacy-listener-readonly.json
+
+permissions:
+  contents: read
+
+concurrency:
+  group: legacy-listener-readonly-20261012
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Verify non-mutating runner probe contract
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Execute existing supervisor controls and validate fixed config
+        shell: powershell
+        run: |
+          python -m pip install --disable-pip-version-check pytest==8.4.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pytest tests/test_runtime_health_supervisor.py -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $cfg = Get-Content -LiteralPath config/reqsys-legacy-listener-readonly.json -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($cfg.host -ne 'DESKTOP-PDQK954' -or @($cfg.targets).Count -ne 1) { throw 'INVALID_LEGACY_PROBE_CONFIG' }
+          if ($cfg.targets[0].name -ne 'reqsys-legacy-listener' -or $cfg.targets[0].kind -ne 'runner' -or
+              $cfg.targets[0].runner_home -ne '%LOCALAPPDATA%\ReqSys\Pc24x7GitHubRunner') {
+            throw 'INVALID_FIXED_LEGACY_TARGET'
+          }
+          $keys = @($cfg.targets[0].PSObject.Properties.Name)
+          if ($keys | Where-Object { $_ -in @('command', 'shell', 'executable', 'log_path', 'recovery_task') }) {
+            throw 'UNEXPECTED_MUTATING_TARGET'
+          }
+
+  inspect:
+    needs: contract
+    name: Compare only legacy Runner.Listener process identity
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 6
+    steps:
+      - name: Checkout exact runtime revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - name: Checkout pinned operational rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: f6ccb143a581e28650e9b640226f9ef671d469f2
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap fixed runner session and Gateway
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'legacy-listener-inspect',
+            '--correlation-id', "legacy-listener-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/pc24x7-supervisor-receipt-readonly-20261012',
+            '--require-runner-version-preflight')
+          $raw = @(& $python $launcher @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $s = @($raw)[-1] | ConvertFrom-Json
+          if ($s.result -ne 'SESSION_LAUNCH_OK' -or $s.state_validated -ne $true -or
+              $s.head -ne $env:GITHUB_SHA -or $s.host -ne 'DESKTOP-PDQK954' -or
+              $s.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_INVALID' }
+          "target_path=$($s.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "session_id=$($s.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Observe fixed legacy listener without starting it
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'DEDICATED_RUNNER_REQUIRED' }
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $root = Join-Path $env:TARGET_PATH 'artifacts\legacy-listener'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $args = @('--policy', $policy, '--correlation-id', "legacy-listener-$env:GITHUB_RUN_ID",
+            'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '45', '--expected-head', $env:GITHUB_SHA,
+            '--', 'python', 'scripts/runtime_health_supervisor.py',
+            '--config', 'config/reqsys-legacy-listener-readonly.json',
+            '--state', (Join-Path $root 'state.json'),
+            '--evidence', (Join-Path $root 'evidence.json'))
+          $raw = @(& $python $gateway @args)
+          $exit = $LASTEXITCODE
+          $path = Join-Path $root 'evidence.json'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'LEGACY_LISTENER_EVIDENCE_MISSING' }
+          $evidence = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($evidence.host -ne 'DESKTOP-PDQK954' -or $evidence.apply -ne $false -or
+              @($evidence.targets).Count -ne 1 -or
+              $evidence.targets[0].name -ne 'reqsys-legacy-listener' -or
+              $evidence.targets[0].kind -ne 'runner') { throw 'LEGACY_LISTENER_EVIDENCE_INVALID' }
+          if ($evidence.status -eq 'ok' -and $evidence.targets[0].probe.healthy -eq $true -and
+              $evidence.targets[0].probe.listener_count -eq 1 -and $exit -eq 0) {
+            Write-Host 'LEGACY_LISTENER_PRESENT'
+          } else {
+            Write-Host 'LEGACY_LISTENER_NOT_VERIFIED'
+            throw 'LEGACY_LISTENER_NOT_RUNNING'
+          }
+      - name: Upload sanitized listener evidence
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: legacy-runner-listener-readonly
+          path: ${{ steps.session.outputs.target_path }}/artifacts/legacy-listener/evidence.json
+          if-no-files-found: warn
+          retention-days: 7
