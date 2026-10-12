@@ -49,6 +49,7 @@ class ShadowLifecycleTests(unittest.TestCase):
         self.stage = Path(self.tmp.name) / "stage"
         (self.stage / "orchestrator").mkdir(parents=True)
         (self.stage / "data").mkdir()
+        (self.stage / "orchestrator/__init__.py").write_text("")
         (self.stage / "orchestrator/__main__.py").write_text(FIXTURE_SERVER)
         db = self.stage / "data/orchestrator.db"
         with sqlite3.connect(db) as conn:
