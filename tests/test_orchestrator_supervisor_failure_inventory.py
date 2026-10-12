@@ -96,6 +96,26 @@ class InventoryTests(unittest.TestCase):
         self.assertEqual(result["failure_files_invalid"], 2)
         self.assertFalse(result["classification_complete"])
         self.assertFalse(result["original_exact_receipt_found"])
+        self.assertEqual(result["rejection_reasons"],
+                         {"file_read_or_json_invalid": 1, "error_fields_invalid": 1})
+
+    def test_rejection_reasons_are_closed_set_without_payloads(self):
+        bad_error = {"schema_version": 1, "error_type": "ValueError",
+                     "failed_at_epoch": self.now - 1}
+        bad_timestamp = {"schema_version": 1, "error_type": "RuntimeError",
+                         "error": "sensitive explanation", "failed_at_epoch": self.now + 900}
+        bad_identity = {"schema_version": 1, "error_type": "RuntimeError",
+                        "error": "sensitive explanation", "failed_at_epoch": self.now - 1,
+                        "expected_sha": "secret-not-a-sha"}
+        paths = [self.write_receipt(1, raw=json.dumps(bad_error)),
+                 self.write_receipt(2, raw=json.dumps(bad_timestamp)),
+                 self.write_receipt(3, raw=json.dumps(bad_identity))]
+        result = self.scan(paths)
+        self.assertEqual(result["failure_files_invalid"], 3)
+        self.assertEqual(result["rejection_reasons"], {
+            "error_fields_invalid": 1, "identity_fields_invalid": 1, "timestamp_invalid": 1})
+        self.assertNotIn("sensitive explanation", json.dumps(result))
+        self.assertFalse(result["recovery_allowed"])
 
     def test_rejected_oversized_or_redirected(self):
         real = self.write_receipt(1)

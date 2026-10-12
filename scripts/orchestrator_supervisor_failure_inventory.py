@@ -46,34 +46,47 @@ def classify_failures(
         raise ValueError("FAILURE_INVENTORY_LIMIT")
     codes: Counter[str] = Counter()
     identities: Counter[str] = Counter()
+    rejection_reasons: Counter[str] = Counter()
     valid = invalid = 0
     for path in paths:
         if not FAILURE_NAME.fullmatch(path.name):
             raise ValueError("FAILURE_FILE_NAME_INVALID")
+        reason = None
         try:
             payload, _, fingerprint = read_fn(path)
-            if (type(payload.get("schema_version")) is not int or
-                payload["schema_version"] != 1 or
-                not isinstance(payload.get("error_type"), str) or
-                not isinstance(payload.get("error"), str) or
-                len(payload["error"]) > 500 or
-                not isinstance(payload.get("failed_at_epoch"), (float, int)) or
-                isinstance(payload["failed_at_epoch"], bool) or
-                not math.isfinite(payload["failed_at_epoch"]) or
-                not 0 < payload["failed_at_epoch"] <= now + 60):
-                raise ValueError("RECEIPT_SCHEMA_INVALID")
+        except (OSError, ValueError):
+            reason = "file_read_or_json_invalid"
+        if reason is None:
+            if type(payload.get("schema_version")) is not int or payload["schema_version"] != 1:
+                reason = "schema_invalid"
+            elif (not isinstance(payload.get("error_type"), str) or
+                  not isinstance(payload.get("error"), str)):
+                reason = "error_fields_invalid"
+            elif len(payload["error"]) > 500:
+                reason = "error_field_too_long"
+            else:
+                stamp = payload.get("failed_at_epoch")
+                if (type(stamp) not in (int, float) or not math.isfinite(stamp) or
+                        not 0 < stamp <= now + 60):
+                    reason = "timestamp_invalid"
+        if reason is None:
             correlation = payload.get("correlation_id")
             target = payload.get("expected_sha")
             host = payload.get("target_host")
             if (correlation is not None and not isinstance(correlation, str) or
                 target is not None and (not isinstance(target, str) or not SHA_RE.fullmatch(target)) or
                 host is not None and not isinstance(host, str)):
-                raise ValueError("RECEIPT_IDENTITY_INVALID")
-            observed = guard_fn(path, directory=False)
-            if (observed.st_size, observed.st_mtime_ns) != fingerprint:
-                raise ValueError("RECEIPT_CHANGED_DURING_SCAN")
-        except (OSError, ValueError):
+                reason = "identity_fields_invalid"
+        if reason is None:
+            try:
+                observed = guard_fn(path, directory=False)
+                if (observed.st_size, observed.st_mtime_ns) != fingerprint:
+                    reason = "file_changed_during_scan"
+            except (OSError, ValueError):
+                reason = "file_changed_during_scan"
+        if reason:
             invalid += 1
+            rejection_reasons[reason] += 1
             continue
         valid += 1
         codes[ERROR_CODES.get(payload["error"], "unclassified_error")] += 1
@@ -91,6 +104,7 @@ def classify_failures(
         "failure_files_scanned": len(paths),
         "failure_files_parsed": valid,
         "failure_files_invalid": invalid,
+        "rejection_reasons": dict(sorted(rejection_reasons.items())),
         "categories": dict(sorted(codes.items())),
         "identity_groups": dict(sorted(identities.items())),
         "original_exact_receipt_found": identities["original_exact"] == 1,
