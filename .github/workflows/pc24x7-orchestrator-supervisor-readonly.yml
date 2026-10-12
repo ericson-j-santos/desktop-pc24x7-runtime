@@ -3,17 +3,19 @@ name: Desktop Orchestrator Supervisor Read-only Preflight
 on:
   push:
     branches:
-      - fix/desktop-orchestrator-supervisor-readonly-20261012
+      - fix/desktop-orchestrator-failure-inventory-20261012
     paths:
       - scripts/orchestrator_supervisor_readonly_probe.py
+      - scripts/orchestrator_supervisor_failure_inventory.py
       - tests/test_orchestrator_supervisor_readonly_probe.py
+      - tests/test_orchestrator_supervisor_failure_inventory.py
       - .github/workflows/pc24x7-orchestrator-supervisor-readonly.yml
 
 permissions:
   contents: read
 
 concurrency:
-  group: desktop-orchestrator-supervisor-readonly-20261012
+  group: desktop-orchestrator-failure-inventory-20261012
   cancel-in-progress: false
 
 jobs:
@@ -33,7 +35,7 @@ jobs:
         run: |
           python -m py_compile scripts/orchestrator_supervisor_readonly_probe.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m unittest discover -s tests -p test_orchestrator_supervisor_readonly_probe.py -v
+          python -m unittest discover -s tests -p test_orchestrator_supervisor_*.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   physical_readback:
@@ -67,7 +69,7 @@ jobs:
             '--session-prefix', 'orch-supervisor-readonly',
             '--correlation-id', "orch-supervisor-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
             '--expected-head', $env:GITHUB_SHA,
-            '--sync-ref', 'origin/fix/desktop-orchestrator-supervisor-readonly-20261012',
+            '--sync-ref', 'origin/fix/desktop-orchestrator-failure-inventory-20261012',
             '--require-runner-version-preflight')
           $raw = @(& $python $launcher @args)
           if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }

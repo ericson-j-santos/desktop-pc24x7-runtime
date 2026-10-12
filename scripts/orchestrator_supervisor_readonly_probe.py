@@ -18,6 +18,8 @@ import stat
 import time
 from typing import Any, Callable
 
+from orchestrator_supervisor_failure_inventory import classify_failures, inspect_rollback_structure
+
 EXPECTED_HOST = "DESKTOP-PDQK954"
 INSTALL_ROOT = Path(r"C:\dev\chatgpt-workers\reqsys-orchestrator-24x7-runtime")
 
@@ -147,6 +149,13 @@ def collect(*, root: Path = INSTALL_ROOT, now: float | None = None,
     if candidates != _candidates(control):
         raise ProbeError("CONTROL_DIRECTORY_CHANGED")
     names = [p.name for p in candidates]
+    failure_inventory = classify_failures(
+        [p for p in candidates if p.name.startswith("refresh-runtime.failed.")],
+        now=now, read_fn=_read, guard_fn=_guard_path,
+    )
+    rollback_preflight = inspect_rollback_structure(root, guard_fn=_guard_path)
+    if candidates != _candidates(control):
+        raise ProbeError("CONTROL_DIRECTORY_CHANGED")
     worker = worker_fn()
     matches = worker.get("runtime_source_sha") == version["source_sha"]
     live = (matches and status.get("ready") is True and now - stamp <= 300
@@ -162,6 +171,8 @@ def collect(*, root: Path = INSTALL_ROOT, now: float | None = None,
         "applied_receipt_present": "refresh-runtime.applied.json" in names,
         "failure_receipt_count": sum(p.startswith("refresh-runtime.failed.") for p in names),
         "original_receipt_identity_verified": False,
+        "failure_inventory": failure_inventory,
+        "rollback_preflight": rollback_preflight,
         "worker": worker,
         "file_worker_sha_match": matches,
         "live_state_consistent": live,
@@ -195,7 +206,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ProbeError("LIVE_STATE_MISMATCH")
         result["result"] = "SUPERVISOR_READBACK_OBSERVED"
         exit_code = 0
-    except (ProbeError, OSError) as exc:
+    except (ProbeError, OSError, ValueError) as exc:
         result["blocker_code"] = str(exc) if isinstance(exc, ProbeError) else "FIXED_READBACK_UNAVAILABLE"
     print(json.dumps(result, sort_keys=True))
     return exit_code
