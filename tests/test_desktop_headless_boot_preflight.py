@@ -79,3 +79,11 @@ def test_source_has_no_write_or_arbitrary_shell():
     assert "winreg.SetValue" not in source and "shutdown.exe" not in source
     assert '"/Query"' in source and "shell=False" in source
     assert "OpenProcess" not in source and "STARTUP_AUTOMATION_PASSWORD" not in source
+
+
+def test_workflow_uses_one_explicit_sync_ref_argument():
+    workflow = (Path(__file__).resolve().parents[1]/".github"/"workflows"/
+                "desktop-headless-boot-preflight.yml").read_text(encoding="utf-8")
+    assert '$syncRef = "origin/$env:GITHUB_REF_NAME"' in workflow
+    assert "'--sync-ref', $syncRef," in workflow
+    assert "'origin/' + $env:GITHUB_REF_NAME" not in workflow
