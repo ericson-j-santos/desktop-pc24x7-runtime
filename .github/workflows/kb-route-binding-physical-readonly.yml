@@ -1,0 +1,134 @@
+name: Desktop KB route binding metadata read-only
+
+on:
+  push:
+    branches: [fix/kb-route-binding-readonly-20261009]
+    paths:
+      - .github/kb-route-binding-authorized-once-20261013
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kb-route-binding-physical-readonly-20261013
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Validate fixed collector before physical read
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Compile and run positive-negative contracts
+        shell: powershell
+        run: |
+          python -m pip install --disable-pip-version-check cryptography==50.0.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m compileall -q scripts/reqsys_kb_route_binding_probe.py tests/test_reqsys_kb_route_binding_probe.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m unittest discover -s tests -p test_reqsys_kb_route_binding_probe.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  inspect:
+    needs: contract
+    name: Collect sanitized KB route metadata once
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 7
+    steps:
+      - name: Checkout exact runtime revision outside rules tree
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          path: source
+          persist-credentials: false
+      - name: Checkout pinned operational rules beside source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: f6ccb143a581e28650e9b640226f9ef671d469f2
+          path: rules
+          persist-credentials: false
+      - name: Bootstrap exact host session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'DEDICATED_RUNNER_REQUIRED' }
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
+          $rules = Join-Path $env:GITHUB_WORKSPACE 'rules'
+          $launcher = Join-Path $rules 'scripts\session_launcher.py'
+          $policy = Join-Path $rules 'config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $source,
+            '--session-prefix', 'kb-route-binding',
+            '--correlation-id', "kb-route-binding-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/kb-route-binding-readonly-20261009',
+            '--require-runner-version-preflight')
+          $raw = @(& $python $launcher @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $s = @($raw)[-1] | ConvertFrom-Json
+          if ($s.result -ne 'SESSION_LAUNCH_OK' -or $s.state_validated -ne $true -or
+              $s.head -ne $env:GITHUB_SHA -or $s.host -ne 'DESKTOP-PDQK954' -or
+              $s.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_INVALID' }
+          "target_path=$($s.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
+          "session_id=$($s.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
+      - name: Collect fixed KB metadata through Command Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $rules = Join-Path $env:GITHUB_WORKSPACE 'rules'
+          $gateway = Join-Path $rules 'scripts\command_gateway.py'
+          $policy = Join-Path $rules 'config\command-gateway.policy.json'
+          $args = @('--policy', $policy,
+            '--correlation-id', "kb-route-binding-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '120', '--expected-head', $env:GITHUB_SHA,
+            '--', 'python', 'scripts/reqsys_kb_route_binding_probe.py',
+            '--correlation-id', "kb-route-binding-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
+            '--expected-collector-sha', $env:GITHUB_SHA,
+            '--evidence-file', 'artifacts/kb-route-binding/evidence.json')
+          & $python $gateway @args
+          if ($LASTEXITCODE -ne 0) { throw 'KB_ROUTE_BINDING_BLOCKED' }
+      - name: Validate sanitized evidence
+        if: always() && steps.session.outputs.target_path != ''
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:TARGET_PATH 'artifacts\kb-route-binding\evidence.json'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'KB_EVIDENCE_MISSING' }
+          $e = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($e.expected_collector_sha -ne $env:GITHUB_SHA -or
+              $e.runtime_changed -ne $false -or $e.host_inventory_complete -ne $false) {
+            throw 'KB_EVIDENCE_CONTRACT_INVALID'
+          }
+          if ($e.status -eq 'route_identity_observed_config_pending') {
+            if ($e.host -ne 'DESKTOP-PDQK954' -or $e.environment -ne 'dev' -or
+                $e.locator_signature_verified -ne $true -or
+                $e.independent_metadata_readback -ne $true -or
+                $e.loaded_config_verified -ne $false) {
+              throw 'KB_EVIDENCE_IDENTITY_INVALID'
+            }
+          } elseif ($e.status -ne 'blocked') {
+            throw 'KB_EVIDENCE_STATUS_INVALID'
+          }
+      - name: Upload sanitized KB metadata
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: kb-route-binding-readonly-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ steps.session.outputs.target_path }}/artifacts/kb-route-binding/evidence.json
+          if-no-files-found: error
+          retention-days: 7

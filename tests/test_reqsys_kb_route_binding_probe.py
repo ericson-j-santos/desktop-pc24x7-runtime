@@ -5,6 +5,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -237,6 +238,47 @@ class SignedLocatorContracts(unittest.TestCase):
         with patch.object(probe, "PUBLIC_KEY", self.public):
             result = probe.verify_locator(b"not-json\n[]\n" + self.envelope(), 1100)
             self.assertEqual(result["origin"], ORIGIN)
+
+
+class EvidenceFileContracts(unittest.TestCase):
+    def test_main_writes_only_fixed_sanitized_evidence(self):
+        sample = {
+            "schema_version": "1.0.0", "status": "route_identity_observed_config_pending",
+            "host": probe.HOST, "environment": "dev", "runtime_changed": False,
+            "locator_signature_verified": True, "independent_metadata_readback": True,
+            "loaded_config_verified": False, "host_inventory_complete": False,
+            "gateway": {"manifest_names_from_labels": ["docker-compose.yml"]},
+            "kb": None,
+        }
+        sha = "a" * 40
+        argv = ["probe", "--correlation-id", "kb-route-binding-test",
+                "--expected-collector-sha", sha, "--evidence-file",
+                "artifacts/kb-route-binding/evidence.json"]
+        old = probe.os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            probe.os.chdir(directory)
+            try:
+                with patch.object(sys, "argv", argv), patch.object(probe, "Live", return_value=object()), \
+                     patch.object(probe, "collect", return_value=sample):
+                    self.assertEqual(probe.main(), 0)
+                path = Path("artifacts/kb-route-binding/evidence.json")
+                written = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(written["expected_collector_sha"], sha)
+                self.assertEqual(written["correlation_id"], "kb-route-binding-test")
+                raw = path.read_text(encoding="utf-8")
+                for forbidden in ("Config.Env", "KB_WRITE_TOKEN=", "private-root", ORIGIN):
+                    self.assertNotIn(forbidden, raw)
+            finally:
+                probe.os.chdir(old)
+
+    def test_main_rejects_any_other_evidence_path_before_collection(self):
+        argv = ["probe", "--correlation-id", "kb-route-binding-test",
+                "--expected-collector-sha", "a" * 40,
+                "--evidence-file", "elsewhere.json"]
+        with patch.object(sys, "argv", argv), patch.object(probe, "Live") as live:
+            with self.assertRaisesRegex(probe.Blocked, "evidence_path_unapproved"):
+                probe.main()
+            live.assert_not_called()
 
 
 if __name__ == "__main__":

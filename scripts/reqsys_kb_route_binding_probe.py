@@ -300,9 +300,12 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--correlation-id", required=True)
     parser.add_argument("--expected-collector-sha", required=True)
+    parser.add_argument("--evidence-file", required=True)
     args = parser.parse_args()
     need(re.fullmatch(r"[A-Za-z0-9_.-]{8,128}", args.correlation_id), "correlation_id_invalid")
     need(SHA_RE.fullmatch(args.expected_collector_sha), "collector_sha_invalid")
+    need(args.evidence_file == "artifacts/kb-route-binding/evidence.json",
+         "evidence_path_unapproved")
     # Caller must verify SHA/session through Command Gateway before invocation.
     try:
         evidence = collect(Live())
@@ -313,6 +316,10 @@ def main():
     evidence.update(correlation_id=args.correlation_id,
                     expected_collector_sha=args.expected_collector_sha,
                     observed_at=datetime.now(timezone.utc).isoformat())
+    serialized = json.dumps(evidence, indent=2, sort_keys=True) + "\n"
+    output = Path(args.evidence_file)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(serialized, encoding="utf-8")
     print(json.dumps(evidence, sort_keys=True))
     return 0 if evidence["status"] == "route_identity_observed_config_pending" else 2
 
