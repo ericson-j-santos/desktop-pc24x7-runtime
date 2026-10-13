@@ -41,17 +41,16 @@ jobs:
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 7
     steps:
-      - name: Checkout exact runtime revision outside rules tree
+      - name: Checkout exact runtime revision at workspace root
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          path: source
           persist-credentials: false
-      - name: Checkout pinned operational rules beside source
+      - name: Checkout pinned operational rules as untracked nested checkout
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
           ref: f6ccb143a581e28650e9b640226f9ef671d469f2
-          path: rules
+          path: _rules
           persist-credentials: false
       - name: Bootstrap exact host session
         id: session
@@ -61,11 +60,10 @@ jobs:
           if ($env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'DEDICATED_RUNNER_REQUIRED' }
           $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
           if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
-          $source = Join-Path $env:GITHUB_WORKSPACE 'source'
-          $rules = Join-Path $env:GITHUB_WORKSPACE 'rules'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
           $launcher = Join-Path $rules 'scripts\session_launcher.py'
           $policy = Join-Path $rules 'config\command-gateway.policy.json'
-          $args = @('--policy', $policy, '--repo', $source,
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
             '--session-prefix', 'kb-route-binding',
             '--correlation-id', "kb-route-binding-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
             '--expected-head', $env:GITHUB_SHA,
@@ -87,7 +85,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
-          $rules = Join-Path $env:GITHUB_WORKSPACE 'rules'
+          $rules = Join-Path $env:GITHUB_WORKSPACE '_rules'
           $gateway = Join-Path $rules 'scripts\command_gateway.py'
           $policy = Join-Path $rules 'config\command-gateway.policy.json'
           $args = @('--policy', $policy,

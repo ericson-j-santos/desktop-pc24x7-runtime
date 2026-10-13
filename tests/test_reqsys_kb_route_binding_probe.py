@@ -281,5 +281,24 @@ class EvidenceFileContracts(unittest.TestCase):
             live.assert_not_called()
 
 
+class PhysicalWorkflowContracts(unittest.TestCase):
+    def setUp(self):
+        self.workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
+                         "kb-route-binding-physical-readonly.yml").read_text(encoding="utf-8")
+
+    def test_source_is_workspace_root_and_rules_are_untracked_nested_checkout(self):
+        self.assertIn("path: _rules", self.workflow)
+        self.assertNotIn("path: source", self.workflow)
+        self.assertNotIn("path: rules", self.workflow)
+        self.assertIn("'--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,", self.workflow)
+        self.assertIn("$rules = Join-Path $env:GITHUB_WORKSPACE '_rules'", self.workflow)
+
+    def test_execution_stays_in_launcher_target_and_trigger_is_one_shot(self):
+        self.assertIn("'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,", self.workflow)
+        self.assertIn("path: ${{ steps.session.outputs.target_path }}/artifacts/kb-route-binding/evidence.json", self.workflow)
+        self.assertEqual(self.workflow.count(".github/kb-route-binding-authorized-once-20261013"), 1)
+        self.assertNotIn("workflow_dispatch:", self.workflow)
+
+
 if __name__ == "__main__":
     unittest.main()

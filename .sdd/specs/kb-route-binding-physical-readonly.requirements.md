@@ -12,7 +12,11 @@ publish only its sanitized JSON evidence.
   `fix/kb-route-binding-readonly-20261009`. Ordinary later changes must not
   schedule another physical collection.
 - Run positive and negative collector contracts before the physical job.
-- Keep runtime source and pinned operational rules in sibling checkout trees.
+- Checkout the exact runtime revision at `GITHUB_WORKSPACE` and the pinned
+  operational rules as the untracked nested checkout `GITHUB_WORKSPACE/_rules`.
+  The Session Launcher must validate the tracked runtime source and materialize
+  the isolated execution worktree; Command Gateway must run only in that
+  returned `target_path`.
 - Require the dedicated Desktop runner, `SESSION_LAUNCH_OK`, exact HEAD,
   runner-version preflight, and Command Gateway risk 1.
 - Invoke only `scripts/reqsys_kb_route_binding_probe.py` with the fixed relative
