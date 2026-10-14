@@ -164,7 +164,7 @@ jobs:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
         run: |
           $ErrorActionPreference = 'Stop'
-          $path = Join-Path $env:TARGET_PATH 'artifacts\reqsys-dev-readonly-inventory\evidence.json'
+          $path = Join-Path $env:TARGET_PATH '.tmp\reqsys-dev-readonly-inventory\evidence.json'
           if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'INVENTORY_EVIDENCE_MISSING' }
           $e = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
           if ($e.status -ne 'observed' -or $e.host -ne 'DESKTOP-PDQK954' -or
@@ -183,6 +183,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: reqsys-dev-readonly-inventory-${{ github.run_id }}
-          path: ${{ steps.session.outputs.target_path }}/artifacts/reqsys-dev-readonly-inventory/evidence.json
-          if-no-files-found: warn
+          path: ${{ steps.session.outputs.target_path }}/.tmp/reqsys-dev-readonly-inventory/evidence.json
+          if-no-files-found: error
+          include-hidden-files: true
           retention-days: 7

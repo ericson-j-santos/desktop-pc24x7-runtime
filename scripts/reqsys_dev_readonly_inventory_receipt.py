@@ -19,7 +19,7 @@ PROJECTS = frozenset({"wt-pc24x7-piloto", "wt-pc24x7-piloto-governado", "reqsys-
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 IMAGE = re.compile(r"sha256:[0-9a-f]{64}\Z")
 CORRELATION = re.compile(r"[a-zA-Z0-9_.-]{8,128}\Z")
-RECEIPT = Path("artifacts/reqsys-dev-readonly-inventory/evidence.json")
+RECEIPT = Path(".tmp/reqsys-dev-readonly-inventory/evidence.json")
 
 
 class InventoryBlocked(RuntimeError):

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -164,3 +165,41 @@ def test_physical_workflow_is_gate_bound_and_never_dispatches_cutover():
     assert "docker compose up" not in workflow.lower()
     assert "--risk', '2'" not in workflow
     assert "rollback" not in workflow.split("- name: Read-only Docker,")[1].split("- name: Independently")[0].lower()
+
+
+def test_gateway_risk1_receipt_stays_outside_monitored_git_state(tmp_path: Path) -> None:
+    """Mirror the pinned Gateway git ls-files --others exclusion and artifact upload."""
+    assert receipt.RECEIPT.as_posix() == (
+        ".tmp/reqsys-dev-readonly-inventory/evidence.json"
+    )
+    repo = tmp_path / "isolated-repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-q"],
+        cwd=repo, capture_output=True, text=True, check=True,
+    )
+    evidence = repo / receipt.RECEIPT
+    evidence.parent.mkdir(parents=True)
+    evidence.write_text('{"status":"observed"}\n', encoding="utf-8")
+    unfiltered = subprocess.run(
+        ["git", "ls-files", "--others", "--exclude-standard", "--", "."],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    filtered = subprocess.run(
+        [
+            "git", "ls-files", "--others", "--exclude-standard", "--",
+            ".", ":(exclude).tmp/**",
+        ],
+        cwd=repo, capture_output=True, text=True, check=True,
+    ).stdout.splitlines()
+    assert receipt.RECEIPT.as_posix() in unfiltered
+    assert filtered == []
+    workflow = (Path(__file__).resolve().parents[1] /
+                ".github/workflows/reqsys-dev-readonly-inventory.yml").read_text(
+                    encoding="utf-8"
+                )
+    assert r"'.tmp\reqsys-dev-readonly-inventory\evidence.json'" in workflow
+    assert "/.tmp/reqsys-dev-readonly-inventory/evidence.json" in workflow
+    assert "include-hidden-files: true" in workflow
+    assert "if-no-files-found: error" in workflow
+    assert "/artifacts/reqsys-dev-readonly-inventory/evidence.json" not in workflow
