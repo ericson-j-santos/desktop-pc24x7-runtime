@@ -3,10 +3,15 @@ import base64
 import copy
 import importlib.util
 import json
+import os
+import subprocess
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from unittest.mock import patch
 
 PATH = Path(__file__).resolve().parents[1] / "scripts" / "reqsys_kb_route_binding_probe.py"
@@ -296,88 +301,252 @@ class EvidenceFileContracts(unittest.TestCase):
             live.assert_not_called()
 
 
+class _TransportHandler(BaseHTTPRequestHandler):
+    mode = "normal"
+    protocol_version = "HTTP/1.0"
+
+    @staticmethod
+    def openapi():
+        return {
+            "openapi": "3.1.0",
+            "info": {"title": "Internal Knowledge Base API", "version": "1.0.0"},
+            "paths": {
+                "/health": {"get": {}},
+                "/projects": {"get": {}, "post": {}},
+                "/events": {"get": {}, "post": {}},
+                "/validation-runs/ingest": {"post": {}},
+            },
+        }
+
+    def send_bytes(self, status, body, **headers):
+        self.send_response(status)
+        self.send_header("Content-Length", str(len(body)))
+        for key, value in headers.items():
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_GET(self):
+        mode = type(self).mode
+        if self.path == "/" and mode == "redirect":
+            self.send_bytes(302, b"", Location="/api/runtime/build-info")
+        elif self.path == "/api/runtime/build-info" and mode == "slow":
+            self.send_response(200)
+            self.send_header("Content-Length", "2")
+            self.end_headers()
+            self.wfile.write(b"a")
+            self.wfile.flush()
+            time.sleep(0.4)
+            try:
+                self.wfile.write(b"b")
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+        elif self.path == "/kb/openapi.json" and mode == "oversized":
+            self.send_bytes(200, b"x" * (probe.MAX_BYTES + 1))
+        elif self.path == "/openapi.json":
+            body = json.dumps(self.openapi(), sort_keys=True).encode()
+            status = 503 if mode == "direct_error" else 200
+            if mode == "direct_slow":
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[:1])
+                self.wfile.flush()
+                time.sleep(0.4)
+                try:
+                    self.wfile.write(body[1:])
+                except (BrokenPipeError, ConnectionResetError):
+                    pass
+            else:
+                self.send_bytes(status, body)
+        elif self.path == "/api/runtime/build-info":
+            self.send_bytes(200, json.dumps({"build_sha": "a" * 40}).encode())
+        elif self.path == "/kb/openapi.json":
+            self.send_bytes(200, json.dumps(self.openapi(), sort_keys=True).encode())
+        elif self.path == "/":
+            self.send_bytes(200, b"frontend")
+        else:
+            self.send_bytes(404, b"missing")
+
+    def log_message(self, *_):
+        pass
+
+
 class LocalSurfaceContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.server = ThreadingHTTPServer(("127.0.0.1", 0), _TransportHandler)
+        cls.server.daemon_threads = True
+        cls.port = cls.server.server_address[1]
+        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
+        cls.thread.start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.server.shutdown()
+        cls.server.server_close()
+        cls.thread.join(timeout=2)
+
+    def setUp(self):
+        _TransportHandler.mode = "normal"
+
     @staticmethod
     def response(status, body, *, openapi=False, build=False):
-        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        raw = body if isinstance(body, bytes) else json.dumps(body, sort_keys=True).encode()
         if openapi:
             return probe.openapi_fingerprint(status, raw)
         if build:
             return probe.build_info_fingerprint(status, raw)
         return probe.response_fingerprint(status, raw)
 
-    @staticmethod
-    def openapi():
-        return {"info": {"title": "Internal Knowledge Base API"},
-                "paths": {path: {} for path in
-                  ("/health", "/projects", "/events", "/validation-runs/ingest")}}
+    def openapi(self):
+        return _TransportHandler.openapi()
 
-    def classify(self, routed, upstream, fallback=b"frontend-missing"):
+    def classify(self, routed, upstream, fallback=b"frontend-missing",
+                 frontend_status=200, api_ok=True):
+        api = self.response(200, {"build_sha": "a" * 40}, build=True)
+        if not api_ok:
+            api["reqsys_build_identity_matches"] = False
         return probe.classify_surface(
-            self.response(200, b"frontend"),
-            self.response(200, {"build_sha": "a" * 40}, build=True),
+            self.response(frontend_status, b"frontend"), api,
             routed, upstream, self.response(404, fallback),
         )
 
-    def test_upstream_valid_route_404(self):
+    def test_upstream_contract_observed_route_404(self):
         result = self.classify(self.response(404, b"route-missing", openapi=True),
                                self.response(200, self.openapi(), openapi=True))
-        self.assertEqual(result["classification"], "upstream_valid_route_404")
-        self.assertFalse(result["fallback_matches_routed_404"])
+        self.assertEqual(result["classification"],
+                         "upstream_contract_observed_route_404")
+        self.assertFalse(result["documents_match"])
 
     def test_upstream_failure(self):
         result = self.classify(self.response(404, b"missing", openapi=True),
                                self.response(503, b"", openapi=True),
                                fallback=b"missing")
-        self.assertEqual(result["classification"], "upstream_not_confirmed")
+        self.assertEqual(result["classification"],
+                         "upstream_contract_not_confirmed")
         self.assertTrue(result["fallback_matches_routed_404"])
 
-    def test_non_200_openapi_body_does_not_confirm_upstream(self):
-        routed = self.response(404, b"missing", openapi=True)
-        upstream = self.response(503, self.openapi(), openapi=True)
-        self.assertFalse(upstream["openapi_identity_matches"])
-        self.assertEqual(self.classify(routed, upstream)["classification"],
-                         "upstream_not_confirmed")
-
-    def test_route_and_upstream_success(self):
+    def test_same_contract_requires_gateway_identity_and_equal_documents(self):
         direct = self.response(200, self.openapi(), openapi=True)
         result = self.classify(direct, direct)
-        self.assertEqual(result["classification"], "route_and_upstream_valid")
-        self.assertTrue(result["api_gateway_identity_matches"])
+        self.assertEqual(result["classification"],
+                         "same_contract_through_route_observed")
+        self.assertTrue(result["documents_match"])
+        degraded = self.classify(direct, direct, api_ok=False)
+        self.assertEqual(degraded["classification"],
+                         "gateway_identity_not_confirmed")
 
-    def test_fallback_control_needs_status_size_and_digest(self):
-        routed = self.response(404, b"same", openapi=True)
+    def test_different_documents_are_not_associated(self):
+        routed_doc = self.openapi()
+        routed_doc["info"]["version"] = "1.0.1"
+        routed = self.response(200, routed_doc, openapi=True)
         upstream = self.response(200, self.openapi(), openapi=True)
-        self.assertTrue(self.classify(routed, upstream, fallback=b"same")
-                        ["fallback_matches_routed_404"])
-        self.assertFalse(self.classify(routed, upstream, fallback=b"different")
-                         ["fallback_matches_routed_404"])
+        result = self.classify(routed, upstream)
+        self.assertEqual(result["classification"],
+                         "route_and_upstream_contracts_differ")
+        self.assertFalse(result["documents_match"])
 
-    def test_invalid_json_and_oversize_are_sanitized_or_blocked(self):
-        value = probe.openapi_fingerprint(200, b"not-json")
-        self.assertFalse(value["openapi_identity_matches"])
+    def test_contract_requires_openapi_versions_methods_and_structures(self):
+        good = self.response(200, self.openapi(), openapi=True)
+        self.assertTrue(good["openapi_contract_matches"])
+        variants = []
+        for mutate in ("openapi", "info_version", "method", "path_type"):
+            value = self.openapi()
+            if mutate == "openapi":
+                value.pop("openapi")
+            elif mutate == "info_version":
+                value["info"].pop("version")
+            elif mutate == "method":
+                value["paths"]["/projects"].pop("post")
+            else:
+                value["paths"]["/events"] = []
+            variants.append(value)
+        for value in variants:
+            with self.subTest(value=value):
+                self.assertFalse(self.response(200, value, openapi=True)
+                                 ["openapi_contract_matches"])
+
+    def test_non_200_openapi_body_does_not_confirm_upstream(self):
+        upstream = self.response(503, self.openapi(), openapi=True)
+        self.assertFalse(upstream["openapi_contract_matches"])
+        result = self.classify(self.response(404, b"missing", openapi=True), upstream)
+        self.assertEqual(result["classification"],
+                         "upstream_contract_not_confirmed")
+
+    def test_proxy_environment_is_ignored_and_redirect_is_not_followed(self):
+        _TransportHandler.mode = "redirect"
+        env = {"HTTP_PROXY": "http://127.0.0.1:1",
+               "HTTPS_PROXY": "http://127.0.0.1:1", "NO_PROXY": ""}
+        with patch.dict(os.environ, env, clear=False):
+            status, body = probe.bounded_http_get(
+                "127.0.0.1", self.port, "/", deadline_seconds=1)
+        self.assertEqual(status, 302)
+        self.assertEqual(body, b"")
+
+    def test_gateway_total_deadline_stops_slow_body(self):
+        _TransportHandler.mode = "slow"
+        started = time.monotonic()
+        with self.assertRaisesRegex(probe.Blocked,
+                                    "gateway_http_(?:deadline|unavailable)"):
+            probe.bounded_http_get("127.0.0.1", self.port,
+                                   "/api/runtime/build-info",
+                                   deadline_seconds=0.1)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_gateway_oversized_body_is_blocked(self):
+        _TransportHandler.mode = "oversized"
+        with self.assertRaisesRegex(probe.Blocked, "gateway_http_body_too_large"):
+            probe.bounded_http_get("127.0.0.1", self.port,
+                                   "/kb/openapi.json", deadline_seconds=1)
+
+    def direct_script(self, deadline="1.0"):
+        return (probe.DIRECT_OPENAPI_SCRIPT
+                .replace('"127.0.0.1", 8080',
+                         f'"127.0.0.1", {self.port}')
+                .replace("DEADLINE_SECONDS = 5.0",
+                         f"DEADLINE_SECONDS = {deadline}"))
+
+    def test_internal_script_real_get_exports_only_closed_summary(self):
+        result = subprocess.run([sys.executable, "-c", self.direct_script()],
+                                capture_output=True, text=True, timeout=3,
+                                check=True)
+        value = json.loads(result.stdout)
+        self.assertEqual(probe.validate_direct_summary(value), value)
+        self.assertTrue(value["openapi_contract_matches"])
         self.assertNotIn("body", value)
-        with self.assertRaisesRegex(probe.Blocked, "http_body_invalid"):
-            probe.response_fingerprint(200, b"x" * (probe.MAX_BYTES + 1))
 
-    def test_direct_summary_contract_rejects_extra_or_malformed_fields(self):
+    def test_internal_script_non_200_and_total_deadline(self):
+        _TransportHandler.mode = "direct_error"
+        result = subprocess.run([sys.executable, "-c", self.direct_script()],
+                                capture_output=True, text=True, timeout=3,
+                                check=True)
+        self.assertFalse(json.loads(result.stdout)["openapi_contract_matches"])
+        _TransportHandler.mode = "direct_slow"
+        started = time.monotonic()
+        result = subprocess.run([sys.executable, "-c", self.direct_script("0.1")],
+                                capture_output=True, text=True, timeout=2)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertLess(time.monotonic() - started, 1.0)
+
+    def test_summary_rejects_extra_or_malformed_fields(self):
         good = {"http_status": 200, "body_bytes": 10, "body_sha256": "a" * 64,
-                "openapi_identity_matches": True}
+                "openapi_contract_matches": True}
         self.assertEqual(probe.validate_direct_summary(good), good)
         for bad in ({**good, "body": "secret"},
                     {**good, "body_sha256": "bad"},
-                    {**good, "openapi_identity_matches": 1}):
+                    {**good, "openapi_contract_matches": 1}):
             with self.subTest(bad=bad), self.assertRaises(probe.Blocked):
                 probe.validate_direct_summary(bad)
 
-    def test_internal_get_is_fixed_non_redirecting_and_does_not_initialize_app(self):
+    def test_internal_get_is_fixed_and_does_not_initialize_app(self):
         script = probe.DIRECT_OPENAPI_SCRIPT
-        self.assertIn("HTTPConnection('127.0.0.1',8080,timeout=5)", script)
-        self.assertIn("c.request('GET','/openapi.json'", script)
+        self.assertIn('HTTPConnection("127.0.0.1", 8080', script)
+        self.assertIn('connection.request("GET", "/openapi.json"', script)
         self.assertNotIn("uvicorn", script)
         self.assertNotIn("main:app", script)
         self.assertNotIn("Config.Env", script)
-        self.assertNotIn("c.request('GET','/health'", script)
+        self.assertNotIn('request("GET", "/health"', script)
 
 
 class PhysicalWorkflowContracts(unittest.TestCase):

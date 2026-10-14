@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
@@ -36,23 +37,77 @@ MAX_BYTES = 1048576
 GATEWAY_ORIGIN = "http://127.0.0.1:8083"
 GATEWAY_PATHS = frozenset(("/", "/api/runtime/build-info", "/kb/openapi.json",
                            "/__kb_route_probe_missing__"))
-DIRECT_OPENAPI_SCRIPT = (
-    "import hashlib,http.client,json;"
-    "c=http.client.HTTPConnection('127.0.0.1',8080,timeout=5);"
-    "c.request('GET','/openapi.json',headers={'Accept':'application/json',"
-    "'User-Agent':'KB-Route-Readonly/1'});r=c.getresponse();b=r.read(1048577);"
-    "assert len(b)<=1048576;"
-    "\ntry:o=json.loads(b)"
-    "\nexcept (ValueError,UnicodeError):o={}"
-    "\np=o.get('paths',{}) if isinstance(o,dict) else {};"
-    "i=o.get('info',{}) if isinstance(o,dict) else {};"
-    "ok=r.status==200 and isinstance(i,dict) and i.get('title')=='Internal Knowledge Base API' "
-    "and isinstance(p,dict) and all(x in p for x in "
-    "('/health','/projects','/events','/validation-runs/ingest'));"
-    "print(json.dumps({'http_status':r.status,'body_bytes':len(b),"
-    "'body_sha256':hashlib.sha256(b).hexdigest(),"
-    "'openapi_identity_matches':ok},sort_keys=True,separators=(',',':')))"
+DIRECT_OPENAPI_SCRIPT = r"""import hashlib
+import http.client
+import json
+import re
+import time
+
+MAX_BYTES = 1048576
+DEADLINE_SECONDS = 5.0
+deadline = time.monotonic() + DEADLINE_SECONDS
+connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=DEADLINE_SECONDS)
+connection.connect()
+remaining = deadline - time.monotonic()
+if remaining <= 0:
+    raise TimeoutError("deadline")
+connection.sock.settimeout(remaining)
+connection.request("GET", "/openapi.json", headers={
+    "Accept": "application/json", "User-Agent": "KB-Route-Readonly/1"})
+remaining = deadline - time.monotonic()
+if remaining <= 0:
+    raise TimeoutError("deadline")
+connection.sock.settimeout(remaining)
+response = connection.getresponse()
+chunks = []
+total = 0
+while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError("deadline")
+    if connection.sock is not None:
+        connection.sock.settimeout(remaining)
+    chunk = response.read(min(65536, MAX_BYTES + 1 - total))
+    if not chunk:
+        break
+    chunks.append(chunk)
+    total += len(chunk)
+    if total > MAX_BYTES:
+        raise ValueError("oversized")
+connection.close()
+body = b"".join(chunks)
+try:
+    document = json.loads(body)
+except (ValueError, UnicodeError):
+    document = {}
+info = document.get("info", {}) if isinstance(document, dict) else {}
+paths = document.get("paths", {}) if isinstance(document, dict) else {}
+required = {
+    "/health": ("get",),
+    "/projects": ("get", "post"),
+    "/events": ("get", "post"),
+    "/validation-runs/ingest": ("post",),
+}
+identity = (
+    response.status == 200
+    and isinstance(document.get("openapi"), str)
+    and re.fullmatch(r"3[.](?:0|1)[.][0-9]+", document["openapi"]) is not None
+    and isinstance(info, dict)
+    and info.get("title") == "Internal Knowledge Base API"
+    and isinstance(info.get("version"), str)
+    and re.fullmatch(r"[0-9]+(?:[.][0-9]+){1,3}", info["version"]) is not None
+    and isinstance(paths, dict)
+    and all(isinstance(paths.get(route), dict)
+            and all(isinstance(paths[route].get(method), dict) for method in methods)
+            for route, methods in required.items())
 )
+print(json.dumps({
+    "http_status": response.status,
+    "body_bytes": len(body),
+    "body_sha256": hashlib.sha256(body).hexdigest(),
+    "openapi_contract_matches": identity,
+}, sort_keys=True, separators=(",", ":")))
+"""
 # Deliberately omit Config.Env, command lines, raw labels, and mount source paths.
 FORMAT = (
     '{"id":{{json .Id}},"name":{{json .Name}},"image_id":{{json .Image}},'
@@ -225,17 +280,29 @@ def response_fingerprint(status, raw):
 def openapi_fingerprint(status, raw):
     result = response_fingerprint(status, raw)
     try:
-        obj = json.loads(raw)
+        document = json.loads(raw)
     except (ValueError, UnicodeError):
-        obj = {}
-    info = obj.get("info", {}) if isinstance(obj, dict) else {}
-    paths = obj.get("paths", {}) if isinstance(obj, dict) else {}
-    result["openapi_identity_matches"] = (
-        status == 200 and isinstance(info, dict)
+        document = {}
+    info = document.get("info", {}) if isinstance(document, dict) else {}
+    paths = document.get("paths", {}) if isinstance(document, dict) else {}
+    required = {
+        "/health": ("get",),
+        "/projects": ("get", "post"),
+        "/events": ("get", "post"),
+        "/validation-runs/ingest": ("post",),
+    }
+    result["openapi_contract_matches"] = (
+        status == 200 and isinstance(document.get("openapi"), str)
+        and re.fullmatch(r"3\.(?:0|1)\.[0-9]+", document["openapi"]) is not None
+        and isinstance(info, dict)
         and info.get("title") == "Internal Knowledge Base API"
+        and isinstance(info.get("version"), str)
+        and re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", info["version"]) is not None
         and isinstance(paths, dict)
-        and all(path in paths for path in
-                ("/health", "/projects", "/events", "/validation-runs/ingest"))
+        and all(isinstance(paths.get(route), dict)
+                and all(isinstance(paths[route].get(method), dict)
+                        for method in methods)
+                for route, methods in required.items())
     )
     return result
 
@@ -247,7 +314,8 @@ def build_info_fingerprint(status, raw):
     except (ValueError, UnicodeError):
         obj = {}
     data = obj.get("data", obj) if isinstance(obj, dict) else {}
-    value = data.get("build_sha") or data.get("commit_sha") if isinstance(data, dict) else None
+    value = (data.get("build_sha") or data.get("commit_sha")
+             if isinstance(data, dict) else None)
     result["reqsys_build_identity_matches"] = (
         status == 200 and isinstance(value, str) and SHA_RE.fullmatch(value) is not None
     )
@@ -255,16 +323,29 @@ def build_info_fingerprint(status, raw):
 
 
 def classify_surface(frontend, api, routed, upstream, fallback):
-    direct_ok = upstream.get("openapi_identity_matches") is True
-    routed_ok = routed.get("openapi_identity_matches") is True
-    if direct_ok and routed_ok:
-        classification = "route_and_upstream_valid"
+    gateway_ok = (
+        frontend.get("http_status") == 200
+        and api.get("reqsys_build_identity_matches") is True
+    )
+    direct_ok = upstream.get("openapi_contract_matches") is True
+    routed_ok = routed.get("openapi_contract_matches") is True
+    documents_match = (
+        direct_ok and routed_ok
+        and upstream.get("body_sha256") == routed.get("body_sha256")
+        and upstream.get("body_bytes") == routed.get("body_bytes")
+    )
+    if gateway_ok and documents_match:
+        classification = "same_contract_through_route_observed"
+    elif documents_match:
+        classification = "gateway_identity_not_confirmed"
     elif direct_ok and routed.get("http_status") == 404:
-        classification = "upstream_valid_route_404"
+        classification = "upstream_contract_observed_route_404"
+    elif direct_ok and routed_ok:
+        classification = "route_and_upstream_contracts_differ"
     elif not direct_ok:
-        classification = "upstream_not_confirmed"
+        classification = "upstream_contract_not_confirmed"
     else:
-        classification = "route_not_confirmed"
+        classification = "route_contract_not_confirmed"
     fallback_match = (
         routed.get("http_status") == fallback.get("http_status") == 404
         and routed.get("body_sha256") == fallback.get("body_sha256")
@@ -273,7 +354,9 @@ def classify_surface(frontend, api, routed, upstream, fallback):
     return {
         "frontend_gateway_http_status": frontend.get("http_status"),
         "api_gateway_identity_matches": api.get("reqsys_build_identity_matches") is True,
+        "gateway_identity_matches": gateway_ok,
         "routed_kb": routed, "direct_kb": upstream,
+        "documents_match": documents_match,
         "fallback_control": fallback,
         "fallback_matches_routed_404": fallback_match,
         "classification": classification,
@@ -284,7 +367,7 @@ def classify_surface(frontend, api, routed, upstream, fallback):
 def validate_direct_summary(value):
     need(isinstance(value, dict)
          and set(value) == {"http_status", "body_bytes", "body_sha256",
-                            "openapi_identity_matches"},
+                            "openapi_contract_matches"},
          "direct_summary_invalid")
     need(type(value["http_status"]) is int and 100 <= value["http_status"] <= 599,
          "direct_status_invalid")
@@ -293,9 +376,53 @@ def validate_direct_summary(value):
     need(isinstance(value["body_sha256"], str)
          and ID_RE.fullmatch(value["body_sha256"]) is not None,
          "direct_digest_invalid")
-    need(type(value["openapi_identity_matches"]) is bool,
+    need(type(value["openapi_contract_matches"]) is bool,
          "direct_identity_invalid")
     return value
+
+
+def bounded_http_get(host, port, path, *, deadline_seconds=5.0):
+    need(host == "127.0.0.1" and type(port) is int and 0 < port <= 65535,
+         "gateway_destination_unapproved")
+    need(path in GATEWAY_PATHS, "gateway_path_unapproved")
+    need(isinstance(deadline_seconds, (int, float)) and 0 < deadline_seconds <= 5,
+         "gateway_deadline_invalid")
+    deadline = time.monotonic() + deadline_seconds
+    connection = http.client.HTTPConnection(host, port, timeout=deadline_seconds)
+    try:
+        connection.connect()
+        remaining = deadline - time.monotonic()
+        need(remaining > 0, "gateway_http_deadline")
+        connection.sock.settimeout(remaining)
+        connection.request("GET", path, headers={
+            "Accept": "application/json,text/html",
+            "Cache-Control": "no-store",
+            "User-Agent": "KB-Route-Readonly/1",
+        })
+        remaining = deadline - time.monotonic()
+        need(remaining > 0, "gateway_http_deadline")
+        connection.sock.settimeout(remaining)
+        response = connection.getresponse()
+        chunks = []
+        total = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            need(remaining > 0, "gateway_http_deadline")
+            if connection.sock is not None:
+                connection.sock.settimeout(remaining)
+            chunk = response.read(min(65536, MAX_BYTES + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            need(total <= MAX_BYTES, "gateway_http_body_too_large")
+        return response.status, b"".join(chunks)
+    except Blocked:
+        raise
+    except (OSError, TimeoutError, http.client.HTTPException):
+        raise Blocked("gateway_http_unavailable") from None
+    finally:
+        connection.close()
 
 
 class NoRedirect(HTTPRedirectHandler):
@@ -350,23 +477,7 @@ class Live:
 
     def gateway_get(self, path):
         need(path in GATEWAY_PATHS, "gateway_path_unapproved")
-        request = Request(GATEWAY_ORIGIN + path, method="GET", headers={
-            "Accept": "application/json,text/html",
-            "Cache-Control": "no-store",
-            "User-Agent": "KB-Route-Readonly/1",
-        })
-        try:
-            with build_opener(NoRedirect()).open(request, timeout=5) as response:
-                raw = response.read(MAX_BYTES + 1)
-                status = response.status
-        except HTTPError as exc:
-            status = exc.code
-            raw = exc.read(MAX_BYTES + 1)
-            exc.close()
-        except (URLError, OSError, TimeoutError):
-            raise Blocked("gateway_http_unavailable") from None
-        need(len(raw) <= MAX_BYTES, "gateway_http_body_too_large")
-        return status, raw
+        return bounded_http_get("127.0.0.1", 8083, path)
 
     def kb_openapi(self, identifier):
         need(ID_RE.fullmatch(identifier) is not None, "container_id_invalid")
