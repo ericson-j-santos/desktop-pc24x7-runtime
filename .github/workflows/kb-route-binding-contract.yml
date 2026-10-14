@@ -1,0 +1,43 @@
+name: KB route binding collector contracts
+
+on:
+  push:
+    branches: [fix/kb-route-binding-readonly-20261009]
+    paths:
+      - scripts/reqsys_kb_route_binding_probe.py
+      - tests/test_reqsys_kb_route_binding_probe.py
+      - tests/kb_route_binding_docker_contract.py
+      - .github/workflows/kb-route-binding-contract.yml
+  pull_request:
+    paths:
+      - scripts/reqsys_kb_route_binding_probe.py
+      - tests/test_reqsys_kb_route_binding_probe.py
+      - tests/kb_route_binding_docker_contract.py
+      - .github/workflows/kb-route-binding-contract.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kb-route-binding-contract-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Install the already validated verifier dependency
+        run: python -m pip install --disable-pip-version-check cryptography==50.0.2
+      - name: Compile the exact checked-out collector and tests
+        run: python -m compileall -q scripts/reqsys_kb_route_binding_probe.py tests/test_reqsys_kb_route_binding_probe.py tests/kb_route_binding_docker_contract.py
+      - name: Positive, negative, replay and race contracts
+        run: python -m unittest discover -s tests -p test_reqsys_kb_route_binding_probe.py -v
+      - name: Real disposable Docker format and sanitization controls
+        run: python tests/kb_route_binding_docker_contract.py

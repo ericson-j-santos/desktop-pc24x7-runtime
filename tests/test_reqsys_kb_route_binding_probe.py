@@ -1,0 +1,403 @@
+"""Contract tests. Fake Docker transport is not physical host evidence."""
+import base64
+import copy
+import importlib.util
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+PATH = Path(__file__).resolve().parents[1] / "scripts" / "reqsys_kb_route_binding_probe.py"
+SPEC = importlib.util.spec_from_file_location("kb_route_binding", PATH)
+probe = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = probe
+SPEC.loader.exec_module(probe)
+
+TUNNEL, EDGE, API, KB = (c * 64 for c in "1234")
+NET = "5" * 64
+SHA = "a" * 40
+ORIGIN = "https://authorized-dev.trycloudflare.com"
+PROJECT = "wt-pc24x7-piloto"
+
+
+def item(identifier, service, name=None, project=PROJECT, port=None):
+    return {
+        "id": identifier, "name": "/" + (name or service), "project": project,
+        "service": service, "running": True, "image_id": "sha256:" + "f" * 64,
+        "config_files": "C:/private-root/docker-compose.yml,C:/private-root/docker-compose.dev.yml",
+        "instance": None, "source_sha": SHA,
+        "ports": {"80/tcp": [{"HostPort": str(port)}]} if port else {},
+        "networks": {"dev-net": {"NetworkID": NET, "Aliases": [service]}},
+    }
+
+
+class Fake:
+    def __init__(self, with_kb=True):
+        self.items = [item(TUNNEL, "", "reqsys-dev-gateway-tunnel"),
+                      item(EDGE, "gateway", port=8083), item(API, "api")]
+        if with_kb:
+            self.items.append(item(KB, "kb"))
+        self.calls = []
+        self.change_inventory = False
+        self.change_locator = False
+        self.inventory_calls = self.locator_calls = 0
+
+    def locator(self):
+        self.locator_calls += 1
+        self.calls.append("locator")
+        origin = "https://different-dev.trycloudflare.com" if (
+            self.change_locator and self.locator_calls > 1) else ORIGIN
+        return {"origin": origin, "issued_at": 1000, "expires_at": 1900,
+                "envelope_sha256": "b" * 64}
+
+    def inventory(self):
+        self.inventory_calls += 1
+        self.calls.append("inventory")
+        values = copy.deepcopy(self.items)
+        if self.change_inventory and self.inventory_calls > 1:
+            values[1]["image_id"] = "sha256:" + "e" * 64
+        return values
+
+    def tunnel(self, identifier):
+        self.calls.append("tunnel")
+        return "http://host.docker.internal:8083", {ORIGIN}
+
+    def surface(self, gateway_id, kb_id, target):
+        self.calls.append("surface")
+        body = json.dumps({"info": {"title": "Internal Knowledge Base API"},
+                           "paths": {path: {} for path in
+                             ("/health", "/projects", "/events",
+                              "/validation-runs/ingest")}}).encode()
+        direct = probe.openapi_fingerprint(200, body)
+        return probe.classify_surface(
+            probe.response_fingerprint(200, b"frontend"),
+            {**probe.response_fingerprint(200, b"{}"),
+             "reqsys_build_identity_matches": True},
+            probe.openapi_fingerprint(200, body), direct,
+            probe.response_fingerprint(404, b"missing"),
+        )
+
+
+class RouteContracts(unittest.TestCase):
+    def test_positive_independent_readback(self):
+        fake = Fake()
+        result = probe.collect(fake, clock=lambda: 1100)
+        self.assertEqual(result["gateway"]["container_id"], EDGE)
+        self.assertEqual(result["kb"]["container_id"], KB)
+        self.assertTrue(result["independent_metadata_readback"])
+        self.assertEqual(fake.inventory_calls, 2)
+        self.assertFalse(result["loaded_config_verified"])
+        self.assertFalse(result["host_inventory_complete"])
+
+    def test_no_kb_is_scoped_not_machine_absence(self):
+        result = probe.collect(Fake(False), clock=lambda: 1100)
+        self.assertIsNone(result["kb"])
+        self.assertEqual(result["kb_absence_scope"], "selected_compose_project_only")
+        self.assertIsNone(result["KB_WRITE_TOKEN_present"])
+        self.assertIsNone(result["KB_INGEST_ROOT_present"])
+
+    def test_repeat_is_idempotent(self):
+        self.assertEqual(probe.collect(Fake(), clock=lambda: 1100),
+                         probe.collect(Fake(), clock=lambda: 1100))
+
+    def test_raw_paths_and_origin_not_exported(self):
+        raw = json.dumps(probe.collect(Fake(), clock=lambda: 1100))
+        self.assertNotIn("private-root", raw)
+        self.assertNotIn(ORIGIN, raw)
+        self.assertNotIn("Config.Env", probe.FORMAT)
+
+    def test_inventory_change_blocks(self):
+        fake = Fake()
+        fake.change_inventory = True
+        with self.assertRaisesRegex(probe.Blocked, "metadata_changed"):
+            probe.collect(fake, clock=lambda: 1100)
+
+    def test_tunnel_change_blocks(self):
+        fake = Fake()
+        fake.change_locator = True
+        with self.assertRaisesRegex(probe.Blocked, "tunnel_binding_changed"):
+            probe.collect(fake, clock=lambda: 1100)
+
+    def test_expiry_before_docker(self):
+        fake = Fake()
+        with self.assertRaisesRegex(probe.Blocked, "locator_expired"):
+            probe.collect(fake, clock=lambda: 1900)
+        self.assertEqual(fake.inventory_calls, 0)
+
+    def test_expiry_before_completion(self):
+        with self.assertRaisesRegex(probe.Blocked, "locator_expired"):
+            probe.collect(Fake(), clock=iter([1100, 1900]).__next__)
+
+    def test_no_origin_match_blocks(self):
+        fake = Fake()
+        fake.tunnel = lambda _: ("http://host.docker.internal:8083", set())
+        with self.assertRaisesRegex(probe.Blocked, "signed_origin_tunnel_not_unique"):
+            probe.collect(fake, clock=lambda: 1100)
+
+    def test_two_matching_tunnels_block(self):
+        fake = Fake()
+        fake.items.append(item("6" * 64, "", "reqsys-dev-failover-tunnel"))
+        with self.assertRaisesRegex(probe.Blocked, "signed_origin_tunnel_not_unique"):
+            probe.collect(fake, clock=lambda: 1100)
+
+    def test_two_port_bindings_block(self):
+        fake = Fake()
+        fake.items.append(item("6" * 64, "nginx", port=8083))
+        with self.assertRaisesRegex(probe.Blocked, "local_destination_not_unique"):
+            probe.collect(fake, clock=lambda: 1100)
+
+    def test_unapproved_project_blocks(self):
+        fake = Fake()
+        fake.items[1]["project"] = "production"
+        with self.assertRaisesRegex(probe.Blocked, "destination_project_unapproved"):
+            probe.collect(fake, clock=lambda: 1100)
+
+    def test_disallowed_tunnel_arguments(self):
+        for args in (["tunnel", "--url", "http://evil/"],
+                     ["tunnel", "--url", "http://caddy:80", "--token", "sentinel"],
+                     ["run", "http://caddy:80"]):
+            with self.subTest(args=args), self.assertRaises(probe.Blocked):
+                probe.route_target(args)
+
+    def test_both_known_tunnel_shapes(self):
+        for target in ("http://host.docker.internal:8083", "http://caddy:80"):
+            self.assertEqual(probe.route_target(["tunnel", "--url", target]), target)
+            self.assertEqual(probe.route_target(["--no-autoupdate", "tunnel", "--url", target]), target)
+
+    def test_portable_network_binding(self):
+        values = [item(TUNNEL, "", "reqsys-dev-selfhosted-tunnel-primary"),
+                  item(EDGE, "caddy"), item(API, "gateway")]
+        result = probe.select_chain(values, TUNNEL, "http://caddy:80")
+        self.assertEqual(result["edge_id"], EDGE)
+        self.assertEqual(result["gateway_id"], API)
+
+    def test_portable_network_mismatch(self):
+        values = [item(TUNNEL, "", "reqsys-dev-selfhosted-tunnel-primary"),
+                  item(EDGE, "caddy"), item(API, "gateway")]
+        values[1]["networks"]["dev-net"]["NetworkID"] = "9" * 64
+        with self.assertRaises(probe.Blocked):
+            probe.select_chain(values, TUNNEL, "http://caddy:80")
+
+    def test_bad_metadata_does_not_leak(self):
+        value = item(EDGE, "gateway")
+        value["config_files"] = "sentinel_secret"
+        with self.assertRaisesRegex(probe.Blocked, "^compose_config_name_unapproved$"):
+            probe.safe_metadata(value)
+
+    def test_unapproved_origin(self):
+        for value in ("http://x.trycloudflare.com", ORIGIN + "/path", ORIGIN + "?x=y",
+                      "https://user:secret@x.trycloudflare.com", "https://127.0.0.1"):
+            with self.subTest(value=value), self.assertRaises(probe.Blocked):
+                probe.checked_origin(value)
+
+    def test_host_fails_before_subprocess(self):
+        with patch.object(probe.socket, "gethostname", return_value="WRONG-HOST"):
+            with patch.object(probe.subprocess, "run") as command:
+                with self.assertRaisesRegex(probe.Blocked, "physical_host_not_authorized"):
+                    probe.Live()
+                command.assert_not_called()
+
+
+class SignedLocatorContracts(unittest.TestCase):
+    def setUp(self):
+        from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+        from cryptography.hazmat.primitives import serialization
+        self.key = Ed25519PrivateKey.generate()
+        self.public = base64.b64encode(self.key.public_key().public_bytes(
+            serialization.Encoding.Raw, serialization.PublicFormat.Raw)).decode()
+        self.payload = {"environment": "dev", "issued_at": 1000, "expires_at": 1900,
+                        "urls": [ORIGIN], "selected_url": ORIGIN,
+                        "runtime_contract": {"version": "2.0.0",
+                          "static_frontend_required": True, "vite_hmr_forbidden": True,
+                          "required_endpoints": ["/api/health", "/api/runtime/health",
+                              "/api/runtime/readiness", "/api/runtime/build-info"]}}
+
+    def envelope(self, payload=None, corrupt=False):
+        encoded = base64.b64encode(json.dumps(payload or self.payload).encode()).decode()
+        signature = self.key.sign(encoded.encode())
+        if corrupt:
+            signature = b"\x00" * 64
+        msg = json.dumps({"v": 1, "payload_b64": encoded,
+                         "signature_b64": base64.b64encode(signature).decode()})
+        return json.dumps({"event": "message", "title": "reqsys-dev-locator", "message": msg}).encode()
+
+    def test_valid_signature(self):
+        with patch.object(probe, "PUBLIC_KEY", self.public):
+            self.assertEqual(probe.verify_locator(self.envelope(), 1100)["origin"], ORIGIN)
+
+    def test_tampered_signature(self):
+        with patch.object(probe, "PUBLIC_KEY", self.public), self.assertRaises(probe.Blocked):
+            probe.verify_locator(self.envelope(corrupt=True), 1100)
+
+    def test_prod_is_not_dev_even_when_signed(self):
+        self.payload["environment"] = "prod"
+        with patch.object(probe, "PUBLIC_KEY", self.public), self.assertRaises(probe.Blocked):
+            probe.verify_locator(self.envelope(), 1100)
+
+    def test_expired_envelope(self):
+        with patch.object(probe, "PUBLIC_KEY", self.public), self.assertRaises(probe.Blocked):
+            probe.verify_locator(self.envelope(), 1900)
+
+    def test_unknown_signer(self):
+        with self.assertRaises(probe.Blocked):
+            probe.verify_locator(self.envelope(), 1100)
+
+    def test_missing_runtime_endpoint(self):
+        self.payload["runtime_contract"]["required_endpoints"] = []
+        with patch.object(probe, "PUBLIC_KEY", self.public), self.assertRaises(probe.Blocked):
+            probe.verify_locator(self.envelope(), 1100)
+
+    def test_malformed_rows_ignored(self):
+        with patch.object(probe, "PUBLIC_KEY", self.public):
+            result = probe.verify_locator(b"not-json\n[]\n" + self.envelope(), 1100)
+            self.assertEqual(result["origin"], ORIGIN)
+
+
+class EvidenceFileContracts(unittest.TestCase):
+    def test_main_writes_only_fixed_sanitized_evidence(self):
+        sample = {
+            "schema_version": "1.0.0", "status": "route_identity_observed_config_pending",
+            "host": probe.HOST, "environment": "dev", "runtime_changed": False,
+            "locator_signature_verified": True, "independent_metadata_readback": True,
+            "loaded_config_verified": False, "host_inventory_complete": False,
+            "gateway": {"manifest_names_from_labels": ["docker-compose.yml"]},
+            "kb": None,
+        }
+        sha = "a" * 40
+        argv = ["probe", "--correlation-id", "kb-route-binding-test",
+                "--expected-collector-sha", sha, "--evidence-file",
+                "artifacts/kb-route-binding/evidence.json"]
+        old = probe.os.getcwd()
+        with tempfile.TemporaryDirectory() as directory:
+            probe.os.chdir(directory)
+            try:
+                with patch.object(sys, "argv", argv), patch.object(probe, "Live", return_value=object()), \
+                     patch.object(probe, "collect", return_value=sample):
+                    self.assertEqual(probe.main(), 0)
+                path = Path("artifacts/kb-route-binding/evidence.json")
+                written = json.loads(path.read_text(encoding="utf-8"))
+                self.assertEqual(written["expected_collector_sha"], sha)
+                self.assertEqual(written["correlation_id"], "kb-route-binding-test")
+                raw = path.read_text(encoding="utf-8")
+                for forbidden in ("Config.Env", "KB_WRITE_TOKEN=", "private-root", ORIGIN):
+                    self.assertNotIn(forbidden, raw)
+            finally:
+                probe.os.chdir(old)
+
+    def test_main_rejects_any_other_evidence_path_before_collection(self):
+        argv = ["probe", "--correlation-id", "kb-route-binding-test",
+                "--expected-collector-sha", "a" * 40,
+                "--evidence-file", "elsewhere.json"]
+        with patch.object(sys, "argv", argv), patch.object(probe, "Live") as live:
+            with self.assertRaisesRegex(probe.Blocked, "evidence_path_unapproved"):
+                probe.main()
+            live.assert_not_called()
+
+
+class LocalSurfaceContracts(unittest.TestCase):
+    @staticmethod
+    def response(status, body, *, openapi=False, build=False):
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        if openapi:
+            return probe.openapi_fingerprint(status, raw)
+        if build:
+            return probe.build_info_fingerprint(status, raw)
+        return probe.response_fingerprint(status, raw)
+
+    @staticmethod
+    def openapi():
+        return {"info": {"title": "Internal Knowledge Base API"},
+                "paths": {path: {} for path in
+                  ("/health", "/projects", "/events", "/validation-runs/ingest")}}
+
+    def classify(self, routed, upstream, fallback=b"frontend-missing"):
+        return probe.classify_surface(
+            self.response(200, b"frontend"),
+            self.response(200, {"build_sha": "a" * 40}, build=True),
+            routed, upstream, self.response(404, fallback),
+        )
+
+    def test_upstream_valid_route_404(self):
+        result = self.classify(self.response(404, b"route-missing", openapi=True),
+                               self.response(200, self.openapi(), openapi=True))
+        self.assertEqual(result["classification"], "upstream_valid_route_404")
+        self.assertFalse(result["fallback_matches_routed_404"])
+
+    def test_upstream_failure(self):
+        result = self.classify(self.response(404, b"missing", openapi=True),
+                               self.response(503, b"", openapi=True),
+                               fallback=b"missing")
+        self.assertEqual(result["classification"], "upstream_not_confirmed")
+        self.assertTrue(result["fallback_matches_routed_404"])
+
+    def test_non_200_openapi_body_does_not_confirm_upstream(self):
+        routed = self.response(404, b"missing", openapi=True)
+        upstream = self.response(503, self.openapi(), openapi=True)
+        self.assertFalse(upstream["openapi_identity_matches"])
+        self.assertEqual(self.classify(routed, upstream)["classification"],
+                         "upstream_not_confirmed")
+
+    def test_route_and_upstream_success(self):
+        direct = self.response(200, self.openapi(), openapi=True)
+        result = self.classify(direct, direct)
+        self.assertEqual(result["classification"], "route_and_upstream_valid")
+        self.assertTrue(result["api_gateway_identity_matches"])
+
+    def test_fallback_control_needs_status_size_and_digest(self):
+        routed = self.response(404, b"same", openapi=True)
+        upstream = self.response(200, self.openapi(), openapi=True)
+        self.assertTrue(self.classify(routed, upstream, fallback=b"same")
+                        ["fallback_matches_routed_404"])
+        self.assertFalse(self.classify(routed, upstream, fallback=b"different")
+                         ["fallback_matches_routed_404"])
+
+    def test_invalid_json_and_oversize_are_sanitized_or_blocked(self):
+        value = probe.openapi_fingerprint(200, b"not-json")
+        self.assertFalse(value["openapi_identity_matches"])
+        self.assertNotIn("body", value)
+        with self.assertRaisesRegex(probe.Blocked, "http_body_invalid"):
+            probe.response_fingerprint(200, b"x" * (probe.MAX_BYTES + 1))
+
+    def test_direct_summary_contract_rejects_extra_or_malformed_fields(self):
+        good = {"http_status": 200, "body_bytes": 10, "body_sha256": "a" * 64,
+                "openapi_identity_matches": True}
+        self.assertEqual(probe.validate_direct_summary(good), good)
+        for bad in ({**good, "body": "secret"},
+                    {**good, "body_sha256": "bad"},
+                    {**good, "openapi_identity_matches": 1}):
+            with self.subTest(bad=bad), self.assertRaises(probe.Blocked):
+                probe.validate_direct_summary(bad)
+
+    def test_internal_get_is_fixed_non_redirecting_and_does_not_initialize_app(self):
+        script = probe.DIRECT_OPENAPI_SCRIPT
+        self.assertIn("HTTPConnection('127.0.0.1',8080,timeout=5)", script)
+        self.assertIn("c.request('GET','/openapi.json'", script)
+        self.assertNotIn("uvicorn", script)
+        self.assertNotIn("main:app", script)
+        self.assertNotIn("Config.Env", script)
+        self.assertNotIn("c.request('GET','/health'", script)
+
+
+class PhysicalWorkflowContracts(unittest.TestCase):
+    def setUp(self):
+        self.workflow = (Path(__file__).resolve().parents[1] / ".github" / "workflows" /
+                         "kb-route-binding-physical-readonly.yml").read_text(encoding="utf-8")
+
+    def test_source_is_workspace_root_and_rules_are_untracked_nested_checkout(self):
+        self.assertIn("path: _rules", self.workflow)
+        self.assertNotIn("path: source", self.workflow)
+        self.assertNotIn("path: rules", self.workflow)
+        self.assertIn("'--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,", self.workflow)
+        self.assertIn("$rules = Join-Path $env:GITHUB_WORKSPACE '_rules'", self.workflow)
+
+    def test_execution_stays_in_launcher_target_and_trigger_is_one_shot(self):
+        self.assertIn("'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,", self.workflow)
+        self.assertIn("path: ${{ steps.session.outputs.target_path }}/artifacts/kb-route-binding/evidence.json", self.workflow)
+        self.assertEqual(self.workflow.count(".github/kb-route-binding-authorized-once-20261013"), 1)
+        self.assertNotIn("workflow_dispatch:", self.workflow)
+
+
+if __name__ == "__main__":
+    unittest.main()
