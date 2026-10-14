@@ -2,7 +2,7 @@ name: Desktop KB route binding metadata read-only
 
 on:
   push:
-    branches: [fix/kb-route-binding-readonly-20261009]
+    branches: [ops/kb-route-binding-readonly-approved-20261014]
     paths:
       - .github/kb-route-binding-authorized-once-20261013
 
@@ -67,7 +67,7 @@ jobs:
             '--session-prefix', 'kb-route-binding',
             '--correlation-id', "kb-route-binding-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
             '--expected-head', $env:GITHUB_SHA,
-            '--sync-ref', 'origin/fix/kb-route-binding-readonly-20261009',
+            '--sync-ref', 'origin/ops/kb-route-binding-readonly-approved-20261014',
             '--require-runner-version-preflight')
           $raw = @(& $python $launcher @args)
           if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }

@@ -1,7 +1,8 @@
 authorized_by=user
 authorized_at=2026-10-14
 scope=single_metadata_only_kb_route_binding_collection
-workflow_head=e6ee7fe1dada4d12360eaa363e3fafd5702a9f91
+reviewed_collector_sha=879ae66c37076f1b08d5af148142d18a551af7b5
+operational_parent_sha=5905d06bd05b922aa87dcd62c772a980421c20c3
 authorization_source_thread=01a12ace-3237-7365-b09f-8fdbaedce013
 authorization_phrase=avance_nas_etapas_e_execute_os_desbloqueios_necessarios
-attempt=2
+attempt=3

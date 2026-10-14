@@ -477,7 +477,11 @@ def bounded_http_get(host, port, path, *, deadline_seconds=5.0):
         return response.status, b"".join(chunks)
     except Blocked:
         raise
-    except (OSError, TimeoutError, http.client.HTTPException):
+    except TimeoutError:
+        # The socket timeout is set to the absolute remaining budget. It may
+        # win a narrow race with the watchdog callback on Windows.
+        raise Blocked("gateway_http_deadline") from None
+    except (OSError, http.client.HTTPException):
         if expired.is_set() or time.monotonic() >= deadline:
             raise Blocked("gateway_http_deadline") from None
         raise Blocked("gateway_http_unavailable") from None
