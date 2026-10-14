@@ -7,13 +7,15 @@ on:
       - .github/workflows/reqsys-dev-readonly-inventory.yml
       - scripts/reqsys_dev_readonly_inventory_receipt.py
       - tests/test_reqsys_dev_readonly_inventory_receipt.py
+      - scripts/reqsys_dev_inventory_pickup_watchdog.cjs
+      - tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
 
 permissions:
   contents: read
 
 concurrency:
   group: reqsys-dev-readonly-inventory-2546-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   contract:
@@ -58,6 +60,34 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q tests/test_reqsys_dev_current_data_probe.py tests/test_reqsys_dev_readonly_inventory_receipt.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  pickup_watchdog:
+    needs: contract
+    if: needs.contract.result == 'success'
+    name: Abort blocked physical inventory after 300 seconds
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+    steps:
+      - name: Checkout immutable pickup watchdog
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Test pickup positive, negative, privacy and idempotency controls
+        shell: bash
+        run: |
+          node --check scripts/reqsys_dev_inventory_pickup_watchdog.cjs
+          node --test tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
+      - name: Stop stalled acquisition without repeating physical dispatch
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const watchdog = require('./scripts/reqsys_dev_inventory_pickup_watchdog.cjs');
+            await watchdog.monitor({github, context, core});
 
   inspect:
     needs: contract
