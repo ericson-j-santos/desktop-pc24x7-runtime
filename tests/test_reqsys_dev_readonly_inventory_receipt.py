@@ -161,6 +161,7 @@ def test_physical_workflow_is_gate_bound_and_never_dispatches_cutover():
     assert "--risk', '1'" in workflow
     assert "--expected-head', $env:GITHUB_SHA" in workflow
     assert "scripts/reqsys_dev_readonly_inventory_receipt.py" in workflow
+    assert "'--', $python, '-B', 'scripts/reqsys_dev_readonly_inventory_receipt.py'" in workflow
     assert "github.event_name == 'workflow_dispatch'" not in workflow
     assert "docker compose up" not in workflow.lower()
     assert "--risk', '2'" not in workflow

@@ -154,7 +154,7 @@ jobs:
           $args = @('--policy', $policy, '--correlation-id', $env:REQSYS_INVENTORY_CORRELATION,
             'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
             '--risk', '1', '--timeout', '120', '--expected-head', $env:GITHUB_SHA,
-            '--', 'python', 'scripts/reqsys_dev_readonly_inventory_receipt.py')
+            '--', $python, '-B', 'scripts/reqsys_dev_readonly_inventory_receipt.py')
           $raw = @(& $python $gateway @args)
           if ($LASTEXITCODE -ne 0) { throw 'READONLY_INVENTORY_GATEWAY_BLOCKED' }
       - name: Independently read back sanitized inventory receipt
