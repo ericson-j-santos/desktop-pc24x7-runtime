@@ -25,8 +25,10 @@ publish only its sanitized JSON evidence.
   and the already-running KB container. Local HTTP must bypass operating-system
   proxy configuration explicitly and enforce a monotonic five-second total
   deadline, including connect, headers and streamed body. A cancelable watchdog
-  must close the connection at the absolute deadline and be joined on every exit,
-  so trickled headers or body bytes cannot extend the budget or leave a worker.
+  must retain the connected socket, interrupt it with `shutdown(SHUT_RDWR)`
+  at the absolute deadline, close the response and connection, and be joined on
+  every exit, so trickled headers or body bytes cannot extend the budget or
+  leave a worker.
 - Export status, size, digest and strict OpenAPI contract booleans only; never
   export bodies or free-form headers. Invalid or non-object JSON must fail closed.
   The internal KB probe must call the existing `/openapi.json` endpoint without

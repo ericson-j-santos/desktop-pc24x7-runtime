@@ -330,21 +330,21 @@ class _TransportHandler(BaseHTTPRequestHandler):
         mode = type(self).mode
         if self.path == "/api/runtime/build-info" and mode == "drip_headers":
             try:
-                for fragment in (
-                        b"HTTP/1.0 200 OK\r\n",
-                        b"Content-Type: application/json\r\n",
-                        b"Content-Length: 2\r\n", b"\r\n", b"{}"):
-                    self.connection.sendall(fragment)
+                self.connection.sendall(b"HTTP/1.0 200 OK\r\n")
+                for index in range(100):
+                    self.connection.sendall(
+                        f"X-Drip-{index}: x\r\n".encode("ascii"))
                     time.sleep(0.04)
+                self.connection.sendall(b"Content-Length: 2\r\n\r\n{}")
             except (BrokenPipeError, ConnectionResetError, OSError):
                 pass
         elif self.path == "/api/runtime/build-info" and mode == "drip_body":
             self.send_response(200)
-            self.send_header("Content-Length", "6")
+            self.send_header("Content-Length", "100")
             self.end_headers()
             try:
-                for byte in b"abcdef":
-                    self.wfile.write(bytes((byte,)))
+                for _ in range(100):
+                    self.wfile.write(b"x")
                     self.wfile.flush()
                     time.sleep(0.04)
             except (BrokenPipeError, ConnectionResetError, OSError):
@@ -367,7 +367,18 @@ class _TransportHandler(BaseHTTPRequestHandler):
         elif self.path == "/openapi.json":
             body = json.dumps(self.openapi(), sort_keys=True).encode()
             status = 503 if mode == "direct_error" else 200
-            if mode in {"direct_slow", "direct_drip"}:
+            if mode == "direct_drip_headers":
+                try:
+                    self.connection.sendall(b"HTTP/1.0 200 OK\r\n")
+                    for index in range(100):
+                        self.connection.sendall(
+                            f"X-Drip-{index}: x\r\n".encode("ascii"))
+                        time.sleep(0.04)
+                    self.connection.sendall(
+                        f"Content-Length: {len(body)}\r\n\r\n".encode("ascii") + body)
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+            elif mode in {"direct_slow", "direct_drip"}:
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -524,7 +535,9 @@ class LocalSurfaceContracts(unittest.TestCase):
             probe.bounded_http_get("127.0.0.1", self.port,
                                    "/api/runtime/build-info",
                                    deadline_seconds=0.1)
-        self.assertLess(time.monotonic() - started, 1.0)
+        elapsed = time.monotonic() - started
+        self.assertGreaterEqual(elapsed, 0.07)
+        self.assertLess(elapsed, 0.75)
 
     def test_gateway_total_deadline_stops_inactive_body(self):
         self.assert_gateway_deadline("slow")
@@ -563,7 +576,7 @@ class LocalSurfaceContracts(unittest.TestCase):
                                 capture_output=True, text=True, timeout=3,
                                 check=True)
         self.assertFalse(json.loads(result.stdout)["openapi_contract_matches"])
-        for mode in ("direct_slow", "direct_drip"):
+        for mode in ("direct_slow", "direct_drip_headers", "direct_drip"):
             with self.subTest(mode=mode):
                 _TransportHandler.mode = mode
                 started = time.monotonic()
@@ -574,7 +587,9 @@ class LocalSurfaceContracts(unittest.TestCase):
                 self.assertEqual(summary["http_status"], 599)
                 self.assertEqual(summary["body_bytes"], 0)
                 self.assertFalse(summary["openapi_contract_matches"])
-                self.assertLess(time.monotonic() - started, 1.0)
+                elapsed = time.monotonic() - started
+                self.assertGreaterEqual(elapsed, 0.07)
+                self.assertLess(elapsed, 0.75)
 
     def test_summary_rejects_extra_or_malformed_fields(self):
         good = {"http_status": 200, "body_bytes": 10, "body_sha256": "a" * 64,

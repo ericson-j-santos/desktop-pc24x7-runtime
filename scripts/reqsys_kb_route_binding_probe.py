@@ -42,6 +42,7 @@ DIRECT_OPENAPI_SCRIPT = r"""import hashlib
 import http.client
 import json
 import re
+import socket
 import threading
 import time
 
@@ -50,15 +51,27 @@ DEADLINE_SECONDS = 5.0
 deadline = time.monotonic() + DEADLINE_SECONDS
 connection = http.client.HTTPConnection("127.0.0.1", 8080, timeout=DEADLINE_SECONDS)
 expired = threading.Event()
+socket_ref = {"sock": None}
+response = None
 def expire():
     expired.set()
-    connection.close()
+    sock = socket_ref["sock"]
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            sock.close()
+        except OSError:
+            pass
 timer = threading.Timer(DEADLINE_SECONDS, expire)
 timer.start()
 status = 599
 body = b""
 try:
     connection.connect()
+    socket_ref["sock"] = connection.sock
     if expired.is_set() or time.monotonic() >= deadline:
         raise TimeoutError("deadline")
     connection.sock.settimeout(max(0.001, deadline - time.monotonic()))
@@ -93,6 +106,8 @@ except (OSError, TimeoutError, ValueError, http.client.HTTPException):
 finally:
     timer.cancel()
     timer.join()
+    if response is not None:
+        response.close()
     connection.close()
 try:
     document = json.loads(body)
@@ -410,15 +425,27 @@ def bounded_http_get(host, port, path, *, deadline_seconds=5.0):
     deadline = time.monotonic() + deadline_seconds
     connection = http.client.HTTPConnection(host, port, timeout=deadline_seconds)
     expired = threading.Event()
+    socket_ref = {"sock": None}
+    response = None
 
     def expire():
         expired.set()
-        connection.close()
+        sock = socket_ref["sock"]
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
 
     timer = threading.Timer(deadline_seconds, expire)
     timer.start()
     try:
         connection.connect()
+        socket_ref["sock"] = connection.sock
         need(not expired.is_set() and time.monotonic() < deadline,
              "gateway_http_deadline")
         connection.sock.settimeout(max(0.001, deadline - time.monotonic()))
@@ -457,6 +484,8 @@ def bounded_http_get(host, port, path, *, deadline_seconds=5.0):
     finally:
         timer.cancel()
         timer.join()
+        if response is not None:
+            response.close()
         connection.close()
 
 
