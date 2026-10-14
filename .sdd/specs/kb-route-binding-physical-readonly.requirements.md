@@ -19,6 +19,11 @@ publish only its sanitized JSON evidence.
   returned `target_path`.
 - Require the dedicated Desktop runner, `SESSION_LAUNCH_OK`, exact HEAD,
   runner-version preflight, and Command Gateway risk 1.
+- Permit only fixed, bounded, non-redirecting GET probes for the local gateway
+  and the already-running KB container. Export status, size, digest and contract
+  booleans only; never export bodies or free-form headers. The internal KB probe
+  must call the existing `/openapi.json` endpoint without importing or starting
+  the application.
 - Invoke only `scripts/reqsys_kb_route_binding_probe.py` with the fixed relative
   evidence path `artifacts/kb-route-binding/evidence.json`.
 - Do not install software on the Desktop, deploy, restart, mutate Docker, routes,

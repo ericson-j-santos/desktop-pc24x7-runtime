@@ -33,6 +33,26 @@ URL_RE = re.compile(r"https://[a-z0-9]+(?:-[a-z0-9]+)*\.trycloudflare\.com")
 ID_RE = re.compile(r"[0-9a-f]{64}")
 SHA_RE = re.compile(r"[0-9a-f]{40}")
 MAX_BYTES = 1048576
+GATEWAY_ORIGIN = "http://127.0.0.1:8083"
+GATEWAY_PATHS = frozenset(("/", "/api/runtime/build-info", "/kb/openapi.json",
+                           "/__kb_route_probe_missing__"))
+DIRECT_OPENAPI_SCRIPT = (
+    "import hashlib,http.client,json;"
+    "c=http.client.HTTPConnection('127.0.0.1',8080,timeout=5);"
+    "c.request('GET','/openapi.json',headers={'Accept':'application/json',"
+    "'User-Agent':'KB-Route-Readonly/1'});r=c.getresponse();b=r.read(1048577);"
+    "assert len(b)<=1048576;"
+    "\ntry:o=json.loads(b)"
+    "\nexcept (ValueError,UnicodeError):o={}"
+    "\np=o.get('paths',{}) if isinstance(o,dict) else {};"
+    "i=o.get('info',{}) if isinstance(o,dict) else {};"
+    "ok=r.status==200 and isinstance(i,dict) and i.get('title')=='Internal Knowledge Base API' "
+    "and isinstance(p,dict) and all(x in p for x in "
+    "('/health','/projects','/events','/validation-runs/ingest'));"
+    "print(json.dumps({'http_status':r.status,'body_bytes':len(b),"
+    "'body_sha256':hashlib.sha256(b).hexdigest(),"
+    "'openapi_identity_matches':ok},sort_keys=True,separators=(',',':')))"
+)
 # Deliberately omit Config.Env, command lines, raw labels, and mount source paths.
 FORMAT = (
     '{"id":{{json .Id}},"name":{{json .Name}},"image_id":{{json .Image}},'
@@ -195,6 +215,89 @@ def safe_metadata(item):
             "instance_label": instance if instance == "pc24x7-selfhost-dev-v1" else None}
 
 
+def response_fingerprint(status, raw):
+    need(type(status) is int and 100 <= status <= 599, "http_status_invalid")
+    need(isinstance(raw, bytes) and len(raw) <= MAX_BYTES, "http_body_invalid")
+    return {"http_status": status, "body_bytes": len(raw),
+            "body_sha256": hashlib.sha256(raw).hexdigest()}
+
+
+def openapi_fingerprint(status, raw):
+    result = response_fingerprint(status, raw)
+    try:
+        obj = json.loads(raw)
+    except (ValueError, UnicodeError):
+        obj = {}
+    info = obj.get("info", {}) if isinstance(obj, dict) else {}
+    paths = obj.get("paths", {}) if isinstance(obj, dict) else {}
+    result["openapi_identity_matches"] = (
+        status == 200 and isinstance(info, dict)
+        and info.get("title") == "Internal Knowledge Base API"
+        and isinstance(paths, dict)
+        and all(path in paths for path in
+                ("/health", "/projects", "/events", "/validation-runs/ingest"))
+    )
+    return result
+
+
+def build_info_fingerprint(status, raw):
+    result = response_fingerprint(status, raw)
+    try:
+        obj = json.loads(raw)
+    except (ValueError, UnicodeError):
+        obj = {}
+    data = obj.get("data", obj) if isinstance(obj, dict) else {}
+    value = data.get("build_sha") or data.get("commit_sha") if isinstance(data, dict) else None
+    result["reqsys_build_identity_matches"] = (
+        status == 200 and isinstance(value, str) and SHA_RE.fullmatch(value) is not None
+    )
+    return result
+
+
+def classify_surface(frontend, api, routed, upstream, fallback):
+    direct_ok = upstream.get("openapi_identity_matches") is True
+    routed_ok = routed.get("openapi_identity_matches") is True
+    if direct_ok and routed_ok:
+        classification = "route_and_upstream_valid"
+    elif direct_ok and routed.get("http_status") == 404:
+        classification = "upstream_valid_route_404"
+    elif not direct_ok:
+        classification = "upstream_not_confirmed"
+    else:
+        classification = "route_not_confirmed"
+    fallback_match = (
+        routed.get("http_status") == fallback.get("http_status") == 404
+        and routed.get("body_sha256") == fallback.get("body_sha256")
+        and routed.get("body_bytes") == fallback.get("body_bytes")
+    )
+    return {
+        "frontend_gateway_http_status": frontend.get("http_status"),
+        "api_gateway_identity_matches": api.get("reqsys_build_identity_matches") is True,
+        "routed_kb": routed, "direct_kb": upstream,
+        "fallback_control": fallback,
+        "fallback_matches_routed_404": fallback_match,
+        "classification": classification,
+        "raw_bodies_exported": False, "freeform_headers_exported": False,
+    }
+
+
+def validate_direct_summary(value):
+    need(isinstance(value, dict)
+         and set(value) == {"http_status", "body_bytes", "body_sha256",
+                            "openapi_identity_matches"},
+         "direct_summary_invalid")
+    need(type(value["http_status"]) is int and 100 <= value["http_status"] <= 599,
+         "direct_status_invalid")
+    need(type(value["body_bytes"]) is int and 0 <= value["body_bytes"] <= MAX_BYTES,
+         "direct_size_invalid")
+    need(isinstance(value["body_sha256"], str)
+         and ID_RE.fullmatch(value["body_sha256"]) is not None,
+         "direct_digest_invalid")
+    need(type(value["openapi_identity_matches"]) is bool,
+         "direct_identity_invalid")
+    return value
+
+
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
@@ -244,6 +347,54 @@ class Live:
         need({x["id"] for x in items} == set(ids), "inventory_changed_during_read")
         return items
 
+
+    def gateway_get(self, path):
+        need(path in GATEWAY_PATHS, "gateway_path_unapproved")
+        request = Request(GATEWAY_ORIGIN + path, method="GET", headers={
+            "Accept": "application/json,text/html",
+            "Cache-Control": "no-store",
+            "User-Agent": "KB-Route-Readonly/1",
+        })
+        try:
+            with build_opener(NoRedirect()).open(request, timeout=5) as response:
+                raw = response.read(MAX_BYTES + 1)
+                status = response.status
+        except HTTPError as exc:
+            status = exc.code
+            raw = exc.read(MAX_BYTES + 1)
+            exc.close()
+        except (URLError, OSError, TimeoutError):
+            raise Blocked("gateway_http_unavailable") from None
+        need(len(raw) <= MAX_BYTES, "gateway_http_body_too_large")
+        return status, raw
+
+    def kb_openapi(self, identifier):
+        need(ID_RE.fullmatch(identifier) is not None, "container_id_invalid")
+        raw, _ = self.run(["exec", identifier, "python", "-c", DIRECT_OPENAPI_SCRIPT])
+        try:
+            value = json.loads(raw)
+        except (ValueError, UnicodeError):
+            raise Blocked("direct_summary_invalid") from None
+        return validate_direct_summary(value)
+
+    def surface(self, gateway_id, kb_id, target):
+        need(ID_RE.fullmatch(gateway_id) is not None, "container_id_invalid")
+        need(target == "http://host.docker.internal:8083",
+             "surface_target_unsupported")
+        need(kb_id is not None and ID_RE.fullmatch(kb_id) is not None,
+             "kb_container_required_for_surface")
+        front_status, front_raw = self.gateway_get("/")
+        api_status, api_raw = self.gateway_get("/api/runtime/build-info")
+        route_status, route_raw = self.gateway_get("/kb/openapi.json")
+        fallback_status, fallback_raw = self.gateway_get("/__kb_route_probe_missing__")
+        return classify_surface(
+            response_fingerprint(front_status, front_raw),
+            build_info_fingerprint(api_status, api_raw),
+            openapi_fingerprint(route_status, route_raw),
+            self.kb_openapi(kb_id),
+            response_fingerprint(fallback_status, fallback_raw),
+        )
+
     def tunnel(self, identifier):
         need(ID_RE.fullmatch(identifier) is not None, "container_id_invalid")
         raw, _ = self.run(["inspect", "--type", "container", "--format", "{{json .Args}}", identifier])
@@ -266,7 +417,9 @@ def collect(transport, clock=time.time):
     need(len(matches) == 1, "signed_origin_tunnel_not_unique")
     tunnel, target = matches[0]
     chain = select_chain(items, tunnel["id"], target)
-    # Independent metadata readback rejects a switch/recreation during collection.
+    # Probe only after the chain is selected; the independent readback below
+    # rejects any switch/recreation that occurs during the fixed GETs.
+    surface = transport.surface(chain["gateway_id"], chain["kb_id"], target)
     after = transport.inventory()
     by_id = {x["id"]: x for x in after}
     ids = {tunnel["id"], chain["edge_id"], chain["gateway_id"]}
@@ -293,6 +446,7 @@ def collect(transport, clock=time.time):
         "kb_absence_scope": "selected_compose_project_only" if not chain["kb_id"] else None,
         "loaded_config_verified": False, "KB_WRITE_TOKEN_present": None,
         "KB_INGEST_ROOT_present": None, "host_inventory_complete": False,
+        "surface": surface,
     }
 
 

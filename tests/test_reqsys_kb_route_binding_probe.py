@@ -64,6 +64,21 @@ class Fake:
         self.calls.append("tunnel")
         return "http://host.docker.internal:8083", {ORIGIN}
 
+    def surface(self, gateway_id, kb_id, target):
+        self.calls.append("surface")
+        body = json.dumps({"info": {"title": "Internal Knowledge Base API"},
+                           "paths": {path: {} for path in
+                             ("/health", "/projects", "/events",
+                              "/validation-runs/ingest")}}).encode()
+        direct = probe.openapi_fingerprint(200, body)
+        return probe.classify_surface(
+            probe.response_fingerprint(200, b"frontend"),
+            {**probe.response_fingerprint(200, b"{}"),
+             "reqsys_build_identity_matches": True},
+            probe.openapi_fingerprint(200, body), direct,
+            probe.response_fingerprint(404, b"missing"),
+        )
+
 
 class RouteContracts(unittest.TestCase):
     def test_positive_independent_readback(self):
@@ -279,6 +294,90 @@ class EvidenceFileContracts(unittest.TestCase):
             with self.assertRaisesRegex(probe.Blocked, "evidence_path_unapproved"):
                 probe.main()
             live.assert_not_called()
+
+
+class LocalSurfaceContracts(unittest.TestCase):
+    @staticmethod
+    def response(status, body, *, openapi=False, build=False):
+        raw = body if isinstance(body, bytes) else json.dumps(body).encode()
+        if openapi:
+            return probe.openapi_fingerprint(status, raw)
+        if build:
+            return probe.build_info_fingerprint(status, raw)
+        return probe.response_fingerprint(status, raw)
+
+    @staticmethod
+    def openapi():
+        return {"info": {"title": "Internal Knowledge Base API"},
+                "paths": {path: {} for path in
+                  ("/health", "/projects", "/events", "/validation-runs/ingest")}}
+
+    def classify(self, routed, upstream, fallback=b"frontend-missing"):
+        return probe.classify_surface(
+            self.response(200, b"frontend"),
+            self.response(200, {"build_sha": "a" * 40}, build=True),
+            routed, upstream, self.response(404, fallback),
+        )
+
+    def test_upstream_valid_route_404(self):
+        result = self.classify(self.response(404, b"route-missing", openapi=True),
+                               self.response(200, self.openapi(), openapi=True))
+        self.assertEqual(result["classification"], "upstream_valid_route_404")
+        self.assertFalse(result["fallback_matches_routed_404"])
+
+    def test_upstream_failure(self):
+        result = self.classify(self.response(404, b"missing", openapi=True),
+                               self.response(503, b"", openapi=True),
+                               fallback=b"missing")
+        self.assertEqual(result["classification"], "upstream_not_confirmed")
+        self.assertTrue(result["fallback_matches_routed_404"])
+
+    def test_non_200_openapi_body_does_not_confirm_upstream(self):
+        routed = self.response(404, b"missing", openapi=True)
+        upstream = self.response(503, self.openapi(), openapi=True)
+        self.assertFalse(upstream["openapi_identity_matches"])
+        self.assertEqual(self.classify(routed, upstream)["classification"],
+                         "upstream_not_confirmed")
+
+    def test_route_and_upstream_success(self):
+        direct = self.response(200, self.openapi(), openapi=True)
+        result = self.classify(direct, direct)
+        self.assertEqual(result["classification"], "route_and_upstream_valid")
+        self.assertTrue(result["api_gateway_identity_matches"])
+
+    def test_fallback_control_needs_status_size_and_digest(self):
+        routed = self.response(404, b"same", openapi=True)
+        upstream = self.response(200, self.openapi(), openapi=True)
+        self.assertTrue(self.classify(routed, upstream, fallback=b"same")
+                        ["fallback_matches_routed_404"])
+        self.assertFalse(self.classify(routed, upstream, fallback=b"different")
+                         ["fallback_matches_routed_404"])
+
+    def test_invalid_json_and_oversize_are_sanitized_or_blocked(self):
+        value = probe.openapi_fingerprint(200, b"not-json")
+        self.assertFalse(value["openapi_identity_matches"])
+        self.assertNotIn("body", value)
+        with self.assertRaisesRegex(probe.Blocked, "http_body_invalid"):
+            probe.response_fingerprint(200, b"x" * (probe.MAX_BYTES + 1))
+
+    def test_direct_summary_contract_rejects_extra_or_malformed_fields(self):
+        good = {"http_status": 200, "body_bytes": 10, "body_sha256": "a" * 64,
+                "openapi_identity_matches": True}
+        self.assertEqual(probe.validate_direct_summary(good), good)
+        for bad in ({**good, "body": "secret"},
+                    {**good, "body_sha256": "bad"},
+                    {**good, "openapi_identity_matches": 1}):
+            with self.subTest(bad=bad), self.assertRaises(probe.Blocked):
+                probe.validate_direct_summary(bad)
+
+    def test_internal_get_is_fixed_non_redirecting_and_does_not_initialize_app(self):
+        script = probe.DIRECT_OPENAPI_SCRIPT
+        self.assertIn("HTTPConnection('127.0.0.1',8080,timeout=5)", script)
+        self.assertIn("c.request('GET','/openapi.json'", script)
+        self.assertNotIn("uvicorn", script)
+        self.assertNotIn("main:app", script)
+        self.assertNotIn("Config.Env", script)
+        self.assertNotIn("c.request('GET','/health'", script)
 
 
 class PhysicalWorkflowContracts(unittest.TestCase):
