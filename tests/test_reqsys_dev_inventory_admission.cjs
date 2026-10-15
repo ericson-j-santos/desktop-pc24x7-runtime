@@ -81,8 +81,10 @@ test('API errors are sanitized and keep physical admission closed', async () => 
   assert.ok(!JSON.stringify(state.outputs).includes('secret-marker'));
 });
 function assertWorkflowBindings(workflow) {
+  // Windows checkout may materialize CRLF; validate the same contract on both OSes.
+  const normalized = workflow.replace(/\r\n?/g, '\n');
   for (const name of ['pickup_watchdog', 'inspect']) {
-    const section = workflow.split('\n  ' + name + ':\n')[1];
+    const section = normalized.split('\n  ' + name + ':\n')[1];
     assert.ok(section, 'physical job must exist');
     const job = section.split(/\n  [a-z_]+:\n/)[0];
     assert.match(job, /needs: \[contract, admission\]/);
@@ -95,7 +97,16 @@ test('workflow regression: both physical jobs depend on admission and hosted tes
   assert.ok(text.includes('node --test tests/test_reqsys_dev_inventory_admission.cjs'));
   assert.ok(text.includes('await admission.admit({github, context, core})'));
 });
-test('test-of-test: the old contract-only dispatch dependency is rejected', () => {
-  const oldDependency = workflow().replaceAll('needs: [contract, admission]', 'needs: contract');
-  assert.throws(() => assertWorkflowBindings(oldDependency));
+test('Windows CRLF and Unix LF accept the same valid workflow', () => {
+  const lf = workflow().replace(/\r\n?/g, '\n');
+  assertWorkflowBindings(lf);
+  assertWorkflowBindings(lf.replace(/\n/g, '\r\n'));
+});
+test('test-of-test: removing admission is rejected after a valid baseline on both OSes', () => {
+  const lf = workflow().replace(/\r\n?/g, '\n');
+  for (const valid of [lf, lf.replace(/\n/g, '\r\n')]) {
+    assertWorkflowBindings(valid);
+    const oldDependency = valid.replaceAll('needs: [contract, admission]', 'needs: contract');
+    assert.throws(() => assertWorkflowBindings(oldDependency), {code: 'ERR_ASSERTION'});
+  }
 });
