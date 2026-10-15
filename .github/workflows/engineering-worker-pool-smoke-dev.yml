@@ -36,7 +36,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: engineering-worker-pool-smoke-dev
+  # Unadmitted PRs must not cancel or replace real DEV work before job gates.
+  group: ${{ (github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)) && 'engineering-worker-pool-smoke-dev' || format('engineering-worker-pool-smoke-dev-unadmitted-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
