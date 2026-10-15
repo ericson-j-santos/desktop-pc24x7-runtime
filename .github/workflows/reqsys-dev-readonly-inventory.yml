@@ -1,0 +1,234 @@
+name: ReqSys DEV Desktop inventory without cutover
+
+on:
+  push:
+    branches: [fix/reqsys-dev-runtime-readonly-inventory-20261014]
+    paths:
+      - .github/workflows/reqsys-dev-readonly-inventory.yml
+      - .github/workflows/reqsys-dev-broker-status-readback.yml
+      - scripts/reqsys_dev_readonly_inventory_receipt.py
+      - tests/test_reqsys_dev_readonly_inventory_receipt.py
+      - scripts/reqsys_dev_inventory_pickup_watchdog.cjs
+      - tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
+      - scripts/reqsys_dev_inventory_admission.cjs
+      - tests/test_reqsys_dev_inventory_admission.cjs
+      - scripts/reqsys_dev_broker_status_readback.py
+      - tests/test_reqsys_dev_broker_status_readback.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: reqsys-dev-readonly-inventory-2546-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Validate read-only collector and resolve ReqSys main
+    runs-on: windows-latest
+    timeout-minutes: 7
+    outputs:
+      expected_reqsys_sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Checkout exact runtime source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve exact ReqSys main SHA
+        id: resolve
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const branch = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'reqsys-v2-enterprise-real',
+              branch: 'main',
+            });
+            const sha = String(branch.data.commit.sha || '').toLowerCase();
+            if (!/^[0-9a-f]{40}$/.test(sha)) {
+              core.setFailed('REQSYS_MAIN_SHA_UNVERIFIED');
+              return;
+            }
+            core.setOutput('sha', sha);
+      - name: Setup Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Execute positive, negative and privacy controls
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --disable-pip-version-check pytest==8.4.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m py_compile scripts/reqsys_dev_readonly_inventory_receipt.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pytest -q tests/test_reqsys_dev_current_data_probe.py tests/test_reqsys_dev_readonly_inventory_receipt.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test request-bound diagnostic and anti-replay controls
+        shell: pwsh
+        run: |
+          python -m py_compile scripts/reqsys_dev_broker_status_readback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pytest -q tests/test_reqsys_dev_broker_status_readback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test pre-dispatch admission before any physical job
+        shell: pwsh
+        run: |
+          node --check scripts/reqsys_dev_inventory_admission.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/test_reqsys_dev_inventory_admission.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  admission:
+    needs: contract
+    name: Require a new verified Desktop runner precondition
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      physical_ready: ${{ steps.admit.outputs.physical_ready }}
+    steps:
+      - name: Checkout immutable admission policy
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify independent canary and prevent unchanged-precondition replay
+        id: admit
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const admission = require('./scripts/reqsys_dev_inventory_admission.cjs');
+            await admission.admit({github, context, core});
+
+  pickup_watchdog:
+    needs: [contract, admission]
+    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true'
+    name: Abort blocked physical inventory after 300 seconds
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      actions: write
+      issues: write
+    steps:
+      - name: Checkout immutable pickup watchdog
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Test pickup positive, negative, privacy and idempotency controls
+        shell: bash
+        run: |
+          node --check scripts/reqsys_dev_inventory_pickup_watchdog.cjs
+          node --test tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
+      - name: Stop stalled acquisition without repeating physical dispatch
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const watchdog = require('./scripts/reqsys_dev_inventory_pickup_watchdog.cjs');
+            await watchdog.monitor({github, context, core});
+
+  inspect:
+    needs: [contract, admission]
+    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true'
+    name: Inspect only owned ReqSys DEV runtime metadata
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    timeout-minutes: 8
+    env:
+      RULES_SHA: ddd09dc616181c0aaf46d33a194e9b00a6989332
+      REQSYS_TARGET_SHA: ${{ needs.contract.outputs.expected_reqsys_sha }}
+      REQSYS_SOURCE_SHA: ${{ github.sha }}
+      REQSYS_INVENTORY_CORRELATION: reqsys-dev-inventory-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout immutable runtime source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Checkout immutable canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap isolated session with exact SHA and runner preflight
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ($env:COMPUTERNAME -ne 'DESKTOP-PDQK954' -or
+              $env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'DEDICATED_DESKTOP_REQUIRED' }
+          if ($env:GITHUB_REF -ne 'refs/heads/fix/reqsys-dev-runtime-readonly-inventory-20261014') {
+            throw 'UNEXPECTED_SOURCE_BRANCH'
+          }
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
+            '--session-prefix', 'reqsys-dev-readonly-inventory',
+            '--correlation-id', $env:REQSYS_INVENTORY_CORRELATION,
+            '--expected-head', $env:GITHUB_SHA,
+            '--sync-ref', 'origin/fix/reqsys-dev-runtime-readonly-inventory-20261014',
+            '--require-runner-version-preflight')
+          $raw = @(& $python $launcher @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $session = @($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or $session.state_validated -ne $true -or
+              $session.head -ne $env:GITHUB_SHA -or $session.host -ne 'DESKTOP-PDQK954' -or
+              $session.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_UNVERIFIED' }
+          "target_path=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Read-only Docker, Compose, image and database metadata through Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy', $policy, '--correlation-id', $env:REQSYS_INVENTORY_CORRELATION,
+            'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '120', '--expected-head', $env:GITHUB_SHA,
+            '--', $python, '-B', 'scripts/reqsys_dev_readonly_inventory_receipt.py')
+          $raw = @(& $python $gateway @args)
+          if ($LASTEXITCODE -ne 0) { throw 'READONLY_INVENTORY_GATEWAY_BLOCKED' }
+      - name: Independently read back sanitized inventory receipt
+        if: always() && steps.session.outputs.target_path != ''
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $path = Join-Path $env:TARGET_PATH '.tmp\reqsys-dev-readonly-inventory\evidence.json'
+          if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'INVENTORY_EVIDENCE_MISSING' }
+          $e = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ($e.status -ne 'observed' -or $e.host -ne 'DESKTOP-PDQK954' -or
+              $e.source_runtime_sha -ne $env:GITHUB_SHA -or
+              $e.expected_reqsys_sha -ne $env:REQSYS_TARGET_SHA -or
+              $e.correlation_id -ne $env:REQSYS_INVENTORY_CORRELATION -or
+              $e.read_only -ne $true -or $e.runtime_mutated -ne $false -or
+              $e.database_rows_exported -ne $false -or $e.secrets_exposed -ne $false -or
+              $e.production_touched -ne $false -or $e.cutover_ready -ne $false -or
+              $e.isolated_restore_verified -ne $false -or $e.service_rollback_verified -ne $false) {
+            throw 'INVENTORY_READBACK_CONTRACT_INVALID'
+          }
+          Write-Host ("REQSYS_DEV_INVENTORY_OBSERVED:" + $e.reason_code)
+      - name: Upload only sanitized read-only receipt
+        if: always() && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-dev-readonly-inventory-${{ github.run_id }}
+          path: ${{ steps.session.outputs.target_path }}/.tmp/reqsys-dev-readonly-inventory/evidence.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
