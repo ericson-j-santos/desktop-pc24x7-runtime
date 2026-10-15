@@ -80,3 +80,56 @@ def test_drafts_keep_hosted_ci_without_physical_claim() -> None:
     content = workflow_text("ci.yml")
     assert "pull_request:" in content
     assert "runs-on: windows-latest" in content
+
+
+# Workflow-level concurrency is acquired before a physical job can be skipped.
+# Keep the existing host lock, but acquire it only for admitted physical jobs.
+CANARY_JOB_LOCK = (
+    "    concurrency:\n"
+    "      group: pc24x7-runtime-canary\n"
+    "      cancel-in-progress: false\n"
+)
+
+
+def assert_canary_lock_scope(content: str) -> None:
+    header, jobs = content.split("\njobs:\n", 1)
+    assert "\nconcurrency:" not in header, "drafts must not enter the host queue"
+    assert jobs.startswith("  canary:\n")
+    assert PHYSICAL_GATE in jobs, "physical admission must remain fail-closed"
+    assert CANARY_JOB_LOCK in jobs, "admitted jobs must keep the existing host lock"
+    assert jobs.index(PHYSICAL_GATE) < jobs.index(CANARY_JOB_LOCK)
+    assert content.count("group: pc24x7-runtime-canary") == 1
+
+
+def test_canary_skips_drafts_before_acquiring_host_lock() -> None:
+    assert_canary_lock_scope(workflow_text("runtime-canary.yml"))
+
+
+def test_canary_preserves_serialization_without_cancelling_active_jobs() -> None:
+    content = workflow_text("runtime-canary.yml")
+    assert CANARY_JOB_LOCK in content
+    assert "cancel-in-progress: true" not in content
+    assert "  contents: read" in content
+    assert "actions: write" not in content
+    assert "    timeout-minutes: 4" in content
+    assert "  schedule:\n    - cron: \"*/5 * * * *\"" in content
+    assert "  workflow_dispatch:" in content
+
+
+@pytest.mark.parametrize("fault", ["global-lock", "no-lock", "renamed-lock", "no-gate"])
+def test_canary_lock_guard_rejects_regressions(fault: str) -> None:
+    content = workflow_text("runtime-canary.yml")
+    if fault == "global-lock":
+        content = content.replace(
+            "\npermissions:",
+            "\nconcurrency:\n  group: pc24x7-runtime-canary\n\npermissions:",
+            1,
+        )
+    elif fault == "no-lock":
+        content = content.replace(CANARY_JOB_LOCK, "", 1)
+    elif fault == "renamed-lock":
+        content = content.replace("group: pc24x7-runtime-canary", "group: unshared", 1)
+    else:
+        content = content.replace(PHYSICAL_GATE, "    if: true", 1)
+    with pytest.raises(AssertionError):
+        assert_canary_lock_scope(content)
