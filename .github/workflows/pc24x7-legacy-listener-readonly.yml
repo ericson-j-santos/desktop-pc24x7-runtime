@@ -47,7 +47,7 @@ jobs:
   inspect:
     needs: contract
     name: Compare only legacy Runner.Listener process identity
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 6
     steps:
       - name: Checkout exact runtime revision

@@ -45,8 +45,8 @@ RUNNER_ASSET_URL = (
 )
 RUNNER_ASSET_SHA256 = "1150692afa94e71f872017e254ea55b6eece1eece3fe7e3a6d4c93d0a1b85cfc"
 RUNNER_NAME = "DESKTOP-PDQK954-runtime"  # compatibility default; resolved per authorized host
-RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev"  # compatibility default; resolved per authorized host
-REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev")
+RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev,desktop-pdqk954"  # compatibility default; resolved per authorized host
+REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev", "desktop-pdqk954")
 
 DEDICATED_RUNNER_DIR = ("DesktopPC24x7", "GitHubRunner")
 

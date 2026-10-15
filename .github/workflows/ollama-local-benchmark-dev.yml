@@ -2,6 +2,7 @@ name: Ollama Local Benchmark DEV
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
     paths:
@@ -20,9 +21,9 @@ concurrency:
 
 jobs:
   benchmark:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Benchmark local Ollama on Desktop PC24x7
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 8
     env:
       RULES_SHA: 10d2489e8cac3770d1c07fac4ccfece0a0112269
@@ -127,7 +128,7 @@ jobs:
           exit $LASTEXITCODE
 
   physical_runner_watchdog:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Physical runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2

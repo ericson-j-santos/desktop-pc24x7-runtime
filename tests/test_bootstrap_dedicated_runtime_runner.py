@@ -18,7 +18,7 @@ SPEC.loader.exec_module(m)
 def test_contract_is_fixed_and_separate_from_reqsys_runner() -> None:
     assert m.REPOSITORY == "ericson-j-santos/desktop-pc24x7-runtime"
     assert m.RUNNER_NAME == "DESKTOP-PDQK954-runtime"
-    assert m.RUNNER_LABELS == "pc24x7,desktop-runtime,runtime-dev"
+    assert m.RUNNER_LABELS == "pc24x7,desktop-runtime,runtime-dev,desktop-pdqk954"
     assert "Pc24x7GitHubRunner" not in str(m.default_runner_home())
 
 

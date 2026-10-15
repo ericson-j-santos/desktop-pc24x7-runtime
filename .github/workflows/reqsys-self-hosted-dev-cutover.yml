@@ -119,7 +119,7 @@ jobs:
   e2e:
     needs: [resolve_rules, contract_linux, contract_windows]
     name: Prepare isolated DEV through the fixed Desktop executor
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 20
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}

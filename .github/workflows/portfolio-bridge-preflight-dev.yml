@@ -2,6 +2,7 @@ name: Portfolio Bridge DEV Read-only Preflight
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
     paths:
       - .github/workflows/portfolio-bridge-preflight-dev.yml
@@ -24,9 +25,9 @@ concurrency:
 
 jobs:
   prepare_runner:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Ensure dedicated Desktop runner labels
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 10
     env:
       RULES_SHA: cb340976ac9895fe572ff0321a4f68bbec99eceb
@@ -120,9 +121,9 @@ jobs:
 
   preflight:
     needs: prepare_runner
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Governed PC24x7 portfolio bridge dry-run
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 8
     env:
       RULES_SHA: cb340976ac9895fe572ff0321a4f68bbec99eceb
@@ -219,7 +220,7 @@ jobs:
       # Read-only: no task submission, no workflow tokens, and no deploy.
 
   prepare_runner_watchdog:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Ensure dedicated Desktop runner labels queue watchdog
     runs-on: windows-latest
 
@@ -341,7 +342,7 @@ jobs:
             });
 
   preflight_runner_watchdog:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Governed PC24x7 portfolio bridge dry-run queue watchdog
     runs-on: windows-latest
     needs: prepare_runner
