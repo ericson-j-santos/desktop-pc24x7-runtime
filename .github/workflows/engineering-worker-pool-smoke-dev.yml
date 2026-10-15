@@ -13,6 +13,7 @@ on:
       - .sdd/specs/engineering-worker-pool-smoke-dev.requirements.md
       - .sdd/specs/engineering-worker-pool-auth-reconcile-dev.requirements.md
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches:
       - main
     paths:
@@ -40,9 +41,9 @@ concurrency:
 
 jobs:
   prepare_runner:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Ensure dedicated Desktop runner labels
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 10
     env:
       RULES_SHA: 8cc4458f811bb8e5b13693798c484ea395e32f29
@@ -132,9 +133,9 @@ jobs:
 
   smoke:
     needs: prepare_runner
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Worker Pool smoke on dedicated Desktop runtime
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 15
     env:
       # Worker Pool autonomous reconciler integrated at main via PR #12.
@@ -242,7 +243,7 @@ jobs:
 
 
   physical_runner_watchdog:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Physical runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2

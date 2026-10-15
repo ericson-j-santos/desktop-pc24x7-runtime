@@ -43,7 +43,7 @@ jobs:
   physical_state:
     name: Protected local config and SQLite backup on dedicated Desktop
     needs: contract
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 9
     steps:
       - name: Checkout immutable source SHA

@@ -12,8 +12,8 @@ class HostProfile:
     runner_labels: str
 
 _PROFILES = {
-    "desktop-pdqk954": HostProfile("DESKTOP-PDQK954", "desktop-primary", "DESKTOP-PDQK954-runtime", "pc24x7,desktop-runtime,runtime-dev"),
-    "desktop-rp23ogs": HostProfile("DESKTOP-RP23OGS", "desktop-secondary", "DESKTOP-RP23OGS-runtime", "pc24x7,desktop-runtime,runtime-dev"),
+    "desktop-pdqk954": HostProfile("DESKTOP-PDQK954", "desktop-primary", "DESKTOP-PDQK954-runtime", "pc24x7,desktop-runtime,runtime-dev,desktop-pdqk954"),
+    "desktop-rp23ogs": HostProfile("DESKTOP-RP23OGS", "desktop-secondary", "DESKTOP-RP23OGS-runtime", "pc24x7,desktop-runtime,runtime-dev,desktop-rp23ogs"),
     "noteri": HostProfile("NOTERI", "notebook-control", "NOTERI-runtime", "pc24x7,noteri,reqsys-dev"),
 }
 

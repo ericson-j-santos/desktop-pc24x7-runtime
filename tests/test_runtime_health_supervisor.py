@@ -82,7 +82,7 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
         encoding="utf-8"
     )
-    assert 'runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]' in workflow
+    assert 'runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]' in workflow
     assert "--require-runner-version-preflight" in workflow
     assert "steps.session.outputs.target_path" in workflow
     assert "scripts\\command_gateway.py" in workflow
