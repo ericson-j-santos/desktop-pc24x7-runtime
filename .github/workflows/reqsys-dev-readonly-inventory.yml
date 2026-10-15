@@ -9,6 +9,8 @@ on:
       - tests/test_reqsys_dev_readonly_inventory_receipt.py
       - scripts/reqsys_dev_inventory_pickup_watchdog.cjs
       - tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
+      - scripts/reqsys_dev_inventory_admission.cjs
+      - tests/test_reqsys_dev_inventory_admission.cjs
 
 permissions:
   contents: read
@@ -60,10 +62,43 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q tests/test_reqsys_dev_current_data_probe.py tests/test_reqsys_dev_readonly_inventory_receipt.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test pre-dispatch admission before any physical job
+        shell: pwsh
+        run: |
+          node --check scripts/reqsys_dev_inventory_admission.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/test_reqsys_dev_inventory_admission.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  admission:
+    needs: contract
+    name: Require a new verified Desktop runner precondition
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      physical_ready: ${{ steps.admit.outputs.physical_ready }}
+    steps:
+      - name: Checkout immutable admission policy
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Verify independent canary and prevent unchanged-precondition replay
+        id: admit
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const admission = require('./scripts/reqsys_dev_inventory_admission.cjs');
+            await admission.admit({github, context, core});
 
   pickup_watchdog:
-    needs: contract
-    if: needs.contract.result == 'success'
+    needs: [contract, admission]
+    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true'
     name: Abort blocked physical inventory after 300 seconds
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -90,8 +125,8 @@ jobs:
             await watchdog.monitor({github, context, core});
 
   inspect:
-    needs: contract
-    if: needs.contract.result == 'success'
+    needs: [contract, admission]
+    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true'
     name: Inspect only owned ReqSys DEV runtime metadata
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 8
