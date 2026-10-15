@@ -11,6 +11,8 @@ on:
       - tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
       - scripts/reqsys_dev_inventory_admission.cjs
       - tests/test_reqsys_dev_inventory_admission.cjs
+      - scripts/reqsys_dev_broker_status_readback.py
+      - tests/test_reqsys_dev_broker_status_readback.py
 
 permissions:
   contents: read
@@ -62,6 +64,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pytest -q tests/test_reqsys_dev_current_data_probe.py tests/test_reqsys_dev_readonly_inventory_receipt.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test request-bound diagnostic and anti-replay controls
+        shell: pwsh
+        run: |
+          python -m py_compile scripts/reqsys_dev_broker_status_readback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pytest -q tests/test_reqsys_dev_broker_status_readback.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test pre-dispatch admission before any physical job
         shell: pwsh
         run: |
@@ -71,6 +80,55 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  broker_readback:
+    needs: contract
+    name: Read request-bound broker diagnostic without physical dispatch
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      issues: read
+    env:
+      EXPECTED_COMMENT_ID: '6194882471'
+      EXPECTED_ISSUED_AT: '2026-10-15T14:46:36Z'
+    steps:
+      - name: Checkout immutable request verifier
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Setup diagnostic Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Verify exact unedited owner status request
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data: comment} = await github.rest.issues.getComment({
+              ...context.repo, comment_id: Number(process.env.EXPECTED_COMMENT_ID),
+            });
+            if (comment.id !== Number(process.env.EXPECTED_COMMENT_ID) ||
+                comment.user?.login !== 'ericson-j-santos' ||
+                comment.author_association !== 'OWNER' ||
+                comment.body !== '/desktop-runtime admin status' ||
+                comment.created_at !== process.env.EXPECTED_ISSUED_AT ||
+                comment.updated_at !== comment.created_at ||
+                comment.issue_url !== 'https://api.github.com/repos/ericson-j-santos/desktop-pc24x7-runtime/issues/2') {
+              core.setFailed('BROKER_OWNER_REQUEST_UNVERIFIED');
+            }
+      - name: Read fixed diagnostic once and reject unrelated or expired responses
+        run: python scripts/reqsys_dev_broker_status_readback.py
+      - name: Upload non-authoritative request-bound receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-dev-broker-preflight-${{ github.run_id }}
+          path: .tmp/reqsys-dev-broker-preflight/evidence.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7
 
   admission:
     needs: contract
