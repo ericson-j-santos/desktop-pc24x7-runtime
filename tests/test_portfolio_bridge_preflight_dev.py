@@ -179,7 +179,7 @@ def test_wrong_worker_checkout_is_rejected(tmp_path):
 
 def test_workflow_enforces_same_repo_and_gateway_only():
     workflow = (ROOT / ".github/workflows/portfolio-bridge-preflight-dev.yml").read_text(encoding="utf-8")
-    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow
     assert "head.repo.full_name == github.repository" in workflow
     assert "scripts\\session_launcher.py" in workflow
     assert "scripts\\command_gateway.py" in workflow
@@ -192,7 +192,7 @@ def test_runner_admission_before_preflight_is_explicit_and_bounded():
     workflow = (ROOT / ".github/workflows/portfolio-bridge-preflight-dev.yml").read_text(encoding="utf-8")
     assert workflow.count("\n  prepare_runner:\n") == 1
     assert workflow.count("\n  preflight:\n    needs: prepare_runner\n") == 1
-    assert workflow.count("runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]") == 2
+    assert workflow.count("runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]") == 2
     assert "name: Ensure dedicated Desktop runner labels" in workflow
     assert workflow.count("--require-runner-version-preflight") == 2
     assert "ACTIVATE-DESKTOP-RUNTIME-RUNNER" in workflow

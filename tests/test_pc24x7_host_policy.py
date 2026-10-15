@@ -19,6 +19,15 @@ def test_known_hosts_are_explicitly_authorized() -> None:
 def test_authorized_host_is_case_insensitive(host: str) -> None:
     assert m.authorized_host(host).runner_name.lower().endswith("-runtime")
 
+def test_desktop_profiles_have_disjoint_host_selector_labels() -> None:
+    primary = {item.strip() for item in m.authorized_host("DESKTOP-PDQK954").runner_labels.split(",")}
+    secondary = {item.strip() for item in m.authorized_host("DESKTOP-RP23OGS").runner_labels.split(",")}
+
+    assert "desktop-pdqk954" in primary
+    assert "desktop-rp23ogs" in secondary
+    assert "desktop-rp23ogs" not in primary
+    assert "desktop-pdqk954" not in secondary
+
 def test_unknown_host_fails_closed() -> None:
     with pytest.raises(ValueError, match="host não autorizado"):
         m.authorized_host("UNKNOWN-PC")

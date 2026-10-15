@@ -55,7 +55,7 @@ jobs:
   e2e:
     needs: resolve_rules
     name: Pickup on dedicated Desktop runtime runner
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 10
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
@@ -158,7 +158,7 @@ jobs:
     needs: resolve_rules
     name: Dedicated runner queue watchdog
     runs-on: windows-latest
-    timeout-minutes: 2
+    timeout-minutes: 7
     permissions:
       actions: write
       contents: read
@@ -166,7 +166,7 @@ jobs:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
       TARGET_RUN_ID: ${{ github.run_id }}
       TARGET_JOB_NAME: Pickup on dedicated Desktop runtime runner
-      STALL_AFTER_SECONDS: "60"
+      STALL_AFTER_SECONDS: "300"
       CORRELATION_ID: dedicated-runner-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout canonical progress watchdog
@@ -187,12 +187,9 @@ jobs:
             const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
             const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
             const runId = Number(process.env.TARGET_RUN_ID);
-            const run = await github.rest.actions.getWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: runId,
-            });
-            const anchor = new Date(run.data.created_at || Date.now());
+            // Setup/resolve_rules time is not time waiting for this pickup.
+            // Fix the observation anchor once; polling must never renew it.
+            const anchor = new Date();
             while (true) {
               const response = await github.rest.actions.listJobsForWorkflowRun({
                 owner: context.repo.owner,
@@ -201,7 +198,12 @@ jobs:
                 per_page: 100,
               });
               const job = response.data.jobs.find((item) => item.name === process.env.TARGET_JOB_NAME) || null;
-              if (job && (job.status !== 'queued' || Number(job.runner_id || 0) > 0)) {
+              // A changed status alone (including skipped) is not runner pickup.
+              const pickedUp = job && job.run_id === runId
+                && Number.isSafeInteger(job.runner_id) && job.runner_id > 0
+                && job.runner_name === 'DESKTOP-PDQK954-runtime'
+                && ['in_progress', 'completed'].includes(job.status);
+              if (pickedUp) {
                 fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
                   task_id: String(job.id),
                   correlation_id: process.env.CORRELATION_ID,

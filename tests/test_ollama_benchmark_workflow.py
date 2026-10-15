@@ -16,7 +16,7 @@ def workflow_text() -> str:
 def test_benchmark_targets_only_dedicated_desktop_runner() -> None:
     content = workflow_text()
     assert (
-        "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]"
+        "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]"
         in content
     )
     assert "timeout-minutes: 8" in content
