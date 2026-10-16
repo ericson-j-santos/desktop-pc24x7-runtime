@@ -1,0 +1,44 @@
+name: TODO recovery isolated PostgreSQL 18 E2E
+on:
+  push:
+    branches: [feat/todo-free-recovery-20261016]
+    paths:
+      - scripts/pc24x7_todo_recovery.py
+      - tests/test_pc24x7_todo_recovery.py
+      - tests/e2e_pc24x7_todo_recovery.py
+      - .github/workflows/todo-recovery-isolated-e2e.yml
+  pull_request:
+    paths:
+      - scripts/pc24x7_todo_recovery.py
+      - tests/test_pc24x7_todo_recovery.py
+      - tests/e2e_pc24x7_todo_recovery.py
+      - .github/workflows/todo-recovery-isolated-e2e.yml
+permissions:
+  contents: read
+concurrency:
+  group: todo-recovery-lab-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  recovery_lab:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    container:
+      image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    env:
+      TODO_RECOVERY_LAB: synthetic-only
+    steps:
+      - name: Checkout exact revision without retained credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Compile the recovery implementation and tests
+        run: python3 -m py_compile scripts/pc24x7_todo_recovery.py tests/e2e_pc24x7_todo_recovery.py
+      - name: Restore, verify independently, replay and reject invalid states
+        run: python3 tests/e2e_pc24x7_todo_recovery.py
+      - name: Upload only the synthetic verification receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: todo-recovery-lab-${{ github.run_id }}
+          path: recovery-e2e-receipt.json
+          if-no-files-found: error
+          retention-days: 7
