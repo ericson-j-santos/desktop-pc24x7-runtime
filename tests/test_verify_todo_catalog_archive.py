@@ -148,7 +148,7 @@ def test_rejects_invalid_checkpoint_states(tmp_path):
 
 
 def test_checkpoints_contain_no_external_storage_ids_or_raw_records():
-    checkpoint = json.loads((ROOT / "evidence/todo-global/catalog-20261017-checkpoint.json").read_text())
+    checkpoint = json.loads((ROOT / "evidence/todo-global/catalog-20261017-checkpoint.json").read_text(encoding="utf-8"))
     assert checkpoint["raw_uploaded_to_public_git"] is False
     assert checkpoint["data_storage"] == "private_drive_only"
     serialized = json.dumps(checkpoint)
@@ -157,7 +157,14 @@ def test_checkpoints_contain_no_external_storage_ids_or_raw_records():
 
 
 def test_no_external_calls_or_writes_in_validator():
-    source = (ROOT / "scripts/verify_todo_catalog_archive.py").read_text()
+    source = (ROOT / "scripts/verify_todo_catalog_archive.py").read_text(encoding="utf-8")
     assert 'sqlite3.connect(":memory:")' in source
     for marker in ("requests.", "urllib.request", "subprocess.", "shell=True", "ALTER TABLE", "DROP TABLE", "dispatch(", ".write_bytes("):
         assert marker not in source
+
+
+def test_windows_default_encoding_does_not_control_source_reads():
+    test_source = Path(__file__).read_text(encoding="utf-8")
+    prelude = test_source.split("def test_windows_default_encoding_does_not_control_source_reads():")[0]
+    assert ".read_text()" not in prelude
+    assert prelude.count('read_text(encoding="utf-8")') >= 2
