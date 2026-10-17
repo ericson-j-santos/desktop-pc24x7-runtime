@@ -158,6 +158,10 @@ def test_world_readable_identity_rejected(material):
 def test_wrong_response_cannot_be_reused_for_another_challenge(material):
     first,_,_,response=proof(material)
     other=material["recovery"]/"other";other.mkdir(mode=0o700)
+    if os.name == "nt":
+        from backup_reqsys_current_dev_postgres import owner_sid, private_acl, assert_private_acl
+        private_acl(other, owner_sid())
+        assert_private_acl(other, owner_sid())
     issued2=c.issue(other,material["public"],"second-challenge")
     with pytest.raises(c.CustodyBlocked,match="RESPONSE_INVALID"):
         c.verify(other/"challenge.json",other/"issuer-receipt.json",response)
