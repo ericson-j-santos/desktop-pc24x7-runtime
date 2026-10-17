@@ -1,0 +1,18 @@
+{
+  "archive_sha256": "1d1740f996f9688da63c2fd32ded22215b09ffabbb4ca3da333cce36aaa6a530",
+  "archive_size_bytes": 8399,
+  "catalog_sha256": "a62a617376c3e1f6982617dd3a24af6f961e24760b6967a2823c05862b79623b",
+  "contract": "todo-catalog-github-checkpoint-v1",
+  "cutover_ready": false,
+  "data_storage": "private_drive_only",
+  "postgresql_backup_verified": false,
+  "raw_uploaded_to_public_git": false,
+  "record_count": 37,
+  "snapshot_id": "todo22-canonical-catalog-20261017-v1",
+  "source_state_counts": {
+    "BLOQUEADO": 20,
+    "CANCELADO": 2,
+    "CONCLUÍDO": 5,
+    "EM ANDAMENTO": 10
+  }
+}
