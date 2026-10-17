@@ -54,6 +54,26 @@ def regular(path: Path) -> None:
         raise RecoveryBlocked("REGULAR_FILE_REQUIRED")
 
 
+def validate_password_file(path: Path) -> None:
+    """Fail closed for libpq secrets on POSIX and Windows, without credential output."""
+    regular(path)
+    if not path.is_absolute() or any(
+        item.is_symlink() or (hasattr(item, "is_junction") and item.is_junction())
+        for item in (path, *path.parents)
+    ):
+        raise RecoveryBlocked("PASSWORD_FILE_PATH_UNSAFE")
+    if os.name == "nt":
+        try:
+            from backup_reqsys_current_dev_postgres import no_reparse, owner_sid, assert_private_acl
+            no_reparse(path)
+            assert_private_acl(path, owner_sid())
+        except Exception:
+            # Do not expose filesystem paths, Windows errors or credential bytes.
+            raise RecoveryBlocked("PASSWORD_FILE_PERMISSIONS_UNSAFE") from None
+    elif path.stat().st_mode & 0o077:
+        raise RecoveryBlocked("PASSWORD_FILE_PERMISSIONS_UNSAFE")
+
+
 def service(name: str, env: dict[str, str], *, target: bool) -> dict[str, str]:
     if name not in {"todo_recovery_source", "todo_recovery_target"}:
         raise RecoveryBlocked("SERVICE_NOT_ALLOWED")
@@ -67,9 +87,7 @@ def service(name: str, env: dict[str, str], *, target: bool) -> dict[str, str]:
     password_file = env.get("PGPASSFILE", "")
     if not password_file:
         raise RecoveryBlocked("PROTECTED_PASSWORD_FILE_REQUIRED")
-    regular(Path(password_file))
-    if os.name != "nt" and (Path(password_file).stat().st_mode & 0o077):
-        raise RecoveryBlocked("PASSWORD_FILE_PERMISSIONS_UNSAFE")
+    validate_password_file(Path(password_file))
     cfg = configparser.ConfigParser(interpolation=None)
     cfg.read(path, encoding="utf-8")
     if name not in cfg or cfg.defaults():

@@ -58,6 +58,12 @@ Permissões devem ser reconstruídas por menor privilégio, não copiadas cegame
 Manifesto verifica integridade; não é assinatura de autenticidade. Guardar junto
 do dump em diretório protegido e fora de Git. O dump contém dados sensíveis.
 Windows exige validação independente da ACL pelo preflight governado antes de uso.
+O `PGPASSFILE` deve existir em caminho absoluto sem symlink/junction e, no Windows,
+ter ACL protegida exclusivamente ao proprietário, conferida com os helpers
+nativos `owner_sid`/`assert_private_acl`; herança ou falha de leitura bloqueia
+antes da conexão com `PASSWORD_FILE_PERMISSIONS_UNSAFE`, sem alterar a ACL.
+No Linux, permissões de grupo/outros também bloqueiam; o operador deve corrigir
+o arquivo protegido por canal de segredos autorizado, nunca copiar senha ao chat.
 
 ## Execução sem comandos manuais recorrentes
 

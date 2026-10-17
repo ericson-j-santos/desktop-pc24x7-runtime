@@ -23,6 +23,11 @@ def setup(tmp_path):
     passwords = tmp_path/'pgpass'
     passwords.write_text('')
     passwords.chmod(0o600)
+    if os.name == "nt":
+        from backup_reqsys_current_dev_postgres import owner_sid, private_acl, assert_private_acl
+        sid = owner_sid()
+        private_acl(passwords, sid)
+        assert_private_acl(passwords, sid)
     bundle = tmp_path/'bundle'
     bundle.mkdir(mode=0o700)
     return {'PGSERVICEFILE':str(profiles),'PGPASSFILE':str(passwords)},bundle
@@ -203,3 +208,93 @@ def test_snapshot_injection_and_restore_count_ignore_version_commands():
     text=(MODULE.parents[1]/'tests/e2e_pc24x7_todo_recovery.py').read_text()
     assert "tool=='pg_dump' and '--version' not in args" in text
     assert 'if "--version" not in args:' in text
+
+
+
+def test_pgpass_rejects_relative_path_before_any_connection(setup, monkeypatch):
+    env, _ = setup
+    monkeypatch.chdir(Path(env["PGPASSFILE"]).parent)
+    env["PGPASSFILE"] = "pgpass"
+    with pytest.raises(r.RecoveryBlocked, match="PASSWORD_FILE_PATH_UNSAFE"):
+        r.service("todo_recovery_target", env, target=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permissions; Windows requires owner-only ACL")
+def test_pgpass_rejects_read_access_for_group(setup):
+    env, _ = setup
+    password_path = Path(env["PGPASSFILE"])
+    password_path.chmod(0o640)
+    with pytest.raises(r.RecoveryBlocked, match="PASSWORD_FILE_PERMISSIONS_UNSAFE"):
+        r.service("todo_recovery_target", env, target=True)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows symlinks require elevated privilege")
+def test_pgpass_rejects_symlinked_parent_even_when_leaf_is_regular(setup, tmp_path):
+    env, _ = setup
+    alias = tmp_path / "pgpass_alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    env["PGPASSFILE"] = str(alias / "pgpass")
+    with pytest.raises(r.RecoveryBlocked, match="PASSWORD_FILE_PATH_UNSAFE"):
+        r.service("todo_recovery_target", env, target=True)
+
+
+def test_windows_pgpass_must_pass_native_owner_acl_validation(setup, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    env, _ = setup
+    checked = []
+    simulated = SimpleNamespace(
+        no_reparse=lambda path: checked.append(("reparse", path)),
+        owner_sid=lambda: "TEST-SID",
+        assert_private_acl=lambda path, sid: checked.append(("acl", path, sid)),
+    )
+    monkeypatch.setitem(sys.modules, "backup_reqsys_current_dev_postgres", simulated)
+    monkeypatch.setattr(r, "os", SimpleNamespace(name="nt"))
+    values = r.service("todo_recovery_target", env, target=True)
+    assert values["dbname"] == "todo_restore_lab"
+    assert checked == [
+        ("reparse", Path(env["PGPASSFILE"])),
+        ("acl", Path(env["PGPASSFILE"]), "TEST-SID"),
+    ]
+
+
+def test_windows_pgpass_acl_failure_is_blocking_and_sanitized(setup, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    env, _ = setup
+    def reject(*_):
+        raise PermissionError("secret file details must not leak")
+    simulated = SimpleNamespace(
+        no_reparse=lambda path: None,
+        owner_sid=lambda: "TEST-SID",
+        assert_private_acl=reject,
+    )
+    monkeypatch.setitem(sys.modules, "backup_reqsys_current_dev_postgres", simulated)
+    monkeypatch.setattr(r, "os", SimpleNamespace(name="nt"))
+    with pytest.raises(r.RecoveryBlocked, match="PASSWORD_FILE_PERMISSIONS_UNSAFE") as err:
+        r.service("todo_recovery_target", env, target=True)
+    assert "secret file details" not in str(err.value)
+
+
+def test_windows_pgpass_missing_acl_helper_blocks_closed(setup, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+    env, _ = setup
+    monkeypatch.setitem(sys.modules, "backup_reqsys_current_dev_postgres", SimpleNamespace())
+    monkeypatch.setattr(r, "os", SimpleNamespace(name="nt"))
+    with pytest.raises(r.RecoveryBlocked, match="PASSWORD_FILE_PERMISSIONS_UNSAFE"):
+        r.service("todo_recovery_target", env, target=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows native ACL verification only")
+def test_windows_real_password_file_acl_is_verified(setup):
+    from backup_reqsys_current_dev_postgres import owner_sid, assert_private_acl
+    env, _ = setup
+    assert_private_acl(Path(env["PGPASSFILE"]), owner_sid())
+    assert r.service("todo_recovery_source", env, target=False)["dbname"] == "todo_global_bus_dev_ha"
+
+
+def test_runbook_describes_pgpass_windows_acl_fail_closed():
+    doc = (MODULE.parents[1]/"docs/todo-free-recovery.md").read_text(encoding="utf-8")
+    assert "PGPASSFILE" in doc and "PASSWORD_FILE_PERMISSIONS_UNSAFE" in doc
+    assert "owner_sid" in doc and "assert_private_acl" in doc
