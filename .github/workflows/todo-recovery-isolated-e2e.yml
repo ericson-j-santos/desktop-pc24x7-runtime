@@ -4,13 +4,17 @@ on:
     branches: [feat/todo-free-recovery-20261016]
     paths:
       - scripts/pc24x7_todo_recovery.py
+      - scripts/pc24x7_todo_sealed.py
       - tests/test_pc24x7_todo_recovery.py
+      - tests/test_pc24x7_todo_sealed.py
       - tests/e2e_pc24x7_todo_recovery.py
       - .github/workflows/todo-recovery-isolated-e2e.yml
   pull_request:
     paths:
       - scripts/pc24x7_todo_recovery.py
+      - scripts/pc24x7_todo_sealed.py
       - tests/test_pc24x7_todo_recovery.py
+      - tests/test_pc24x7_todo_sealed.py
       - tests/e2e_pc24x7_todo_recovery.py
       - .github/workflows/todo-recovery-isolated-e2e.yml
 permissions:
@@ -31,14 +35,16 @@ jobs:
         timeout-minutes: 2
         run: |
           apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          apt-get -o Acquire::Retries=0 install -y --no-install-recommends python3
+          apt-get -o Acquire::Retries=0 install -y --no-install-recommends python3 python3-cryptography python3-pytest
           python3 --version
       - name: Checkout exact revision without retained credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
       - name: Compile the recovery implementation and tests
-        run: python3 -m py_compile scripts/pc24x7_todo_recovery.py tests/e2e_pc24x7_todo_recovery.py
+        run: python3 -m py_compile scripts/pc24x7_todo_recovery.py scripts/pc24x7_todo_sealed.py tests/e2e_pc24x7_todo_recovery.py
+      - name: Validate portable encryption and rejection controls
+        run: python3 -m pytest -q -ra tests/test_pc24x7_todo_sealed.py
       - name: Restore, verify independently, replay and reject invalid states
         run: python3 tests/e2e_pc24x7_todo_recovery.py
       - name: Upload only the synthetic verification receipt

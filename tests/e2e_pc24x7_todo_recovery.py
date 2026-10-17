@@ -8,6 +8,9 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import sys
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
@@ -68,6 +71,48 @@ def main():
         assert manifest['tables']['queue_events']['rows']==2
         assert r.fingerprint(pg,'todo_recovery_source')['queue_events']['rows']==3
         source_before=r.fingerprint(pg,'todo_recovery_source')
+        # Exercise the actual CLI and portable encrypted transport before pg_restore.
+        key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
+        recipient = root/'recipient.pem'
+        identity = root/'identity.pem'
+        recipient.write_bytes(key.public_key().public_bytes(serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo))
+        identity.write_bytes(key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        identity.chmod(0o600)
+        env = {**os.environ, 'TODO_RECOVERY_RECIPIENT_FILE': str(recipient),
+               'TODO_RECOVERY_IDENTITY_FILE': str(identity)}
+        def sealed_cli(action, src, dst, expected=None):
+            args=[sys.executable,str(ROOT/'scripts/pc24x7_todo_sealed.py'),action,
+                  '--source',str(src),'--destination',str(dst)]
+            if expected is not None:
+                args.extend(['--expected-sha256',expected])
+            result=subprocess.run(args,env=env,text=True,capture_output=True,timeout=30)
+            return result.returncode,json.loads(result.stdout)
+        envelope=root/'backup.sealed'
+        rc,sealed=sealed_cli('seal',bundle,envelope)
+        assert rc==0 and sealed['state']=='sealed'
+        sealed_hash=sealed['ciphertext_sha256']
+        encrypted=envelope.read_bytes()
+        assert b'PRIVATE KEY' not in encrypted and b'PGDMP' not in encrypted
+        assert sealed_cli('seal',bundle,envelope)[1]['state']=='already_sealed'
+        assert envelope.read_bytes()==encrypted
+        transported=root/'transported.sealed'
+        shutil.copyfile(envelope,transported)
+        reopened=root/'reopened'
+        rc,opened=sealed_cli('unseal',transported,reopened,sealed_hash)
+        assert rc==0 and opened['state']=='unsealed'
+        assert (reopened/'database.dump').read_bytes()==(bundle/'database.dump').read_bytes()
+        assert (reopened/'manifest.json').read_bytes()==(bundle/'manifest.json').read_bytes()
+        assert sealed_cli('unseal',transported,reopened,sealed_hash)[1]['state']=='already_unsealed'
+        changed=root/'changed.sealed'
+        changed.write_bytes(encrypted[:-1]+bytes([encrypted[-1]^1]))
+        rejected=root/'must-not-exist'
+        rc,bad=sealed_cli('unseal',changed,rejected,sealed_hash)
+        assert rc==2 and bad['reason']=='CIPHERTEXT_DIGEST_MISMATCH' and not rejected.exists()
+        # Pin the modified hash deliberately to test AEAD, independently of the outer hash.
+        rc,bad=sealed_cli('unseal',changed,rejected,r.digest_file(changed))
+        assert rc==2 and bad['reason']=='AUTHENTICATION_FAILED' and not rejected.exists()
+        # Subsequent PostgreSQL restore reads ONLY the decrypted transported bundle.
+        bundle=reopened
         first=r.restore(pg,bundle,'todo-recovery-ci')
         assert first['rows_verified']==3 and first['state']=='verified'
         assert admin('SELECT count(*) FROM todo_bus.queue_events', 'todo_restore_lab') == '2'
@@ -92,7 +137,10 @@ def main():
         receipt={'state':'lab_verified','postgres_major':18,'source_sha':os.environ.get('GITHUB_SHA'),
             'snapshot_excludes_late_source_write':True,'restore_data_verified':True,'replay_no_restore':True,
             'corrupt_archive_rejected':True,'target_drift_rejected':True,'source_preserved':True,
-            'real_user_data_used':False,'physical_pdq_verified':False,'cutover_ready':False}
+            'real_user_data_used':False,'physical_pdq_verified':False,'cutover_ready':False,
+            'encrypted_transport_roundtrip':True,'seal_unseal_replay_no_rewrite':True,
+            'tamper_rejected_before_plaintext':True,'restored_from_decrypted_transport':True,
+            'external_storage_verified':False}
         (ROOT/'recovery-e2e-receipt.json').write_text(json.dumps(receipt,sort_keys=True)+'\n')
         print(json.dumps(receipt,sort_keys=True))
     finally:
