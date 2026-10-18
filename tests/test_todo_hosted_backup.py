@@ -147,6 +147,7 @@ def test_must_have_strong_pregoverned_secret_refs(env,field,value,reason):
         b.backup_secret_preflight(env)
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Hosted execution uses Linux POSIX 0600; Windows must reject.")
 def test_source_service_is_exact_unpooled_and_credential_only_in_pgpass(tmp_path,env,pubkey):
     root=tmp_path/"private";root.mkdir(mode=0o700)
     returned=b.build_source_config(root,env,pubkey)
@@ -163,6 +164,7 @@ def test_source_service_is_exact_unpooled_and_credential_only_in_pgpass(tmp_path
     assert all((root/name).stat().st_mode & 0o077 == 0 for name in ("pg_service.conf","pgpass","recipient.pem"))
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Hosted execution uses Linux POSIX 0600; Windows must reject.")
 def test_pgpass_safely_escapes_colon_and_backslash(tmp_path,env,pubkey):
     root=tmp_path/"private";root.mkdir(mode=0o700)
     env["TODO_BACKUP_PG_PASSWORD"]="safe:synth\\word-strong"
@@ -266,3 +268,10 @@ def test_corrupted_existing_asset_blocks_replay_without_new_upload(env):
     with pytest.raises(b.HostedBlocked,match="OFFSITE_CIPHERTEXT_READBACK_MISMATCH"):
         b.already_uploaded(fake,asset,tag)
     assert fake.calls.count("upload")==1
+
+
+def test_linux_only_guard_rejects_windows_context_before_credential_use(env, monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(b, "os", SimpleNamespace(name="nt"))
+    with pytest.raises(b.HostedBlocked, match="HOSTED_LINUX_REQUIRED"):
+        b.git_identity(env)

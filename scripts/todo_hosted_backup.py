@@ -58,6 +58,7 @@ def git_identity(env: dict[str, str]) -> str:
     commit = env.get("GITHUB_SHA", "")
     require(bool(SHA40.fullmatch(commit)), "HEAD_SHA_REQUIRED")
     require(env.get("TODO_BACKUP_CUSTODY_APPROVAL") == "offhost-key-verified", "CUSTODY_APPROVAL_REQUIRED")
+    require(os.name == "posix", "HOSTED_LINUX_REQUIRED")
     return commit
 
 
