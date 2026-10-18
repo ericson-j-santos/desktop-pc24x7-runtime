@@ -64,8 +64,12 @@ class FakeRelease:
     def create_or_get_draft(self, tag, sha):
         self.calls.append("get_draft")
         if tag not in self.releases:
-            self.releases[tag] = {"tag_name": tag, "id": 42, "draft": not self.published}
+            self.releases[tag] = {"tag_name": tag, "id": 42, "draft": not self.published, "target_commitish": sha}
         return self.releases[tag]
+
+    def get_release(self, release_id):
+        self.calls.append("get_release")
+        return dict(next(r for r in self.releases.values() if r["id"] == release_id))
 
     def list_assets(self, release_id):
         self.calls.append("list_assets")
@@ -74,9 +78,9 @@ class FakeRelease:
     def upload(self, release_id, name, data):
         self.calls.append("upload")
         self.id_counter += 1
-        asset = {"id": self.id_counter, "name": name, "state": "uploaded", "digest": "sha256:" + b.sha256(data)}
+        asset = {"id": self.id_counter, "name": name, "state": "uploaded", "digest": "sha256:" + b.sha256(data), "size": len(data)}
         self.assets[name] = (asset, bytes(data))
-        return asset
+        return dict(asset)
 
     def readback(self, asset, limit):
         self.calls.append("readback")
@@ -162,8 +166,8 @@ def test_must_have_strong_pregoverned_secret_refs(env,field,value,reason):
 def test_source_service_is_exact_unpooled_and_credential_only_in_pgpass(tmp_path,env,pubkey):
     root=tmp_path/"private";root.mkdir(mode=0o700)
     returned=b.build_source_config(root,env,pubkey)
-    profile=(root/"pg_service.conf").read_text()
-    pgpass=(root/"pgpass").read_text()
+    profile=(root/"pg_service.conf").read_text(encoding="utf-8")
+    pgpass=(root/"pgpass").read_text(encoding="utf-8")
     assert b.EXPECTED_HOST in profile and "-pooler" not in profile
     assert "sslmode=verify-full" in profile
     assert "sslrootcert=/etc/ssl/certs/ca-certificates.crt" in profile
@@ -180,7 +184,7 @@ def test_pgpass_safely_escapes_colon_and_backslash(tmp_path,env,pubkey):
     root=tmp_path/"private";root.mkdir(mode=0o700)
     env["TODO_BACKUP_PG_PASSWORD"]="safe:synth\\word-strong"
     b.build_source_config(root,env,pubkey)
-    assert (root/"pgpass").read_text().endswith(":safe\\:synth\\\\word-strong\n")
+    assert (root/"pgpass").read_text(encoding="utf-8").endswith(":safe\\:synth\\\\word-strong\n")
 
 
 def test_git_authenticated_api_redirects_never_forward_bearer():
@@ -209,7 +213,7 @@ def test_rejects_unsealed_blob_before_network(env):
 
 
 def test_workflow_main_only_never_exposes_secrets_in_pr():
-    workflow=(ROOT/".github/workflows/todo-hosted-backup.yml").read_text()
+    workflow=(ROOT/".github/workflows/todo-hosted-backup.yml").read_text(encoding="utf-8")
     assert "runs-on: ubuntu-latest" in workflow and "self-hosted" not in workflow
     assert "environment: todo-pg-backup" in workflow
     assert "github.event_name == 'schedule'" in workflow
@@ -226,14 +230,14 @@ def test_workflow_main_only_never_exposes_secrets_in_pr():
 
 
 def test_runbook_distinguishes_export_from_restore_and_requires_custody():
-    doc=(ROOT/"docs/todo-hosted-backup.md").read_text()
+    doc=(ROOT/"docs/todo-hosted-backup.md").read_text(encoding="utf-8")
     for term in ("offhost-key-verified", "todo_backup_reader", "draft release", "PGPASSFILE",
                  "pg_dump", "cutover_ready=false", "SEM", "restore", "Neon"):
         assert term.lower() in doc.lower()
 
 
 def test_no_external_job_can_use_untrusted_artifact_or_runtime():
-    script=(SCRIPT_DIR/"todo_hosted_backup.py").read_text()
+    script=(SCRIPT_DIR/"todo_hosted_backup.py").read_text(encoding="utf-8")
     assert 'EXPECTED_REPO = "ericson-j-santos/desktop-pc24x7-runtime"' in script
     assert 'EXPECTED_ROLE = "todo_backup_reader"' in script
     assert "SHELL" not in script and "shell=True" not in script
@@ -331,6 +335,7 @@ def test_replay_does_not_relabel_old_asset_with_current_sha(env, monkeypatch):
     env["GITHUB_SHA"] = "b" * 40
     result = b.run(env, fake, bin_dir=Path("/not-used"))
     assert result["executor_sha"] == "b" * 40
+    assert result["release_producer_sha"] == "a" * 40
     assert result["source_sha"] is None and result["source_db"] is None
     assert result["capture_executed"] is False and result["production_data_read"] is False
     assert result["replay_without_source_access"]
@@ -382,3 +387,89 @@ def test_replay_rechecks_release_is_still_draft(env):
     with pytest.raises(b.HostedBlocked, match="DRAFT_RELEASE_REQUIRED"):
         b.already_uploaded(fake, tag + ".sealed", tag, recipient_pem=_recipient(env))
     assert fake.calls[before:] == ["find_draft"]
+
+
+def _prepared_draft(fake, env):
+    tag = "todo-pg-backup-20261018"
+    name = tag + ".sealed"
+    cipher = synthetic_cipher(_recipient(env))
+    receipt = b.verified_upload(
+        fake, name, cipher, tag, env["GITHUB_SHA"], recipient_pem=_recipient(env),
+    )
+    return tag, name, cipher, receipt
+
+
+def test_existing_release_without_exact_revision_blocks(env):
+    fake = FakeRelease()
+    tag, name, _, _ = _prepared_draft(fake, env)
+    fake.releases[tag]["target_commitish"] = "main"
+    with pytest.raises(b.HostedBlocked, match="BACKUP_PRODUCER_SHA_REQUIRED"):
+        b.already_uploaded(fake, name, tag, recipient_pem=_recipient(env))
+    assert fake.calls.count("upload") == 1
+
+
+@pytest.mark.parametrize("replay", [False, True])
+def test_release_published_during_readback_is_rejected(env, replay):
+    class PublishedDuringReadback(FakeRelease):
+        publish_on_read = False
+        def readback(self, asset, limit):
+            data = super().readback(asset, limit)
+            if self.publish_on_read:
+                for release in self.releases.values():
+                    release["draft"] = False
+            return data
+
+    fake = PublishedDuringReadback()
+    tag, name, cipher, _ = _prepared_draft(fake, env)
+    fake.publish_on_read = True
+    with pytest.raises(b.HostedBlocked, match="DRAFT_RELEASE_REQUIRED"):
+        if replay:
+            b.already_uploaded(fake, name, tag, recipient_pem=_recipient(env))
+        else:
+            b.verified_upload(
+                fake, name, cipher, tag, env["GITHUB_SHA"], recipient_pem=_recipient(env),
+            )
+    assert fake.calls.count("upload") == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("id", 999), ("size", 1), ("digest", "sha256:" + "f" * 64), ("state", "starter"),
+])
+def test_asset_changed_after_readback_is_rejected(env, field, value):
+    class ChangedDuringReadback(FakeRelease):
+        def readback(self, asset, limit):
+            data = super().readback(asset, limit)
+            self.assets[asset["name"]][0][field] = value
+            return data
+
+    fake = ChangedDuringReadback()
+    with pytest.raises(b.HostedBlocked, match="FINAL_ASSET_IDENTITY_CHANGED"):
+        _prepared_draft(fake, env)
+    assert fake.calls.count("upload") == 1
+
+
+def test_release_revision_changed_after_readback_is_rejected(env):
+    class ChangedDuringReadback(FakeRelease):
+        def readback(self, asset, limit):
+            data = super().readback(asset, limit)
+            for release in self.releases.values():
+                release["target_commitish"] = "b" * 40
+            return data
+
+    fake = ChangedDuringReadback()
+    with pytest.raises(b.HostedBlocked, match="RELEASE_IDENTITY_CHANGED"):
+        _prepared_draft(fake, env)
+    assert fake.calls.count("upload") == 1
+
+
+def test_release_creation_pins_exact_revision(env, monkeypatch):
+    transport = b.GitHubDraftTransport("synthetic")
+    monkeypatch.setattr(transport, "find_draft", lambda tag: None)
+    payloads = []
+    def respond(method, url, payload=None):
+        payloads.append(payload)
+        return 201, {**payload, "id": 42}
+    monkeypatch.setattr(transport, "_json", respond)
+    release = transport.create_or_get_draft("todo-pg-backup-20261018", env["GITHUB_SHA"])
+    assert release["target_commitish"] == env["GITHUB_SHA"]
+    assert payloads[0]["target_commitish"] != "main"

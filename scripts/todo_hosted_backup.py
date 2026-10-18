@@ -105,6 +105,7 @@ def build_source_config(root: Path, env: dict[str, str], pem: bytes) -> dict[str
 class Transport(Protocol):
     def find_draft(self, tag: str) -> dict | None: ...
     def create_or_get_draft(self, tag: str, sha: str) -> dict: ...
+    def get_release(self, release_id: int) -> dict: ...
     def list_assets(self, release_id: int) -> list[dict]: ...
     def upload(self, release_id: int, name: str, data: bytes) -> dict: ...
     def readback(self, asset: dict, limit: int) -> bytes: ...
@@ -181,11 +182,12 @@ class GitHubDraftTransport:
         return release
 
     def create_or_get_draft(self, tag: str, sha: str) -> dict:
+        require(isinstance(sha, str) and bool(SHA40.fullmatch(sha)), "HEAD_SHA_REQUIRED")
         release = self.find_draft(tag)
         if release is None:
             code, release = self._json("POST", "https://api.github.com/repos/" + EXPECTED_REPO + "/releases", {
                 "tag_name": tag, "name": "Encrypted TODO PostgreSQL backup " + tag,
-                "target_commitish": "main", "draft": True, "prerelease": True,
+                "target_commitish": sha, "draft": True, "prerelease": True,
                 "make_latest": "false", "body": "Encrypted database backup. No plaintext or recovery key. Not a validated physical cutover.",
             })
             require(code == 201, "DRAFT_RELEASE_CREATION_FAILED")
@@ -194,13 +196,19 @@ class GitHubDraftTransport:
                 "DRAFT_RELEASE_REQUIRED")
         return release
 
+    def get_release(self, release_id: int) -> dict:
+        require(type(release_id) is int and release_id > 0, "RELEASE_ID_INVALID")
+        code, data = self._json("GET", f"https://api.github.com/repos/{EXPECTED_REPO}/releases/{release_id}")
+        require(code == 200 and isinstance(data, dict), "RELEASE_READBACK_FAILED")
+        return data
+
     def list_assets(self, release_id: int) -> list[dict]:
         code, data = self._json("GET", f"https://api.github.com/repos/{EXPECTED_REPO}/releases/{release_id}/assets?per_page=100")
         require(code == 200 and isinstance(data, list) and len(data) < 100, "RELEASE_ASSETS_INVALID")
         return data
 
     def upload(self, release_id: int, name: str, data: bytes) -> dict:
-        require(name.endswith(".sealed") and len(data) < MAX_ARCHIVE, "SEALED_ARCHIVE_REQUIRED")
+        require(name.endswith(".sealed") and 0 < len(data) <= MAX_ARCHIVE, "SEALED_ARCHIVE_REQUIRED")
         query = urllib.parse.urlencode({"name": name})
         code, response = self._request("POST", f"https://uploads.github.com/repos/{EXPECTED_REPO}/releases/{release_id}/assets?{query}",
                                       data, "application/octet-stream")
@@ -246,14 +254,41 @@ class GitHubDraftTransport:
             raise HostedBlocked("DRAFT_ASSET_READBACK_FAILED") from None
 
 
+def release_producer(release: dict, tag: str) -> str:
+    """Observe a pinned release revision; only decrypted manifest proves its binding."""
+    require(isinstance(release, dict) and release.get("draft") is True and
+            type(release.get("id")) is int and release["id"] > 0 and
+            release.get("tag_name") == tag, "DRAFT_RELEASE_REQUIRED")
+    producer = release.get("target_commitish", "")
+    require(isinstance(producer, str) and bool(SHA40.fullmatch(producer)),
+            "BACKUP_PRODUCER_SHA_REQUIRED")
+    return producer
+
+
+def final_storage_readback(transport: Transport, release_id: int, tag: str,
+                           producer: str, asset: dict, digest: str, size: int) -> None:
+    """Independent metadata read after download; not authenticated capture provenance."""
+    matches = [a for a in transport.list_assets(release_id)
+               if isinstance(a, dict) and a.get("name") == asset["name"]]
+    require(len(matches) == 1, "FINAL_ASSET_SET_CHANGED")
+    observed = matches[0]
+    require(type(asset.get("id")) is int and asset["id"] > 0 and
+            observed.get("id") == asset["id"] and observed.get("state") == "uploaded" and
+            observed.get("digest") == "sha256:" + digest and
+            type(observed.get("size")) is int and observed["size"] == size,
+            "FINAL_ASSET_IDENTITY_CHANGED")
+    current = transport.get_release(release_id)
+    observed_producer = release_producer(current, tag)
+    require(current["id"] == release_id and observed_producer == producer,
+            "RELEASE_IDENTITY_CHANGED")
+
+
 def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem: bytes) -> dict | None:
     """Idempotent repeat: validate a previous encrypted offsite file before reconnecting to Neon."""
     release = transport.find_draft(tag)
     if release is None:
         return None
-    require(isinstance(release, dict) and release.get("draft") is True and
-            type(release.get("id")) is int and release["id"] > 0 and
-            release.get("tag_name") == tag, "DRAFT_RELEASE_REQUIRED")
+    producer = release_producer(release, tag)
     assets = transport.list_assets(release["id"])
     matches = [a for a in assets if isinstance(a, dict) and a.get("name") == name]
     require(len(matches) <= 1, "DUPLICATE_ASSET_NAME")
@@ -268,7 +303,8 @@ def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem
     require(len(remote) <= MAX_ARCHIVE and remote.startswith(b"TODO-PG-SEALED-V1\0") and
             sha256(remote) == digest[7:], "OFFSITE_CIPHERTEXT_READBACK_MISMATCH")
     inspected = inspect_envelope(remote, recipient_pem)
-    return {"state": "already_verified", "ciphertext_sha256": digest[7:],
+    final_storage_readback(transport, release["id"], tag, producer, asset, digest[7:], len(remote))
+    return {"state": "already_verified", "release_producer_sha": producer, "ciphertext_sha256": digest[7:],
             "recipient": inspected["header"]["recipient"], "recipient_matched": True,
             "envelope_structure_verified": True, "ciphertext_authentication_verified": False,
             "ciphertext_bytes": len(remote), "release_id": release["id"],
@@ -279,14 +315,14 @@ def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem
 
 def verified_upload(transport: Transport, name: str, cipher: bytes, tag: str, sha: str,
                     *, recipient_pem: bytes) -> dict:
+    require(isinstance(sha, str) and bool(SHA40.fullmatch(sha)), "HEAD_SHA_REQUIRED")
     require(cipher.startswith(b"TODO-PG-SEALED-V1\0") and 0 < len(cipher) <= MAX_ARCHIVE,
             "CIPHERTEXT_FORMAT_INVALID")
     inspected = inspect_envelope(cipher, recipient_pem)
     digest = sha256(cipher)
     release = transport.create_or_get_draft(tag, sha)
-    require(isinstance(release, dict) and release.get("draft") is True and
-            type(release.get("id")) is int and release["id"] > 0 and
-            release.get("tag_name") == tag, "DRAFT_RELEASE_REQUIRED")
+    producer = release_producer(release, tag)
+    require(producer == sha, "RELEASE_PRODUCER_SHA_MISMATCH")
     assets = transport.list_assets(release["id"])
     matches = [a for a in assets if isinstance(a, dict) and a.get("name") == name]
     require(len(matches) <= 1, "DUPLICATE_ASSET_NAME")
@@ -300,7 +336,9 @@ def verified_upload(transport: Transport, name: str, cipher: bytes, tag: str, sh
     observed = transport.readback(asset, MAX_ARCHIVE)
     require(len(observed) == len(cipher) and sha256(observed) == digest,
             "OFFSITE_CIPHERTEXT_READBACK_MISMATCH")
+    final_storage_readback(transport, release["id"], tag, producer, asset, digest, len(cipher))
     return {"state": "already_verified" if replay else "encrypted_draft_uploaded",
+            "release_producer_sha": producer,
             "ciphertext_sha256": digest, "ciphertext_bytes": len(cipher),
             "recipient": inspected["header"]["recipient"], "recipient_matched": True,
             "envelope_structure_verified": True, "ciphertext_authentication_verified": False,
@@ -329,6 +367,12 @@ def run(env: dict[str, str], transport: Transport, *, bin_dir: Path) -> dict:
         bundle = root / "bundle"
         result = capture(pg, bundle, "todo-hosted-backup-" + tag)
         require(result["state"] in {"captured", "already_captured"}, "SOURCE_CAPTURE_FAILED")
+        manifest = bundle_manifest(bundle)
+        # Bind the producer revision inside the encrypted payload as well as release metadata.
+        manifest["producer_sha"] = commit
+        bound_manifest = bundle / "manifest.bound.json"
+        _private_write(bound_manifest, json.dumps(manifest, sort_keys=True).encode("utf-8") + b"\n")
+        bound_manifest.replace(bundle / "manifest.json")
         manifest = bundle_manifest(bundle)
         # Refuse an apparently empty or partial production export.
         require("queue_events" in manifest["tables"] and "continuation_requests" in manifest["tables"],

@@ -4,12 +4,18 @@ on:
   pull_request:
     paths:
       - scripts/todo_hosted_backup.py
+      - scripts/pc24x7_todo_recovery.py
+      - scripts/pc24x7_todo_sealed.py
+      - docs/todo-hosted-backup.md
       - tests/test_todo_hosted_backup.py
       - .github/workflows/todo-hosted-backup.yml
   push:
     branches: [feat/todo-free-recovery-20261016]
     paths:
       - scripts/todo_hosted_backup.py
+      - scripts/pc24x7_todo_recovery.py
+      - scripts/pc24x7_todo_sealed.py
+      - docs/todo-hosted-backup.md
       - tests/test_todo_hosted_backup.py
       - .github/workflows/todo-hosted-backup.yml
   schedule:
@@ -45,7 +51,7 @@ jobs:
       - name: Verify Python and hosted backup guardrails
         run: |
           python -m py_compile scripts/todo_hosted_backup.py tests/test_todo_hosted_backup.py
-          PYTHONPATH=scripts python -m pytest -q -ra tests/test_todo_hosted_backup.py
+          PYTHONPATH=scripts python -m pytest -v -ra tests/test_todo_hosted_backup.py
 
   backup:
     name: Capture, encrypt and verify offsite draft backup

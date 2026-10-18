@@ -3,6 +3,9 @@ on:
   push:
     branches: [feat/todo-free-recovery-20261016]
     paths:
+      - scripts/todo_hosted_backup.py
+      - tests/test_todo_hosted_backup.py
+      - .github/workflows/todo-hosted-backup.yml
       - scripts/pc24x7_todo_recovery.py
       - scripts/pc24x7_todo_sealed.py
       - scripts/pc24x7_todo_custody_preflight.py
@@ -13,6 +16,9 @@ on:
       - .github/workflows/todo-recovery-isolated-e2e.yml
   pull_request:
     paths:
+      - scripts/todo_hosted_backup.py
+      - tests/test_todo_hosted_backup.py
+      - .github/workflows/todo-hosted-backup.yml
       - scripts/pc24x7_todo_recovery.py
       - scripts/pc24x7_todo_sealed.py
       - scripts/pc24x7_todo_custody_preflight.py
@@ -46,12 +52,12 @@ jobs:
         with:
           persist-credentials: false
       - name: Compile the recovery implementation and tests
-        run: python3 -m py_compile scripts/pc24x7_todo_recovery.py scripts/pc24x7_todo_sealed.py scripts/pc24x7_todo_custody_preflight.py tests/e2e_pc24x7_todo_recovery.py
+        run: python3 -m py_compile scripts/todo_hosted_backup.py scripts/pc24x7_todo_recovery.py scripts/pc24x7_todo_sealed.py scripts/pc24x7_todo_custody_preflight.py tests/e2e_pc24x7_todo_recovery.py
       - name: Validate portable encryption and rejection controls
         run: python3 -m pytest -q -ra tests/test_pc24x7_todo_sealed.py
       - name: Prove RSA key possession without exposing keys or custody claims
         run: python3 -m pytest -q -ra tests/test_pc24x7_todo_custody_preflight.py
-      - name: Restore, verify independently, replay and reject invalid states
+      - name: Restore core and hosted captures, verify SQL, replay and reject invalid states
         run: python3 tests/e2e_pc24x7_todo_recovery.py
       - name: Upload only the synthetic verification receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
