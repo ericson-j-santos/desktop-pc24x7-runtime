@@ -1,4 +1,4 @@
-"""Safety tests for hosted backup. Synthetic key/data only; no network or real DB."""
+"""Hosted safety tests: real cryptography, synthetic keys/data and in-memory transport."""
 from __future__ import annotations
 
 import base64
@@ -18,12 +18,17 @@ sys.path.insert(0, str(SCRIPT_DIR))
 spec = importlib.util.spec_from_file_location("hosted_backup_unit", SCRIPT_DIR / "todo_hosted_backup.py")
 b = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(b)
+import pc24x7_todo_sealed as sealed
 
 
 @pytest.fixture(scope="module")
-def pubkey():
-    key = rsa.generate_private_key(public_exponent=65537, key_size=3072)
-    return key.public_key().public_bytes(
+def privatekey():
+    return rsa.generate_private_key(public_exponent=65537, key_size=3072)
+
+
+@pytest.fixture(scope="module")
+def pubkey(privatekey):
+    return privatekey.public_key().public_bytes(
         serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo)
 
 
@@ -79,17 +84,23 @@ class FakeRelease:
         return data + b"bad" if self.corrupt else data
 
 
-def synthetic_cipher():
-    # Verify transport never sends plaintext; the cryptography module is validated
-    # independently by the real PostgreSQL E2E and portable-sealed tests.
-    return b"TODO-PG-SEALED-V1\0" + os.urandom(300)
+def _recipient(env):
+    return base64.b64decode(env["TODO_BACKUP_RECIPIENT_PEM_B64"], validate=True)
+
+
+def synthetic_cipher(recipient_pem):
+    # Real encrypted envelope; this synthetic PGDMP payload is not a database dump.
+    archive = b"PGDMP-hosted-synthetic-" + os.urandom(32)
+    manifest = sealed.canonical({"schema_version": 1, "correlation_id": "hosted-synthetic",
+                                 "archive_sha256": sealed.digest(archive)})
+    return sealed.encrypt(manifest, archive, recipient_pem)
 
 
 def test_positive_upload_and_replay_does_not_create_second_asset(env):
     dest = FakeRelease()
-    key = synthetic_cipher()
-    one = b.verified_upload(dest, "todo-pg-backup-20261018.sealed", key, "todo-pg-backup-20261018", env["GITHUB_SHA"])
-    again = b.verified_upload(dest, "todo-pg-backup-20261018.sealed", key, "todo-pg-backup-20261018", env["GITHUB_SHA"])
+    key = synthetic_cipher(_recipient(env))
+    one = b.verified_upload(dest, "todo-pg-backup-20261018.sealed", key, "todo-pg-backup-20261018", env["GITHUB_SHA"], recipient_pem=_recipient(env))
+    again = b.verified_upload(dest, "todo-pg-backup-20261018.sealed", key, "todo-pg-backup-20261018", env["GITHUB_SHA"], recipient_pem=_recipient(env))
     assert one["state"] == "encrypted_draft_uploaded"
     assert again["state"] == "already_verified"
     assert dest.calls.count("upload") == 1
@@ -103,17 +114,17 @@ def test_readback_mutation_fails_and_never_declares_success(env):
     dest = FakeRelease()
     dest.corrupt = True
     with pytest.raises(b.HostedBlocked, match="OFFSITE_CIPHERTEXT_READBACK_MISMATCH"):
-        b.verified_upload(dest, "todo-pg-backup-20261018.sealed", synthetic_cipher(), "todo-pg-backup-20261018", env["GITHUB_SHA"])
+        b.verified_upload(dest, "todo-pg-backup-20261018.sealed", synthetic_cipher(_recipient(env)), "todo-pg-backup-20261018", env["GITHUB_SHA"], recipient_pem=_recipient(env))
     assert dest.calls.count("upload") == 1
 
 
 def test_preexisting_different_asset_is_not_overwritten(env):
     dest = FakeRelease()
     name = "todo-pg-backup-20261018.sealed"
-    data = synthetic_cipher()
-    b.verified_upload(dest, name, data, "todo-pg-backup-20261018", env["GITHUB_SHA"])
+    data = synthetic_cipher(_recipient(env))
+    b.verified_upload(dest, name, data, "todo-pg-backup-20261018", env["GITHUB_SHA"], recipient_pem=_recipient(env))
     with pytest.raises(b.HostedBlocked, match="OFFSITE_CIPHERTEXT_READBACK_MISMATCH"):
-        b.verified_upload(dest, name, synthetic_cipher(), "todo-pg-backup-20261018", env["GITHUB_SHA"])
+        b.verified_upload(dest, name, synthetic_cipher(_recipient(env)), "todo-pg-backup-20261018", env["GITHUB_SHA"], recipient_pem=_recipient(env))
     assert dest.assets[name][1] == data and dest.calls.count("upload") == 1
 
 
@@ -187,13 +198,13 @@ def test_replay_rejects_duplicate_assets(env):
             name="todo-pg-backup-20261018.sealed"
             return [{"id":1,"name":name,"state":"uploaded"},{"id":2,"name":name,"state":"uploaded"}]
     with pytest.raises(b.HostedBlocked, match="DUPLICATE_ASSET_NAME"):
-        b.verified_upload(Duplicate(),"todo-pg-backup-20261018.sealed",synthetic_cipher(),"todo-pg-backup-20261018",env["GITHUB_SHA"])
+        b.verified_upload(Duplicate(),"todo-pg-backup-20261018.sealed",synthetic_cipher(_recipient(env)),"todo-pg-backup-20261018",env["GITHUB_SHA"], recipient_pem=_recipient(env))
 
 
 def test_rejects_unsealed_blob_before_network(env):
     fake=FakeRelease()
     with pytest.raises(b.HostedBlocked,match="CIPHERTEXT_FORMAT_INVALID"):
-        b.verified_upload(fake,"todo-pg-backup-20261018.sealed",b"PGDMP-not-sealed","todo-pg-backup-20261018",env["GITHUB_SHA"])
+        b.verified_upload(fake,"todo-pg-backup-20261018.sealed",b"PGDMP-not-sealed","todo-pg-backup-20261018",env["GITHUB_SHA"], recipient_pem=_recipient(env))
     assert fake.calls == []
 
 
@@ -234,7 +245,7 @@ def test_published_release_is_refused_before_upload(env):
     fake=FakeRelease()
     fake.published=True
     with pytest.raises(b.HostedBlocked,match="DRAFT_RELEASE_REQUIRED"):
-        b.verified_upload(fake,"todo-pg-backup-20261018.sealed",synthetic_cipher(),"todo-pg-backup-20261018",env["GITHUB_SHA"])
+        b.verified_upload(fake,"todo-pg-backup-20261018.sealed",synthetic_cipher(_recipient(env)),"todo-pg-backup-20261018",env["GITHUB_SHA"], recipient_pem=_recipient(env))
     assert fake.calls == ["get_draft"]
 
 
@@ -242,11 +253,11 @@ def test_same_day_retry_readback_without_neon_source_reconnect(env):
     fake=FakeRelease()
     tag="todo-pg-backup-20261018"
     asset=tag+".sealed"
-    data=synthetic_cipher()
-    assert b.already_uploaded(fake,asset,tag) is None
-    b.verified_upload(fake,asset,data,tag,env["GITHUB_SHA"])
+    data=synthetic_cipher(_recipient(env))
+    assert b.already_uploaded(fake,asset,tag,recipient_pem=_recipient(env)) is None
+    b.verified_upload(fake,asset,data,tag,env["GITHUB_SHA"], recipient_pem=_recipient(env))
     previous_uploads=fake.calls.count("upload")
-    receipt=b.already_uploaded(fake,asset,tag)
+    receipt=b.already_uploaded(fake,asset,tag,recipient_pem=_recipient(env))
     assert receipt["state"]=="already_verified" and receipt["replay_without_source_access"]
     assert fake.calls.count("upload")==previous_uploads and receipt["ciphertext_sha256"]==b.sha256(data)
 
@@ -254,19 +265,19 @@ def test_remote_asset_digest_missing_blocks_replay(env):
     fake=FakeRelease()
     tag="todo-pg-backup-20261018"
     asset=tag+".sealed"
-    b.verified_upload(fake,asset,synthetic_cipher(),tag,env["GITHUB_SHA"])
+    b.verified_upload(fake,asset,synthetic_cipher(_recipient(env)),tag,env["GITHUB_SHA"], recipient_pem=_recipient(env))
     fake.assets[asset][0].pop("digest")
     with pytest.raises(b.HostedBlocked,match="TRUSTED_OFFSITE_DIGEST_MISSING"):
-        b.already_uploaded(fake,asset,tag)
+        b.already_uploaded(fake,asset,tag,recipient_pem=_recipient(env))
 
 def test_corrupted_existing_asset_blocks_replay_without_new_upload(env):
     fake=FakeRelease()
     tag="todo-pg-backup-20261018"
     asset=tag+".sealed"
-    b.verified_upload(fake,asset,synthetic_cipher(),tag,env["GITHUB_SHA"])
+    b.verified_upload(fake,asset,synthetic_cipher(_recipient(env)),tag,env["GITHUB_SHA"], recipient_pem=_recipient(env))
     fake.corrupt=True
     with pytest.raises(b.HostedBlocked,match="OFFSITE_CIPHERTEXT_READBACK_MISMATCH"):
-        b.already_uploaded(fake,asset,tag)
+        b.already_uploaded(fake,asset,tag,recipient_pem=_recipient(env))
     assert fake.calls.count("upload")==1
 
 
@@ -275,3 +286,99 @@ def test_linux_only_guard_rejects_windows_context_before_credential_use(env, mon
     monkeypatch.setattr(b, "os", SimpleNamespace(name="nt"))
     with pytest.raises(b.HostedBlocked, match="HOSTED_LINUX_REQUIRED"):
         b.git_identity(env)
+
+
+def test_crypto_roundtrip_from_downloaded_ciphertext(env, privatekey):
+    fake = FakeRelease()
+    archive = b"PGDMP-isolated-cryptography-test"
+    manifest = sealed.canonical({"schema_version": 1, "correlation_id": "hosted-roundtrip",
+                                 "archive_sha256": sealed.digest(archive)})
+    cipher = sealed.encrypt(manifest, archive, _recipient(env))
+    tag = "todo-pg-backup-20261018"
+    receipt = b.verified_upload(fake, tag + ".sealed", cipher, tag, env["GITHUB_SHA"],
+                                recipient_pem=_recipient(env))
+    asset, _ = fake.assets[tag + ".sealed"]
+    downloaded = fake.readback(asset, b.MAX_ARCHIVE)
+    identity = privatekey.private_bytes(serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8, serialization.NoEncryption())
+    assert sealed.decrypt(downloaded, identity) == (manifest, archive)
+    assert receipt["recipient"] == env["TODO_BACKUP_RECIPIENT_SHA256"]
+    assert receipt["envelope_structure_verified"] and receipt["recipient_matched"]
+    assert not receipt["ciphertext_authentication_verified"]
+    assert not receipt["database_restore_verified"] and not receipt["offhost_custody_verified"]
+
+
+def _replay_only_context(monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+    fixed = datetime(2026, 10, 18, 4, 27, tzinfo=timezone.utc)
+    monkeypatch.setattr(b, "datetime", SimpleNamespace(now=lambda tz: fixed))
+    # Execution-context guard is tested separately; isolate replay on Windows and Linux.
+    monkeypatch.setattr(b, "git_identity", lambda values: values["GITHUB_SHA"])
+    def forbidden(*args, **kwargs):
+        pytest.fail("Replay attempted source access")
+    monkeypatch.setattr(b, "Postgres", forbidden)
+    monkeypatch.setattr(b, "capture", forbidden)
+    return "todo-pg-backup-20261018"
+
+
+def test_replay_does_not_relabel_old_asset_with_current_sha(env, monkeypatch):
+    tag = _replay_only_context(monkeypatch)
+    fake = FakeRelease()
+    cipher = synthetic_cipher(_recipient(env))
+    b.verified_upload(fake, tag + ".sealed", cipher, tag, "a" * 40,
+                      recipient_pem=_recipient(env))
+    env["GITHUB_SHA"] = "b" * 40
+    result = b.run(env, fake, bin_dir=Path("/not-used"))
+    assert result["executor_sha"] == "b" * 40
+    assert result["source_sha"] is None and result["source_db"] is None
+    assert result["capture_executed"] is False and result["production_data_read"] is False
+    assert result["replay_without_source_access"]
+    assert fake.calls.count("upload") == 1
+
+
+def test_replay_wrong_recipient_blocks_before_source_or_upload(env, monkeypatch):
+    tag = _replay_only_context(monkeypatch)
+    fake = FakeRelease()
+    b.verified_upload(fake, tag + ".sealed", synthetic_cipher(_recipient(env)), tag,
+                      env["GITHUB_SHA"], recipient_pem=_recipient(env))
+    other = rsa.generate_private_key(public_exponent=65537, key_size=3072).public_key()
+    other_pem = other.public_bytes(serialization.Encoding.PEM,
+                                  serialization.PublicFormat.SubjectPublicKeyInfo)
+    env["TODO_BACKUP_RECIPIENT_PEM_B64"] = base64.b64encode(other_pem).decode("ascii")
+    env["TODO_BACKUP_RECIPIENT_SHA256"] = sealed.key_id(other)
+    with pytest.raises(b.SealedBlocked, match="RECIPIENT_MISMATCH"):
+        b.run(env, fake, bin_dir=Path("/not-used"))
+    assert fake.calls.count("upload") == 1
+
+
+def test_magic_and_digest_alone_cannot_validate_remote_backup(env, monkeypatch):
+    tag = _replay_only_context(monkeypatch)
+    fake = FakeRelease()
+    fake.create_or_get_draft(tag, env["GITHUB_SHA"])
+    # Reproduce the original false positive: correct magic and remote digest, invalid header.
+    fake.upload(42, tag + ".sealed", sealed.MAGIC + b"\0" * 300)
+    with pytest.raises(b.SealedBlocked, match="HEADER_INVALID"):
+        b.run(env, fake, bin_dir=Path("/not-used"))
+    assert fake.calls.count("upload") == 1
+
+
+def test_invalid_envelope_is_rejected_before_upload(env):
+    fake = FakeRelease()
+    with pytest.raises(b.SealedBlocked, match="HEADER_INVALID"):
+        b.verified_upload(fake, "backup.sealed", sealed.MAGIC + b"\0" * 300,
+                          "todo-pg-backup-20261018", env["GITHUB_SHA"],
+                          recipient_pem=_recipient(env))
+    assert fake.calls == []
+
+
+def test_replay_rechecks_release_is_still_draft(env):
+    fake = FakeRelease()
+    tag = "todo-pg-backup-20261018"
+    b.verified_upload(fake, tag + ".sealed", synthetic_cipher(_recipient(env)), tag,
+                      env["GITHUB_SHA"], recipient_pem=_recipient(env))
+    fake.releases[tag]["draft"] = False
+    before = len(fake.calls)
+    with pytest.raises(b.HostedBlocked, match="DRAFT_RELEASE_REQUIRED"):
+        b.already_uploaded(fake, tag + ".sealed", tag, recipient_pem=_recipient(env))
+    assert fake.calls[before:] == ["find_draft"]

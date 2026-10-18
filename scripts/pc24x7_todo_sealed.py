@@ -17,7 +17,7 @@ import stat
 import struct
 from typing import Iterator
 
-from cryptography.exceptions import InvalidTag
+from cryptography.exceptions import InvalidTag, UnsupportedAlgorithm
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -160,8 +160,10 @@ def encrypt(manifest: bytes, archive: bytes, recipient_pem: bytes) -> bytes:
     return aad + nonce + AESGCM(key).encrypt(nonce, plain, aad)
 
 
-def decrypt(envelope: bytes, identity_pem: bytes) -> tuple[bytes, bytes]:
-    require(len(MAGIC) + 4 + 12 + 16 < len(envelope) <= MAX_ENVELOPE and
+def inspect_envelope(envelope: bytes, recipient_pem: bytes | None = None) -> dict:
+    """Inspect V1 structure/recipient only; this does not authenticate ciphertext."""
+    require(isinstance(envelope, bytes) and
+            len(MAGIC) + 4 + 12 + 16 < len(envelope) <= MAX_ENVELOPE and
             envelope.startswith(MAGIC), "ENVELOPE_INVALID")
     hlen = struct.unpack(">I", envelope[len(MAGIC):len(MAGIC)+4])[0]
     require(1 <= hlen <= 8192, "HEADER_INVALID")
@@ -170,14 +172,41 @@ def decrypt(envelope: bytes, identity_pem: bytes) -> tuple[bytes, bytes]:
     header = strict_json(envelope[len(MAGIC)+4:end])
     require(set(header) == {"v", "recipient", "wrapped"} and type(header["v"]) is int and
             header["v"] == 1, "HEADER_INVALID")
+    require(isinstance(header["recipient"], str) and
+            re.fullmatch(r"[0-9a-f]{64}", header["recipient"]) is not None,
+            "HEADER_RECIPIENT_INVALID")
+    require(isinstance(header["wrapped"], str) and 0 < len(header["wrapped"]) <= 1368,
+            "WRAPPED_KEY_INVALID")
+    try:
+        wrapped = base64.b64decode(header["wrapped"], validate=True)
+    except (ValueError, TypeError, UnicodeError):
+        raise SealedBlocked("WRAPPED_KEY_INVALID") from None
+    require(base64.b64encode(wrapped).decode("ascii") == header["wrapped"],
+            "WRAPPED_KEY_INVALID")
+    require(384 <= len(wrapped) <= 1024, "WRAPPED_KEY_SIZE_INVALID")
+    if recipient_pem is not None:
+        try:
+            public = serialization.load_pem_public_key(recipient_pem)
+            expected = key_id(public)
+        except (ValueError, TypeError, UnsupportedAlgorithm):
+            raise SealedBlocked("RECIPIENT_INVALID") from None
+        require(header["recipient"] == expected, "RECIPIENT_MISMATCH")
+        require(len(wrapped) == (public.key_size + 7) // 8, "WRAPPED_KEY_SIZE_INVALID")
+    return {"header": header, "header_end": end, "wrapped": wrapped}
+
+
+def decrypt(envelope: bytes, identity_pem: bytes) -> tuple[bytes, bytes]:
+    inspected = inspect_envelope(envelope)
+    header, end, wrapped = inspected["header"], inspected["header_end"], inspected["wrapped"]
     try:
         identity = serialization.load_pem_private_key(identity_pem, password=None)
         require(isinstance(identity, rsa.RSAPrivateKey), "IDENTITY_INVALID")
         require(key_id(identity) == header["recipient"], "RECIPIENT_MISMATCH")
-        key = identity.decrypt(base64.b64decode(header["wrapped"], validate=True), oaep())
+        require(len(wrapped) == (identity.key_size + 7) // 8, "WRAPPED_KEY_SIZE_INVALID")
+        key = identity.decrypt(wrapped, oaep())
         require(len(key) == 32, "KEY_INVALID")
         plain = AESGCM(key).decrypt(envelope[end:end+12], envelope[end+12:], envelope[:end])
-    except (InvalidTag, ValueError, TypeError):
+    except (InvalidTag, ValueError, TypeError, UnsupportedAlgorithm):
         raise SealedBlocked("AUTHENTICATION_FAILED") from None
     require(len(plain) >= 4, "PAYLOAD_SIZE_INVALID")
     mlen = struct.unpack(">I", plain[:4])[0]

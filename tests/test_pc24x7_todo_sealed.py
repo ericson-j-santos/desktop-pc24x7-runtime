@@ -199,3 +199,73 @@ def test_world_readable_private_identity_blocked(fixture):
     with pytest.raises(s.SealedBlocked, match="PRIVATE_PERMISSIONS"):
         s.unseal(output, source.parent/"decoded", private, first["ciphertext_sha256"])
     assert not (source.parent/"decoded").exists()
+
+
+def _replace_header(envelope, raw):
+    end = s.inspect_envelope(envelope)["header_end"]
+    return s.MAGIC + s.struct.pack(">I", len(raw)) + raw + envelope[end:]
+
+
+def test_inspection_preserves_v1_encryption_roundtrip(keys):
+    archive = b"PGDMP-synthetic-envelope-inspection"
+    manifest = s.canonical({"schema_version": 1, "correlation_id": "envelope-test",
+                            "archive_sha256": s.digest(archive)})
+    envelope = s.encrypt(manifest, archive, keys[0])
+    inspected = s.inspect_envelope(envelope, keys[0])
+    assert inspected["header"]["recipient"] == s.key_id(
+        serialization.load_pem_public_key(keys[0]))
+    assert len(inspected["wrapped"]) == 384
+    assert s.decrypt(envelope, keys[1]) == (manifest, archive)
+
+
+@pytest.mark.parametrize("case,reason", [
+    ("duplicate", "JSON_DUPLICATE_KEY"),
+    ("boolean_version", "HEADER_INVALID"),
+    ("extra_field", "HEADER_INVALID"),
+    ("bad_recipient", "HEADER_RECIPIENT_INVALID"),
+    ("bad_base64", "WRAPPED_KEY_INVALID"),
+    ("short_wrapped", "WRAPPED_KEY_SIZE_INVALID"),
+    ("wrong_rsa_length", "WRAPPED_KEY_SIZE_INVALID"),
+    ("truncated", "ENVELOPE_TRUNCATED"),
+])
+def test_inspection_rejects_invalid_headers(keys, case, reason):
+    archive = b"PGDMP-synthetic-header-test"
+    manifest = s.canonical({"schema_version": 1, "correlation_id": "header-test",
+                            "archive_sha256": s.digest(archive)})
+    envelope = s.encrypt(manifest, archive, keys[0])
+    header = dict(s.inspect_envelope(envelope)["header"])
+    if case == "duplicate":
+        raw = s.canonical(header).replace(b'"v":1', b'"v":1,"v":1')
+    elif case == "truncated":
+        malformed = s.MAGIC + s.struct.pack(">I", 8192) + b"x" * 64
+        with pytest.raises(s.SealedBlocked, match=reason):
+            s.inspect_envelope(malformed, keys[0])
+        return
+    else:
+        if case == "boolean_version":
+            header["v"] = True
+        elif case == "extra_field":
+            header["unexpected"] = "value"
+        elif case == "bad_recipient":
+            header["recipient"] = "invalid"
+        elif case == "bad_base64":
+            header["wrapped"] = "%%%invalid%%%"
+        elif case == "short_wrapped":
+            header["wrapped"] = s.base64.b64encode(b"x" * 383).decode("ascii")
+        elif case == "wrong_rsa_length":
+            header["wrapped"] = s.base64.b64encode(b"x" * 385).decode("ascii")
+        raw = s.canonical(header)
+    with pytest.raises(s.SealedBlocked, match=reason):
+        s.inspect_envelope(_replace_header(envelope, raw), keys[0])
+
+
+def test_structural_inspection_does_not_claim_gcm_authentication(keys):
+    archive = b"PGDMP-synthetic-auth-control"
+    manifest = s.canonical({"schema_version": 1, "correlation_id": "auth-control",
+                            "archive_sha256": s.digest(archive)})
+    envelope = s.encrypt(manifest, archive, keys[0])
+    tampered = envelope[:-1] + bytes([envelope[-1] ^ 1])
+    # Header inspection cannot prove ciphertext authentication without the private key.
+    assert s.inspect_envelope(tampered, keys[0])["header"]["recipient"]
+    with pytest.raises(s.SealedBlocked, match="AUTHENTICATION_FAILED"):
+        s.decrypt(tampered, keys[1])

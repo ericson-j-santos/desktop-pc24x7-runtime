@@ -2,7 +2,7 @@
 
 Runs only in guarded GitHub Actions main branch with previously provisioned secrets.
 No direct credential output, host operations, schema writes, consumer jobs or cutover.
-The draft release is private to repo collaborators and stores only ciphertext.
+The draft release is restricted to users with push access and stores only ciphertext.
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ from typing import Any, Protocol
 from cryptography.hazmat.primitives import serialization
 
 from pc24x7_todo_recovery import Postgres, RecoveryBlocked, capture, bundle_manifest
-from pc24x7_todo_sealed import SealedBlocked, key_id, read_file, seal
+from pc24x7_todo_sealed import SealedBlocked, inspect_envelope, key_id, read_file, seal
 
 EXPECTED_REPO = "ericson-j-santos/desktop-pc24x7-runtime"
 EXPECTED_HOST = "ep-wandering-glitter-ac1kllv5.sa-east-1.aws.neon.tech"
@@ -246,11 +246,14 @@ class GitHubDraftTransport:
             raise HostedBlocked("DRAFT_ASSET_READBACK_FAILED") from None
 
 
-def already_uploaded(transport: Transport, name: str, tag: str) -> dict | None:
+def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem: bytes) -> dict | None:
     """Idempotent repeat: validate a previous encrypted offsite file before reconnecting to Neon."""
     release = transport.find_draft(tag)
     if release is None:
         return None
+    require(isinstance(release, dict) and release.get("draft") is True and
+            type(release.get("id")) is int and release["id"] > 0 and
+            release.get("tag_name") == tag, "DRAFT_RELEASE_REQUIRED")
     assets = transport.list_assets(release["id"])
     matches = [a for a in assets if isinstance(a, dict) and a.get("name") == name]
     require(len(matches) <= 1, "DUPLICATE_ASSET_NAME")
@@ -264,16 +267,21 @@ def already_uploaded(transport: Transport, name: str, tag: str) -> dict | None:
     remote = transport.readback(asset, MAX_ARCHIVE)
     require(len(remote) <= MAX_ARCHIVE and remote.startswith(b"TODO-PG-SEALED-V1\0") and
             sha256(remote) == digest[7:], "OFFSITE_CIPHERTEXT_READBACK_MISMATCH")
+    inspected = inspect_envelope(remote, recipient_pem)
     return {"state": "already_verified", "ciphertext_sha256": digest[7:],
+            "recipient": inspected["header"]["recipient"], "recipient_matched": True,
+            "envelope_structure_verified": True, "ciphertext_authentication_verified": False,
             "ciphertext_bytes": len(remote), "release_id": release["id"],
             "asset_id": asset["id"], "storage_private_draft": True,
             "database_restore_verified": False, "offhost_custody_verified": False,
             "cutover_ready": False, "workers_started": False, "replay_without_source_access": True}
 
 
-def verified_upload(transport: Transport, name: str, cipher: bytes, tag: str, sha: str) -> dict:
+def verified_upload(transport: Transport, name: str, cipher: bytes, tag: str, sha: str,
+                    *, recipient_pem: bytes) -> dict:
     require(cipher.startswith(b"TODO-PG-SEALED-V1\0") and 0 < len(cipher) <= MAX_ARCHIVE,
             "CIPHERTEXT_FORMAT_INVALID")
+    inspected = inspect_envelope(cipher, recipient_pem)
     digest = sha256(cipher)
     release = transport.create_or_get_draft(tag, sha)
     require(isinstance(release, dict) and release.get("draft") is True and
@@ -294,6 +302,8 @@ def verified_upload(transport: Transport, name: str, cipher: bytes, tag: str, sh
             "OFFSITE_CIPHERTEXT_READBACK_MISMATCH")
     return {"state": "already_verified" if replay else "encrypted_draft_uploaded",
             "ciphertext_sha256": digest, "ciphertext_bytes": len(cipher),
+            "recipient": inspected["header"]["recipient"], "recipient_matched": True,
+            "envelope_structure_verified": True, "ciphertext_authentication_verified": False,
             "release_id": release["id"], "asset_id": asset["id"],
             "storage_private_draft": True, "database_restore_verified": False,
             "offhost_custody_verified": False, "cutover_ready": False, "workers_started": False}
@@ -304,10 +314,12 @@ def run(env: dict[str, str], transport: Transport, *, bin_dir: Path) -> dict:
     pem = backup_secret_preflight(env)
     tag = "todo-pg-backup-" + datetime.now(timezone.utc).strftime("%Y%m%d")
     name = tag + ".sealed"
-    previously = already_uploaded(transport, name, tag)
+    previously = already_uploaded(transport, name, tag, recipient_pem=pem)
     if previously is not None:
-        return {**previously, "source_sha": commit, "source_db": EXPECTED_DB,
-                "production_data_read": False}
+        # The current execution did not capture this asset or inspect its encrypted manifest.
+        # Never relabel a prior backup with this execution\'s source identity.
+        return {**previously, "executor_sha": commit, "source_sha": None, "source_db": None,
+                "capture_executed": False, "production_data_read": False}
     # Fail closed on a pre-existing untrusted output path; use only ephemeral runner temp.
     with tempfile.TemporaryDirectory(prefix="todo-hosted-backup-") as location:
         root = Path(location)
@@ -328,8 +340,9 @@ def run(env: dict[str, str], transport: Transport, *, bin_dir: Path) -> dict:
         require(receipt["state"] == "sealed", "BACKUP_ENCRYPTION_FAILED")
         cipher = read_file(encrypted, MAX_ARCHIVE)
         require(sha256(cipher) == receipt["ciphertext_sha256"], "CIPHERTEXT_DIGEST_MISMATCH")
-        uploaded = verified_upload(transport, name, cipher, tag, commit)
-        return {**uploaded, "source_sha": commit, "source_db": EXPECTED_DB,
+        uploaded = verified_upload(transport, name, cipher, tag, commit, recipient_pem=pem)
+        return {**uploaded, "executor_sha": commit, "source_sha": commit, "source_db": EXPECTED_DB,
+                "capture_executed": True,
                 "source_major": manifest["source_major"], "table_count": len(manifest["tables"]),
                 "source_rows": sum(int(x["rows"]) for x in manifest["tables"].values()),
                 "production_data_read": True}

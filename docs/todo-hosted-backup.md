@@ -30,6 +30,30 @@ O pacote inclui `tests/test_todo_hosted_backup.py` com testes sintéticos positi
 
 O recibo mantém `cutover_ready=false`, `database_restore_verified=false` e `offhost_custody_verified=false`. A autenticação e o armazenamento reais devem ser validados depois de configurar as referências; até lá não iniciar workers, não reprocessar eventos históricos, não apagar origens e não promover o primário. SEM restauração real independente, o serviço não está homologado.
 
+## Repetição, destinatário e proveniência
+
+O upload e a repetição inspecionam o envelope V1 completo: limites, JSON sem
+campos duplicados, versão, fingerprint e tamanho da chave RSA encapsulada.
+A chave pública aprovada deve corresponder ao destinatário do arquivo
+baixado. Prefixo e checksum isolados não comprovam um envelope válido.
+
+O recibo distingue `executor_sha` (código desta execução) de `source_sha`
+(código que realizou a captura). No replay sem recibo de captura persistido e
+vinculado ao ciphertext, `source_sha` e `source_db` ficam nulos;
+`capture_executed=false`. O executor não atribui a versão atual a um backup
+anterior e não reabre a origem nem cria upload para compensar divergência.
+
+`envelope_structure_verified=true` e `recipient_matched=true` comprovam somente
+estrutura e correspondência do destinatário. A inspeção não autentica AES-GCM,
+não decifra o manifesto e não comprova posse da chave privada:
+`ciphertext_authentication_verified=false` continua explícito. A homologação
+exige autenticar/decifrar o asset baixado e restaurá-lo em PostgreSQL 18 isolado.
+
+Uma draft release não é armazenamento imutável. A listagem de rascunhos é
+restrita a identidades com permissão de push; a criptografia continua sendo a
+proteção do conteúdo caso alguém com escrita publique o rascunho. O primeiro
+E2E deve verificar também a restrição de acesso ao asset, com controle anônimo.
+
 ## Referências
 
 - https://neon.com/docs/manage/backup-pg-dump
