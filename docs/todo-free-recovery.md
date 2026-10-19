@@ -1,6 +1,6 @@
 # TODO Global — saída gratuita e recuperação independente do provedor
 
-Estado: destino próprio aprovado; implementação/implantação e cutover não homologados.
+Estado: destino próprio aprovado; implantação e cutover não homologados. Atualização de 19/10/2026: Neon aposentado; a preservação da fonte atual segue o [backup Notion](todo-notion-backup.md). As observações do banco antigo abaixo são históricas e não autorizam nova captura.
 Correlação: `todo22-free-recovery-20261016-v1`. Coordenação: TODO-22 existente.
 
 ## Decisão
@@ -9,9 +9,9 @@ Correlação: `todo22-free-recovery-20261016-v1`. Coordenação: TODO-22 existen
 
 O proprietário aprovou seguir a recomendação de PostgreSQL próprio. O destino
 definitivo é o PC24x7 elegível, com PostgreSQL 18 nativo, persistência sob controle
-do proprietário e cópia portátil criptografada fora do host. Neon fica somente
-como origem temporária dos dados atuais; consultar/exportar essa origem não é
-contratar nem escolher o Neon como destino definitivo.
+do proprietário e cópia portátil criptografada fora do host. A decisão posterior [sem Neon](todo-without-neon.md) retirou esse provedor
+também da origem operacional. O Notion preserva o estado atual acessível;
+o histórico exclusivo do banco antigo permanece não recuperado.
 
 Reutilizar a transição [sem Docker já existente](dockerless-runtime-migration.md):
 serviços permanentes em Linux Debian/Ubuntu Server com systemd, somente depois
@@ -37,8 +37,8 @@ continuam necessários e não são uma garantia de custo total zero.
 
 ### Duas frentes independentes, sem recomeçar
 
-**Preservação imediata:** usar o [backup hospedado existente](todo-hosted-backup.md)
-para retirar uma cópia cifrada da origem acessível, quando acesso restrito e
+**Preservação imediata:** usar o [backup da fonte atual](todo-notion-backup.md)
+para retirar uma cópia cifrada do Notion autorizado, quando acesso restrito e
 custódia da chave estiverem habilitados. Esta frente não exige Desktop/Noteri
 ligados. Não duplicar código, PR ou jobs; não reutilizar a conta proprietária como
 atalho. A primeira cópia só conta após download, autenticação e restauração
@@ -78,7 +78,7 @@ completa: corpos das funções, dependências dinâmicas e execução de gatilho
 foram testados nesta leitura. Preservar UTF8 e locale/provider na restauração;
 não herdar automaticamente o locale padrão de outra instalação.
 
-### Critério de corte e retorno
+### Critério histórico de corte do banco legado (não executado nesta rota)
 
 Restaurar primeiro em banco vazio todo_restore_*, com role não superusuária,
 usando os utilitários da mesma PR/revisão. Além de contagens e hashes das tabelas,
@@ -104,7 +104,7 @@ Checkpoint: `todo22-own-postgres-decision-20261018-v1`. Estado da implantação:
 PARCIAL; nenhum host instalado, dump real criado ou corte executado por este
 incremento documental.
 
-## Fonte e compatibilidade verificadas em 16/10/2026
+## Inventário histórico da fonte e compatibilidade — 16/10/2026
 
 A consulta somente leitura ao banco Neon `todo_global_bus_dev_ha` encontrou
 PostgreSQL 18.6, oito tabelas `todo_bus`, 109 eventos, 50 solicitações,
@@ -120,7 +120,7 @@ por digest oficial, volume `todo_recovery_pg18`, porta loopback 55433 e
 não contém gateway, ingestão ou workers. PG18 monta `/var/lib/postgresql`,
 não o caminho de dados do PG16. Nenhum volume legado deve ser reutilizado.
 
-## Implementação deste incremento
+## Implementação PostgreSQL histórica preservada para laboratório
 
 `scripts/pc24x7_todo_recovery.py` implementa somente `capture` e `verify-restore`.
 Captura `todo_bus` por pg_dump custom com snapshot transacional exportado,
@@ -150,7 +150,7 @@ antes da conexão com `PASSWORD_FILE_PERMISSIONS_UNSAFE`, sem alterar a ACL.
 No Linux, permissões de grupo/outros também bloqueiam; o operador deve corrigir
 o arquivo protegido por canal de segredos autorizado, nunca copiar senha ao chat.
 
-## Execução sem comandos manuais recorrentes
+## Implantação nativa governada (separada da captura Notion)
 
 Codex local, no host conectado e autorizado, é o executor de implantação.
 Dot coordena e pode iniciar a tarefa local autorizada; não substitui permissões,
@@ -187,10 +187,11 @@ backup externo restaurável. Camada produto: reconciliar lacunas, sem reexecutar
 os 109 eventos históricos; provar um novo evento sintético controlado até Notion,
 replay idempotente e retomada. Até lá `cutover_ready=false`.
 
-O agendamento de backup e monitoramento de idade deve ser componente determinístico
-local, não consumo contínuo de IA. A periodicidade, retenção e rota criptografada
-externa são o próximo incremento, após esta restauração estar comprovada. Nenhum
-agendamento ou instalação persistente é efetuado por estes arquivos.
+O [novo agendamento de backup](todo-notion-backup.md) é determinístico e hospedado
+pelo GitHub, independente dos computadores e de execução contínua de IA. Mantém
+um gate até a recuperação real e exige uma execução agendada posterior como
+prova. Monitoramento de idade e retenção permanecem requisitos operacionais;
+nenhuma instalação persistente no host é efetuada por estes arquivos.
 
 ## Referências primárias
 

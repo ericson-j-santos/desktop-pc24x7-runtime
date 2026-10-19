@@ -21,7 +21,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
 from cryptography.hazmat.primitives import serialization
 
@@ -186,9 +186,9 @@ class GitHubDraftTransport:
         release = self.find_draft(tag)
         if release is None:
             code, release = self._json("POST", "https://api.github.com/repos/" + EXPECTED_REPO + "/releases", {
-                "tag_name": tag, "name": "Encrypted TODO PostgreSQL backup " + tag,
+                "tag_name": tag, "name": "Encrypted TODO backup " + tag,
                 "target_commitish": sha, "draft": True, "prerelease": True,
-                "make_latest": "false", "body": "Encrypted database backup. No plaintext or recovery key. Not a validated physical cutover.",
+                "make_latest": "false", "body": "Encrypted TODO snapshot. No plaintext or recovery key. Not an operational cutover.",
             })
             require(code == 201, "DRAFT_RELEASE_CREATION_FAILED")
         require(isinstance(release, dict) and release.get("draft") is True and
@@ -283,7 +283,8 @@ def final_storage_readback(transport: Transport, release_id: int, tag: str,
             "RELEASE_IDENTITY_CHANGED")
 
 
-def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem: bytes) -> dict | None:
+def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem: bytes,
+                     inspector: Callable[[bytes, bytes], dict] | None = None) -> dict | None:
     """Idempotent repeat: validate a previous encrypted offsite file before reconnecting to Neon."""
     release = transport.find_draft(tag)
     if release is None:
@@ -300,9 +301,10 @@ def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem
             bool(SHA64.fullmatch(digest[7:])) and asset.get("state") == "uploaded",
             "TRUSTED_OFFSITE_DIGEST_MISSING")
     remote = transport.readback(asset, MAX_ARCHIVE)
-    require(len(remote) <= MAX_ARCHIVE and remote.startswith(b"TODO-PG-SEALED-V1\0") and
+    require(isinstance(remote, bytes) and 0 < len(remote) <= MAX_ARCHIVE and
+            (inspector is not None or remote.startswith(b"TODO-PG-SEALED-V1\0")) and
             sha256(remote) == digest[7:], "OFFSITE_CIPHERTEXT_READBACK_MISMATCH")
-    inspected = inspect_envelope(remote, recipient_pem)
+    inspected = (inspect_envelope if inspector is None else inspector)(remote, recipient_pem)
     final_storage_readback(transport, release["id"], tag, producer, asset, digest[7:], len(remote))
     return {"state": "already_verified", "release_producer_sha": producer, "ciphertext_sha256": digest[7:],
             "recipient": inspected["header"]["recipient"], "recipient_matched": True,
@@ -314,11 +316,13 @@ def already_uploaded(transport: Transport, name: str, tag: str, *, recipient_pem
 
 
 def verified_upload(transport: Transport, name: str, cipher: bytes, tag: str, sha: str,
-                    *, recipient_pem: bytes) -> dict:
+                    *, recipient_pem: bytes,
+                    inspector: Callable[[bytes, bytes], dict] | None = None) -> dict:
     require(isinstance(sha, str) and bool(SHA40.fullmatch(sha)), "HEAD_SHA_REQUIRED")
-    require(cipher.startswith(b"TODO-PG-SEALED-V1\0") and 0 < len(cipher) <= MAX_ARCHIVE,
+    require(isinstance(cipher, bytes) and 0 < len(cipher) <= MAX_ARCHIVE and
+            (inspector is not None or cipher.startswith(b"TODO-PG-SEALED-V1\0")),
             "CIPHERTEXT_FORMAT_INVALID")
-    inspected = inspect_envelope(cipher, recipient_pem)
+    inspected = (inspect_envelope if inspector is None else inspector)(cipher, recipient_pem)
     digest = sha256(cipher)
     release = transport.create_or_get_draft(tag, sha)
     producer = release_producer(release, tag)

@@ -1,4 +1,4 @@
-"""Real PG18 drill. Synthetic data only, inside the isolated CI job container."""
+"""Real PG18 drill. Synthetic data only, inside an isolated native CI virtual machine."""
 from __future__ import annotations
 import importlib.util
 import json

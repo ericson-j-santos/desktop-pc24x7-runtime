@@ -1,7 +1,8 @@
 """Portable encrypted TODO recovery bundle; no network, database or key creation.
 
 Uses an existing RSA recipient; a fresh AES-256-GCM key is wrapped using RSA-OAEP.
-Only manifest.json and database.dump enter the encrypted payload, never key files.
+The PostgreSQL wrapper accepts only manifest.json and database.dump, never keys.
+The Notion codec reuses the envelope core with an explicit, separate format.
 On real hosts invoke through Session Launcher/Command Gateway.
 """
 from __future__ import annotations
@@ -23,6 +24,7 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 MAGIC = b"TODO-PG-SEALED-V1\0"
+NOTION_MAGIC = b"TODO-NOTION-SEALED-V1\0"
 MAX_DUMP = 64 * 1024 * 1024
 MAX_MANIFEST = 128 * 1024
 MAX_ENVELOPE = MAX_DUMP + MAX_MANIFEST + 16384
@@ -133,8 +135,14 @@ def validate_payload(manifest: bytes, archive: bytes) -> dict:
     return data
 
 
+def _oaep_for(magic: bytes):
+    require(magic in (MAGIC, NOTION_MAGIC), "ENVELOPE_FORMAT_INVALID")
+    return padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=magic)
+
+
 def oaep():
-    return padding.OAEP(mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=MAGIC)
+    """Keep the PostgreSQL V1 label used by existing backups and custody proofs."""
+    return _oaep_for(MAGIC)
 
 
 def key_id(key) -> str:
@@ -144,32 +152,36 @@ def key_id(key) -> str:
     return digest(public.public_bytes(serialization.Encoding.DER, serialization.PublicFormat.SubjectPublicKeyInfo))
 
 
-def encrypt(manifest: bytes, archive: bytes, recipient_pem: bytes) -> bytes:
-    validate_payload(manifest, archive)
+def encrypt_payload(plain: bytes, recipient_pem: bytes, *, magic: bytes) -> bytes:
+    """Shared envelope core; callers validate their explicit payload format first."""
+    require(magic in (MAGIC, NOTION_MAGIC), "ENVELOPE_FORMAT_INVALID")
+    require(isinstance(plain, bytes) and 0 < len(plain) <= 4 + MAX_MANIFEST + MAX_DUMP,
+            "PAYLOAD_SIZE_INVALID")
     try:
         public = serialization.load_pem_public_key(recipient_pem)
         recipient = key_id(public)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, UnsupportedAlgorithm):
         raise SealedBlocked("RECIPIENT_INVALID") from None
     key = AESGCM.generate_key(bit_length=256)
     header = canonical({"v": 1, "recipient": recipient,
-                        "wrapped": base64.b64encode(public.encrypt(key, oaep())).decode("ascii")})
+                        "wrapped": base64.b64encode(public.encrypt(key, _oaep_for(magic))).decode("ascii")})
     nonce = os.urandom(12)
-    aad = MAGIC + struct.pack(">I", len(header)) + header
-    plain = struct.pack(">I", len(manifest)) + manifest + archive
+    aad = magic + struct.pack(">I", len(header)) + header
     return aad + nonce + AESGCM(key).encrypt(nonce, plain, aad)
 
 
-def inspect_envelope(envelope: bytes, recipient_pem: bytes | None = None) -> dict:
-    """Inspect V1 structure/recipient only; this does not authenticate ciphertext."""
+def inspect_envelope_payload(envelope: bytes, recipient_pem: bytes | None = None,
+                             *, magic: bytes) -> dict:
+    """Inspect one explicit format; a header is not ciphertext authentication."""
+    require(magic in (MAGIC, NOTION_MAGIC), "ENVELOPE_FORMAT_INVALID")
     require(isinstance(envelope, bytes) and
-            len(MAGIC) + 4 + 12 + 16 < len(envelope) <= MAX_ENVELOPE and
-            envelope.startswith(MAGIC), "ENVELOPE_INVALID")
-    hlen = struct.unpack(">I", envelope[len(MAGIC):len(MAGIC)+4])[0]
+            len(magic) + 4 + 12 + 16 < len(envelope) <= MAX_ENVELOPE and
+            envelope.startswith(magic), "ENVELOPE_INVALID")
+    hlen = struct.unpack(">I", envelope[len(magic):len(magic)+4])[0]
     require(1 <= hlen <= 8192, "HEADER_INVALID")
-    end = len(MAGIC) + 4 + hlen
+    end = len(magic) + 4 + hlen
     require(end + 28 < len(envelope), "ENVELOPE_TRUNCATED")
-    header = strict_json(envelope[len(MAGIC)+4:end])
+    header = strict_json(envelope[len(magic)+4:end])
     require(set(header) == {"v", "recipient", "wrapped"} and type(header["v"]) is int and
             header["v"] == 1, "HEADER_INVALID")
     require(isinstance(header["recipient"], str) and
@@ -195,19 +207,38 @@ def inspect_envelope(envelope: bytes, recipient_pem: bytes | None = None) -> dic
     return {"header": header, "header_end": end, "wrapped": wrapped}
 
 
-def decrypt(envelope: bytes, identity_pem: bytes) -> tuple[bytes, bytes]:
-    inspected = inspect_envelope(envelope)
+def decrypt_payload(envelope: bytes, identity_pem: bytes, *, magic: bytes) -> bytes:
+    """Authenticate before returning any plaintext, using the selected format label."""
+    inspected = inspect_envelope_payload(envelope, magic=magic)
     header, end, wrapped = inspected["header"], inspected["header_end"], inspected["wrapped"]
     try:
         identity = serialization.load_pem_private_key(identity_pem, password=None)
         require(isinstance(identity, rsa.RSAPrivateKey), "IDENTITY_INVALID")
         require(key_id(identity) == header["recipient"], "RECIPIENT_MISMATCH")
         require(len(wrapped) == (identity.key_size + 7) // 8, "WRAPPED_KEY_SIZE_INVALID")
-        key = identity.decrypt(wrapped, oaep())
+        key = identity.decrypt(wrapped, _oaep_for(magic))
         require(len(key) == 32, "KEY_INVALID")
         plain = AESGCM(key).decrypt(envelope[end:end+12], envelope[end+12:], envelope[:end])
     except (InvalidTag, ValueError, TypeError, UnsupportedAlgorithm):
         raise SealedBlocked("AUTHENTICATION_FAILED") from None
+    require(0 < len(plain) <= 4 + MAX_MANIFEST + MAX_DUMP, "PAYLOAD_SIZE_INVALID")
+    return plain
+
+
+def encrypt(manifest: bytes, archive: bytes, recipient_pem: bytes) -> bytes:
+    """PostgreSQL V1 wrapper; its payload and wire format remain unchanged."""
+    validate_payload(manifest, archive)
+    plain = struct.pack(">I", len(manifest)) + manifest + archive
+    return encrypt_payload(plain, recipient_pem, magic=MAGIC)
+
+
+def inspect_envelope(envelope: bytes, recipient_pem: bytes | None = None) -> dict:
+    """Inspect PostgreSQL V1 only; this does not authenticate ciphertext."""
+    return inspect_envelope_payload(envelope, recipient_pem, magic=MAGIC)
+
+
+def decrypt(envelope: bytes, identity_pem: bytes) -> tuple[bytes, bytes]:
+    plain = decrypt_payload(envelope, identity_pem, magic=MAGIC)
     require(len(plain) >= 4, "PAYLOAD_SIZE_INVALID")
     mlen = struct.unpack(">I", plain[:4])[0]
     require(0 < mlen <= MAX_MANIFEST and 4 + mlen < len(plain), "PAYLOAD_SIZE_INVALID")

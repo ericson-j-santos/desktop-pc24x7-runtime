@@ -197,7 +197,10 @@ def test_recovery_compose_is_separate_and_never_starts_consumers():
 
 def test_e2e_workflow_has_no_physical_or_provider_access():
     text=(MODULE.parents[1]/'.github/workflows/todo-recovery-isolated-e2e.yml').read_text()
-    assert 'runs-on: ubuntu-latest' in text and 'contents: read' in text
+    assert 'runs-on: ubuntu-24.04' in text and 'contents: read' in text
+    assert not any(line.lstrip().startswith(('container:', 'services:')) for line in text.splitlines())
+    assert 'uses: docker://' not in text
+    assert '/usr/lib/postgresql/18/bin/$tool' in text
     assert 'TODO_RECOVERY_LAB: synthetic-only' in text
     assert 'persist-credentials: false' in text
     assert 'recovery-e2e-receipt.json' in text

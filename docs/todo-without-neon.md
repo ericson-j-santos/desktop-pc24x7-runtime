@@ -20,7 +20,8 @@ comprovadamente equivalentes a todo o histórico exclusivo do banco anterior.
 
 O repositório canônico de regras já possui `scripts/todo_event_bus.py`, com
 `DurableSQLiteQueue`, `SQLiteTodoSink` e `process_batch`. A versão consultada
-foi `1dc0e4f07e52dbc634033878e2e98e67af8bd337`. Reutilizar o núcleo existente
+foi `8a34b2b0862affb98a9e094e89802fdc6df090c0` (v1.6.11), incluindo o recibo
+atômico SQLite anterior ao ACK para replay. Reutilizar o núcleo existente
 para ensaios locais de durabilidade; não copiar a implementação para este repo
 nem criar uma segunda fila ativa concorrente.
 
@@ -60,3 +61,17 @@ Um protótipo local e um conector operado pelo chat não comprovam autonomia.
 3. Mudança da rota no TODO-22 tem leitura independente e preserva sua identidade.
 4. Serviço nativo e ciclo assíncrono completo ficam parciais até implantação e E2E
    no ambiente autorizado. Não marcar o projeto CONCLUÍDO por estes controles.
+
+## Preservação da fonte atual — incremento na PR #73
+
+O [backup Notion independente do Desktop](todo-notion-backup.md) captura schema,
+propriedades completas, blocos e páginas acessíveis, cifra antes de armazenamento
+externo e restaura uma projeção inerte em PostgreSQL 18 nativo. O produtor
+hospedado não depende de Desktop, Noteri, dot ou Codex. Sua rotina é separada
+do workflow Neon aposentado; os bloqueios daquele workflow permanecem ativos.
+
+Este incremento não copia a fila SQLite nem cria outra fila canônica. As
+identidades atuais são preservadas como dados, sem replay de eventos históricos.
+O E2E usa fonte/transporte sintéticos e banco nativo real. Captura externa dos
+dados reais, custódia independente e execução agendada posterior continuam
+gates de aceite; o serviço não foi instalado por esta alteração.

@@ -14,6 +14,19 @@ on:
       - tests/test_pc24x7_todo_custody_preflight.py
       - tests/e2e_pc24x7_todo_recovery.py
       - .github/workflows/todo-recovery-isolated-e2e.yml
+      - scripts/todo_notion_snapshot.py
+      - scripts/todo_notion_sealed.py
+      - scripts/todo_notion_hosted_backup.py
+      - scripts/todo_notion_restore.py
+      - tests/test_todo_notion_snapshot.py
+      - tests/test_todo_notion_sealed.py
+      - tests/test_todo_notion_hosted_backup.py
+      - tests/test_todo_notion_restore.py
+      - tests/e2e_todo_notion_backup.py
+      - .github/workflows/todo-notion-backup.yml
+      - tests/test_todo_recovery_lab_dependency.py
+      - tests/notion_snapshot_fixture.py
+      - tests/notion_backup_test_support.py
   pull_request:
     paths:
       - scripts/todo_hosted_backup.py
@@ -27,6 +40,19 @@ on:
       - tests/test_pc24x7_todo_custody_preflight.py
       - tests/e2e_pc24x7_todo_recovery.py
       - .github/workflows/todo-recovery-isolated-e2e.yml
+      - scripts/todo_notion_snapshot.py
+      - scripts/todo_notion_sealed.py
+      - scripts/todo_notion_hosted_backup.py
+      - scripts/todo_notion_restore.py
+      - tests/test_todo_notion_snapshot.py
+      - tests/test_todo_notion_sealed.py
+      - tests/test_todo_notion_hosted_backup.py
+      - tests/test_todo_notion_restore.py
+      - tests/e2e_todo_notion_backup.py
+      - .github/workflows/todo-notion-backup.yml
+      - tests/test_todo_recovery_lab_dependency.py
+      - tests/notion_snapshot_fixture.py
+      - tests/notion_backup_test_support.py
 permissions:
   contents: read
 concurrency:
@@ -34,35 +60,93 @@ concurrency:
   cancel-in-progress: false
 jobs:
   recovery_lab:
-    runs-on: ubuntu-latest
-    timeout-minutes: 8
-    container:
-      image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
     env:
       TODO_RECOVERY_LAB: synthetic-only
+      TODO_NOTION_LAB: synthetic-only
+      LANG: C.UTF-8
+      LC_ALL: C.UTF-8
     steps:
-      - name: Install Python in the disposable lab container
+      - name: Install Python and native lab dependencies
         timeout-minutes: 2
         run: |
-          apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
-          apt-get -o Acquire::Retries=0 install -y --no-install-recommends python3 python3-cryptography python3-pytest
-          python3 --version
+          set -euo pipefail
+          # Package hooks cannot create or start a default database in this disposable VM.
+          sudo install -d -m 0755 /etc/postgresql-common
+          printf '%s\n' 'create_main_cluster = false' 'start_conf = manual' | sudo tee /etc/postgresql-common/createcluster.conf > /dev/null
+          printf '%s\n' '#!/bin/sh' 'exit 101' | sudo tee /usr/sbin/policy-rc.d > /dev/null
+          sudo chmod 0755 /usr/sbin/policy-rc.d
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Dpkg::Options::=--force-confold install -y --no-install-recommends python3 python3-cryptography python3-pytest postgresql-common ca-certificates curl gosu
+          /usr/bin/python3 --version
+      - name: Install PostgreSQL 18 from the official PGDG repository
+        timeout-minutes: 4
+        run: |
+          set -euo pipefail
+          . /etc/os-release
+          test "$VERSION_CODENAME" = noble
+          test "$(dpkg --print-architecture)" = amd64
+          sudo install -d -m 0755 /usr/share/postgresql-common/pgdg
+          sudo curl --fail --show-error --silent --connect-timeout 10 --max-time 30 --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          printf '%s\n' 'Types: deb' 'URIs: https://apt.postgresql.org/pub/repos/apt' 'Suites: noble-pgdg' 'Architectures: amd64' 'Components: main' 'Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc' | sudo tee /etc/apt/sources.list.d/pgdg.sources > /dev/null
+          sudo apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get -o Acquire::Retries=0 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Dpkg::Options::=--force-confold install -y --no-install-recommends postgresql-18 postgresql-client-18
+          for tool in postgres initdb pg_ctl psql pg_dump pg_restore; do
+            "/usr/lib/postgresql/18/bin/$tool" --version
+          done
+          dpkg-query --show postgresql-18 postgresql-client-18 gosu python3-cryptography
       - name: Checkout exact revision without retained credentials
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
       - name: Compile the recovery implementation and tests
-        run: python3 -m py_compile scripts/todo_hosted_backup.py scripts/pc24x7_todo_recovery.py scripts/pc24x7_todo_sealed.py scripts/pc24x7_todo_custody_preflight.py tests/e2e_pc24x7_todo_recovery.py
+        run: /usr/bin/python3 -m py_compile scripts/todo_hosted_backup.py scripts/pc24x7_todo_recovery.py scripts/pc24x7_todo_sealed.py scripts/pc24x7_todo_custody_preflight.py tests/e2e_pc24x7_todo_recovery.py scripts/todo_notion_snapshot.py scripts/todo_notion_sealed.py scripts/todo_notion_hosted_backup.py scripts/todo_notion_restore.py tests/e2e_todo_notion_backup.py
+      - name: Validate native lab dependencies and workflow boundaries
+        run: /usr/bin/python3 -m pytest -q -ra tests/test_todo_recovery_lab_dependency.py
       - name: Validate portable encryption and rejection controls
-        run: python3 -m pytest -q -ra tests/test_pc24x7_todo_sealed.py
+        run: /usr/bin/python3 -m pytest -q -ra tests/test_pc24x7_todo_sealed.py
       - name: Prove RSA key possession without exposing keys or custody claims
-        run: python3 -m pytest -q -ra tests/test_pc24x7_todo_custody_preflight.py
+        run: /usr/bin/python3 -m pytest -q -ra tests/test_pc24x7_todo_custody_preflight.py
       - name: Restore core and hosted captures, verify SQL, replay and reject invalid states
-        run: python3 tests/e2e_pc24x7_todo_recovery.py
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          sudo env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            TODO_RECOVERY_LAB=synthetic-only \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            GITHUB_SHA="$GITHUB_SHA" \
+            /usr/bin/python3 "$GITHUB_WORKSPACE/tests/e2e_pc24x7_todo_recovery.py"
+          sudo chmod 0644 -- "$GITHUB_WORKSPACE/recovery-e2e-receipt.json"
+          test -r "$GITHUB_WORKSPACE/recovery-e2e-receipt.json"
+      - name: Restore the Notion snapshot in an independent native PostgreSQL 18 lab
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          sudo env -i \
+            PATH=/usr/sbin:/usr/bin:/sbin:/bin \
+            LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+            PYTHONPATH="$GITHUB_WORKSPACE/scripts" \
+            TODO_NOTION_LAB=synthetic-only \
+            GITHUB_ACTIONS="$GITHUB_ACTIONS" \
+            GITHUB_SHA="$GITHUB_SHA" \
+            GITHUB_RUN_ID="$GITHUB_RUN_ID" \
+            /usr/bin/python3 "$GITHUB_WORKSPACE/tests/e2e_todo_notion_backup.py"
+          sudo chmod 0644 -- "$GITHUB_WORKSPACE/todo-notion-recovery-e2e-receipt.json"
+          test -r "$GITHUB_WORKSPACE/todo-notion-recovery-e2e-receipt.json"
       - name: Upload only the synthetic verification receipt
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: todo-recovery-lab-${{ github.run_id }}
           path: recovery-e2e-receipt.json
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload only the synthetic Notion recovery receipt
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: todo-notion-recovery-lab-${{ github.run_id }}
+          path: todo-notion-recovery-e2e-receipt.json
           if-no-files-found: error
           retention-days: 7

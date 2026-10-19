@@ -1,4 +1,8 @@
-# TODO Global — backup independente do Desktop
+# TODO Global — arquivo histórico do backup PostgreSQL/Neon
+
+> Rota aposentada em 19/10/2026. O workflow antigo está bloqueado e não possui schedule/dispatch. Não executar o roteiro de Neon abaixo. A captura da fonte atual está em [backup Notion independente do Desktop](todo-notion-backup.md); a decisão vigente está em [continuidade sem Neon](todo-without-neon.md).
+
+## Registro histórico anterior à retirada
 
 O backup lógico do PostgreSQL pode ser executado por GitHub Actions hospedado, sem runner self-hosted e sem sessão Codex/dot. Esta mudança está na PR #73 e não autoriza migração física.
 
@@ -6,7 +10,7 @@ O backup lógico do PostgreSQL pode ser executado por GitHub Actions hospedado, 
 
 A origem fixa é Neon PostgreSQL 18, no banco de homologação `todo_global_bus_dev_ha`, por conexão direta (não pooled) com TLS `verify-full`. O script reutiliza `pc24x7_todo_recovery.py` para exportar um arquivo custom de PostgreSQL e `pc24x7_todo_sealed.py` para criptografar em AES-256-GCM com chave pública RSA-OAEP.
 
-O job do Actions usa `ubuntu-latest` com o contêiner PostgreSQL 18 fixado por digest. O agendamento proposto é diário às 04:27 UTC e só passa a executar após o workflow estar na main e os pré-requisitos reais estarem atendidos. Padrão GitHub hospedado em repositórios públicos não cobra minutos; o processo não utiliza armazenamento de artifacts ou caches. A cópia cifrada é armazenada apenas em uma *draft release* (rascunho não publicado) do GitHub, cuja listagem exige identidade autenticada com acesso de push ao repositório. Somente ciphertext fica fora do runner; nenhum dump plaintext ou chave privada é publicado. O upload exige nova leitura e conferência SHA-256.
+O desenho histórico usava contêiner e propunha 04:27 UTC. Esse job foi aposentado; o E2E ativo agora usa PostgreSQL 18 nativo, e o novo agendamento da fonte atual está documentado no roteiro Notion. Padrão GitHub hospedado em repositórios públicos não cobra minutos; o processo não utiliza armazenamento de artifacts ou caches. A cópia cifrada é armazenada apenas em uma *draft release* (rascunho não publicado) do GitHub, cuja listagem exige identidade autenticada com acesso de push ao repositório. Somente ciphertext fica fora do runner; nenhum dump plaintext ou chave privada é publicado. O upload exige nova leitura e conferência SHA-256.
 
 O executor constrói `PGPASSFILE` privado (0600) e `PGSERVICEFILE` com host fixo,
 role limitada e CA do sistema. O comando `pg_dump -Fc` captura somente `todo_bus`
@@ -73,16 +77,9 @@ As condições abaixo precisam ser verificadas antes da ativação e durante a o
 - O GitHub pode atrasar ou descartar execuções agendadas sob carga e desativar schedules em repositório público após 60 dias sem atividade. A operação deve acompanhar a idade do último backup válido; o cron sozinho não garante RPO de 24 horas.
 - Este executor pagina até 1.000 Releases e bloqueia se atingir o limite da busca. Não existe exclusão automática de cópias antigas. A política de retenção e o acompanhamento de backup vencido precisam de definição antes de operação prolongada.
 
-## Roteiro do primeiro backup e da recuperação independente
+## Roteiro vigente
 
-1. Aprovar o provisionamento somente no banco DEV `todo_global_bus_dev_ha`, projeto Neon `snowy-dust-42639584`, branch `br-shy-bread-acm9qxm9`. A role `todo_backup_reader` precisa de CONNECT no banco, USAGE no schema `todo_bus` e SELECT nas tabelas e sequences desse schema. Não conceder escrita, administração, propriedade, replicação ou BYPASSRLS. Reavaliar RLS e novos objetos antes de ampliar privilégios.
-2. Confirmar uma identidade de recuperação com a chave privada fora de Desktop, Noteri e runner produtor. Conservar a referência de custódia e o fingerprint público, sem inserir a chave privada no GitHub ou em logs. Só registrar `offhost-key-verified` depois da prova correspondente.
-3. Provisionar as duas referências de secrets e as duas variables do environment `todo-pg-backup` por canal protegido. A senha pertence à role limitada; o PEM fornecido ao produtor contém somente a chave pública. Uma execução de PR não é um teste válido dessas referências.
-4. Após aprovação da publicação na main, executar manualmente uma captura real pelo workflow. Conferir o recibo, SHA executado, Release em rascunho, asset, tamanho e digest. Confirmar que acesso anônimo não permite obter o asset; a listagem autenticada não comprova esse controle negativo.
-5. Em recuperador independente autorizado, baixar o mesmo asset com identidade de push e verificar seu SHA-256. Executar o comando `unseal` de `pc24x7_todo_sealed.py` com o digest esperado e a referência local protegida `TODO_RECOVERY_IDENTITY_FILE`. Somente essa etapa autentica o AES-GCM.
-6. Ler o manifesto decifrado, conferir `producer_sha`, correlação, versão e fingerprints. Preparar PostgreSQL 18 isolado, banco vazio com nome `todo_restore_*` e role local sem superusuário. Fornecer `PGSERVICEFILE` e `PGPASSFILE` privados e executar `verify-restore` de `pc24x7_todo_recovery.py` com `--bin-dir`, `--bundle` e a `--correlation-id` do manifesto.
-7. Comparar tabelas, contagens e fingerprints do destino com o manifesto, executar SQL independente e repetir a recuperação para provar que ela não restaura nem duplica dados de novo. Registrar a preservação da origem. O resultado usa os dados do snapshot; escritas posteriores no Neon não podem invalidar a comparação com o snapshot já cifrado.
-8. Vincular o recibo real de restauração ao run, commit e asset. Registrar consumo observado e margem de cota antes de liberar operação periódica. Até essa prova, manter o estado parcial, sem promover o primário ou iniciar workers. SEM restauração real independente, o serviço não está homologado.
+O procedimento Neon foi aposentado. Não criar/ativar a role, entregar senha ou executar captura desse provedor para continuar esta tarefa. Usar exclusivamente o [roteiro da fonte atual](todo-notion-backup.md), que preserva as identidades do Notion e explicita os limites do histórico recuperável. As descrições acima e a pré-verificação abaixo permanecem evidência histórica, sem reativar seus comandos ou agendamentos.
 
 ## Pré-verificação observada em 18/10/2026
 
