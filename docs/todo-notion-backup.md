@@ -57,7 +57,7 @@ Preparar PostgreSQL 18 nativo e um banco isolado vazio com nome `todo_restore_*`
 
 A tarefa de recuperação invoca `scripts/todo_notion_restore.py` com `--source` para o `.sealed` baixado, `--expected-sha256`, `--expected-producer-sha` e `--bin-dir` para PostgreSQL 18. Os argumentos contêm referências e hashes, não senhas. A rotina confere hash externo, autentica/decifra, valida manifesto/snapshot, confirma versão e role, aplica transação com guarda de alvo vazio e lê o resultado por outra conexão. O conteúdo privado viaja para psql pelo stdin, nunca por argumento ou variável de ambiente.
 
-São preservados os bytes exatos do snapshot, seu manifesto, schema e documentos completos de todas as páginas. A leitura independente compara SHA, conjunto de relações e conteúdo integral. Repetição válida é somente leitura. Alvo ocupado, alteração da projeção, chave errada ou origem divergente bloqueiam sem substituir dados. O restore não reconstitui automaticamente o workspace Notion, não implanta a aplicação e não inicia workers.
+São preservados os bytes exatos do snapshot, seu manifesto, schema e documentos completos de todas as páginas. A leitura independente compara SHA, conjunto de relações, chaves persistidas das páginas e conteúdo integral. A guarda de alvo vazio também inspeciona schemas de usuário iniciados por `pg`, sem confundi-los com o prefixo reservado literal `pg_`. Repetição válida é somente leitura. Alvo ocupado, alteração da projeção, chave errada ou origem divergente bloqueiam sem substituir dados. O restore não reconstitui automaticamente o workspace Notion, não implanta a aplicação e não inicia workers.
 
 Registrar a evidência real vinculada a run/SHA/asset/digest e à identidade de recuperação. O recibo local mantém `offhost_custody_verified=false` e `external_download_verified=false`: esses fatos pertencem à prova do operador/executor independente, não podem ser inferidos de um arquivo local ou de um teste.
 
@@ -71,7 +71,7 @@ A meta é permanecer nos recursos gratuitos existentes. Não há contratação o
 
 ## Evidência de laboratório e seu limite
 
-`tests/e2e_todo_notion_backup.py` percorre captura paginada sintética, criptografia real, transporte em memória, novo download, novo processo de recuperação, PostgreSQL 18 nativo e SQL administrativo separado. Restaura três páginas, incluindo uma filha, propriedades maiores que o resumo da API e blocos aninhados. Exercita replay e seis controles negativos. O workflow nativo publica apenas recibos JSON sintéticos.
+`tests/e2e_todo_notion_backup.py` percorre captura paginada sintética, criptografia real, transporte em memória, novo download, novo processo de recuperação, PostgreSQL 18 nativo e SQL administrativo separado. Restaura três páginas, incluindo uma filha, propriedades maiores que o resumo da API e blocos aninhados. Exercita replay e controles negativos, incluindo alteração isolada da chave da página, objetos preexistentes em `pgbackup` e a guarda transacional de alvo vazio. O workflow nativo publica apenas recibos JSON sintéticos.
 
 Os resultados efetivamente executados são registrados no checkpoint da PR com SHA e links dos runs. Nenhum teste sintético comprova dados reais, armazenamento externo real, custódia independente ou execução periódica. O aceite completo exige essas quatro evidências separadas; até lá `backup_homologated=false` e o TODO permanece parcial.
 

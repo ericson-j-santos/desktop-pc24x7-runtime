@@ -49,7 +49,7 @@ IDENTITY_SQL = """SELECT json_build_object(
 OCCUPIED_SQL = """SELECT coalesce(json_agg(n.nspname || '.' || c.relname
  ORDER BY n.nspname,c.relname),'[]'::json)
  FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
- WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+ WHERE left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema'
  AND c.relkind IN ('r','p','v','m','S','f')"""
 
 READBACK_SQL = """SELECT json_build_object(
@@ -59,6 +59,8 @@ READBACK_SQL = """SELECT json_build_object(
  'snapshot_sha256',(SELECT encode(sha256(snapshot_bytes),'hex')
                     FROM todo_notion_restore.snapshot_meta WHERE singleton),
  'data_source',(SELECT document FROM todo_notion_restore.source_schema WHERE singleton),
+ 'page_ids',coalesce((SELECT json_agg(page_id ORDER BY page_id)
+                     FROM todo_notion_restore.pages),'[]'::json),
  'pages',coalesce((SELECT json_agg(document ORDER BY page_id)
                   FROM todo_notion_restore.pages),'[]'::json))"""
 
@@ -117,7 +119,7 @@ def build_restore_sql(snapshot_bytes, snapshot, manifest):
         "SELECT pg_advisory_xact_lock(746631, hashtext(current_database()));",
         """DO $notion_restore_gate$ BEGIN
  IF EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-  WHERE n.nspname NOT LIKE 'pg_%' AND n.nspname <> 'information_schema'
+  WHERE left(n.nspname, 3) <> 'pg_' AND n.nspname <> 'information_schema'
     AND c.relkind IN ('r','p','v','m','S','f'))
  OR EXISTS (SELECT 1 FROM pg_namespace WHERE nspname='todo_notion_restore')
  THEN RAISE EXCEPTION 'NOTION_TARGET_NOT_EMPTY'; END IF;
@@ -155,6 +157,9 @@ def verify_projection(pg, snapshot_bytes, snapshot, manifest):
     require(canonical(observed.get("data_source")) ==
             canonical(snapshot["content"]["data_source"]), "NOTION_RESTORED_SCHEMA_DRIFT")
     expected = sorted(snapshot["content"]["pages"], key=lambda row: row["page"]["id"])
+    require(canonical(observed.get("page_ids")) ==
+            canonical([row["page"]["id"] for row in expected]),
+            "NOTION_RESTORED_PAGE_ID_DRIFT")
     require(canonical(observed.get("pages")) == canonical(expected),
             "NOTION_RESTORED_PAGE_DRIFT")
     return len(expected)

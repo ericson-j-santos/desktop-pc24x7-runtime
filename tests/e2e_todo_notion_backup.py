@@ -75,6 +75,11 @@ def main():
         admin("CREATE TABLE public.keep_existing (sentinel text); "
               "INSERT INTO public.keep_existing VALUES ('preserve-synthetic-existing');",
               "todo_restore_notion_occupied")
+        admin("CREATE DATABASE todo_restore_notion_pgprefix OWNER notion_restore_owner;")
+        admin("CREATE SCHEMA pgbackup; "
+              "CREATE TABLE pgbackup.keep_existing (sentinel text); "
+              "INSERT INTO pgbackup.keep_existing VALUES ('preserve-synthetic-pgprefix');",
+              "todo_restore_notion_pgprefix")
         passwords = root / "pgpass"
         passwords.write_text("", encoding="utf-8")
         passwords.chmod(0o600)
@@ -136,6 +141,7 @@ SELECT json_build_object(
  'snapshot_sha256',(SELECT encode(sha256(snapshot_bytes),'hex')
                    FROM todo_notion_restore.snapshot_meta),
  'data_source',(SELECT document FROM todo_notion_restore.source_schema),
+ 'page_ids',(SELECT json_agg(page_id ORDER BY page_id) FROM todo_notion_restore.pages),
  'pages',(SELECT json_agg(document ORDER BY page_id) FROM todo_notion_restore.pages),
  'relation_count',(SELECT count(*) FROM pg_class c JOIN pg_namespace n
                    ON n.oid=c.relnamespace WHERE n.nspname='todo_notion_restore'
@@ -146,6 +152,7 @@ SELECT json_build_object(
         assert independently_observed["major"] == 18
         assert independently_observed["relation_count"] == 3
         assert independently_observed["snapshot_sha256"] == restored["snapshot_sha256"]
+        assert independently_observed["page_ids"] == [row["page"]["id"] for row in expected_pages]
         assert recovery.canonical(independently_observed["pages"]) == recovery.canonical(expected_pages)
         assert (recovery.canonical(independently_observed["data_source"]) ==
                 recovery.canonical(expected["content"]["data_source"]))
@@ -162,10 +169,12 @@ SELECT json_build_object(
         assert producer_replay["source_sha"] is None and external_store.uploads == 1
 
         rejected = []
-        def must_block(label, action):
+        def must_block(label, action, expected_code=None):
             try:
                 action()
-            except (recovery.NotionRestoreBlocked, SealedBlocked):
+            except (recovery.NotionRestoreBlocked, SealedBlocked) as error:
+                if expected_code is not None:
+                    assert str(error) == expected_code, "unexpected rejection: " + label
                 rejected.append(label)
             else:
                 raise AssertionError("negative control accepted: " + label)
@@ -193,6 +202,50 @@ SELECT json_build_object(
         assert admin("SELECT sentinel FROM public.keep_existing;",
                      "todo_restore_notion_occupied") == "preserve-synthetic-existing"
 
+        # A user schema beginning with pg is not the reserved literal pg_ prefix.
+        prefix_target = Postgres(binary, target_env("todo_restore_notion_pgprefix"))
+        def assert_prefix_preserved():
+            assert admin("SELECT sentinel FROM pgbackup.keep_existing;",
+                         "todo_restore_notion_pgprefix") == "preserve-synthetic-pgprefix"
+            assert admin("SELECT count(*) FROM pg_namespace WHERE nspname='todo_notion_restore';",
+                         "todo_restore_notion_pgprefix") == "0"
+
+        must_block("occupied_pgprefix_preflight",
+                   lambda: recovery.recover_envelope(prefix_target, downloaded, recovery_key,
+                                                       digest, producer_sha),
+                   "NOTION_TARGET_NOT_EMPTY")
+        assert_prefix_preserved()
+
+        # Exercise the in-transaction gate directly, as if occupancy changed after preflight.
+        manifest_bytes, snapshot_bytes = recovery.decrypt_notion(downloaded, recovery_key)
+        manifest = recovery.validate_notion_payload(manifest_bytes, snapshot_bytes)
+        snapshot = recovery.strict_json(snapshot_bytes)
+        must_block("occupied_pgprefix_transaction",
+                   lambda: recovery._psql_input(
+                       prefix_target, recovery.build_restore_sql(snapshot_bytes, snapshot, manifest)),
+                   "NOTION_RESTORE_TRANSACTION_FAILED")
+        assert_prefix_preserved()
+
+        # Change only persisted lookup keys; document content and ordering stay intact.
+        admin("UPDATE todo_notion_restore.pages SET page_id='drift-' || page_id;",
+              "todo_restore_notion_lab")
+        after_key_drift = json.loads(admin(
+            "SELECT json_agg(document ORDER BY page_id) FROM todo_notion_restore.pages;",
+            "todo_restore_notion_lab"))
+        assert recovery.canonical(after_key_drift) == recovery.canonical(expected_pages)
+        must_block("restored_page_id_drift",
+                   lambda: recovery.recover_envelope(pg, downloaded, recovery_key,
+                                                       digest, producer_sha),
+                   "NOTION_RESTORED_PAGE_ID_DRIFT")
+        assert admin("SELECT count(*) FROM todo_notion_restore.pages "
+                     "WHERE page_id='drift-' || (document->'page'->>'id');",
+                     "todo_restore_notion_lab") == "3"
+        # Undo only this synthetic mutation so the independent document control stays isolated.
+        admin("UPDATE todo_notion_restore.pages SET page_id=document->'page'->>'id';",
+              "todo_restore_notion_lab")
+        assert recovery.recover_envelope(pg, downloaded, recovery_key, digest,
+                                         producer_sha)["state"] == "notion_restore_already_verified"
+
         # A changed restored document must be detected, never silently overwritten on replay.
         admin("""UPDATE todo_notion_restore.pages SET document=document || '{"lab_drift":true}'::jsonb
 WHERE page_id=(SELECT min(page_id) FROM todo_notion_restore.pages);""", "todo_restore_notion_lab")
@@ -201,7 +254,7 @@ WHERE page_id=(SELECT min(page_id) FROM todo_notion_restore.pages);""", "todo_re
                                                        digest, producer_sha))
         assert admin("SELECT count(*) FROM todo_notion_restore.pages "
                      "WHERE document ? 'lab_drift';", "todo_restore_notion_lab") == "1"
-        assert len(rejected) == 6
+        assert len(rejected) == 9
 
         receipt = {
             "state": "synthetic_notion_native_restore_verified",

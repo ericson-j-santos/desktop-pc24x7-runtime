@@ -45,6 +45,7 @@ class FakePG:
             "meta_count": 1, "schema_count": 1, "manifest": copy.deepcopy(manifest),
             "snapshot_sha256": hashlib.sha256(raw).hexdigest(),
             "data_source": copy.deepcopy(snapshot["content"]["data_source"]),
+            "page_ids": sorted(row["page"]["id"] for row in snapshot["content"]["pages"]),
             "pages": sorted(copy.deepcopy(snapshot["content"]["pages"]),
                             key=lambda row: row["page"]["id"]),
         }
@@ -124,7 +125,7 @@ def test_occupied_database_is_rejected_before_write(monkeypatch, service_guard):
         recovery.restore_snapshot(pg, manifest_bytes, raw)
 
 
-@pytest.mark.parametrize("kind", ["snapshot", "manifest", "schema", "pages", "objects", "metadata"])
+@pytest.mark.parametrize("kind", ["snapshot", "manifest", "schema", "pages", "page_ids", "objects", "metadata"])
 def test_replay_drift_fails_without_writes(monkeypatch, service_guard, kind):
     manifest_bytes, raw, manifest, snapshot = payload()
     pg = FakePG(manifest, raw, snapshot, occupied=True)
@@ -136,6 +137,9 @@ def test_replay_drift_fails_without_writes(monkeypatch, service_guard, kind):
         pg.observed["data_source"] = {"changed": True}
     elif kind == "pages":
         pg.observed["pages"].pop()
+    elif kind == "page_ids":
+        # Preserve documents and ordering while changing only persisted lookup keys.
+        pg.observed["page_ids"] = ["drift-" + value for value in pg.observed["page_ids"]]
     elif kind == "objects":
         pg.names.append("public.unexpected")
     else:
