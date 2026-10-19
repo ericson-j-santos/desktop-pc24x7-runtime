@@ -7,6 +7,8 @@ on:
       - scripts/pc24x7_todo_recovery.py
       - scripts/pc24x7_todo_sealed.py
       - docs/todo-hosted-backup.md
+      - docs/todo-without-neon.md
+      - tests/test_todo_neon_retired.py
       - tests/test_todo_hosted_backup.py
       - .github/workflows/todo-hosted-backup.yml
   push:
@@ -16,11 +18,11 @@ on:
       - scripts/pc24x7_todo_recovery.py
       - scripts/pc24x7_todo_sealed.py
       - docs/todo-hosted-backup.md
+      - docs/todo-without-neon.md
+      - tests/test_todo_neon_retired.py
       - tests/test_todo_hosted_backup.py
       - .github/workflows/todo-hosted-backup.yml
-  schedule:
-    - cron: "27 4 * * *"
-  workflow_dispatch:
+  # Source retired by owner on 2026-10-19: no schedule or manual capture trigger.
 
 permissions:
   contents: read
@@ -51,12 +53,13 @@ jobs:
       - name: Verify Python and hosted backup guardrails
         run: |
           python -m py_compile scripts/todo_hosted_backup.py tests/test_todo_hosted_backup.py
-          PYTHONPATH=scripts python -m pytest -v -ra tests/test_todo_hosted_backup.py
+          PYTHONPATH=scripts python -m pytest -v -ra tests/test_todo_hosted_backup.py tests/test_todo_neon_retired.py
 
   backup:
     name: Capture, encrypt and verify offsite draft backup
-    # Secrets are never available to PRs or feature-branch pushes.
-    if: (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main'
+    # NEON_RETIRED_20261019: historical job only; must never allocate a runner or secrets.
+    # Both trigger removal and literal false are intentional, independently tested controls.
+    if: ${{ false && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && github.ref == 'refs/heads/main' }}
     runs-on: ubuntu-latest
     timeout-minutes: 12
     environment: todo-pg-backup
