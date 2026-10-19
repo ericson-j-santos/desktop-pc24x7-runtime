@@ -1,23 +1,108 @@
 # TODO Global — saída gratuita e recuperação independente do provedor
 
-Estado inicial: implementação de recuperação isolada; não autoriza cutover.
+Estado: destino próprio aprovado; implementação/implantação e cutover não homologados.
 Correlação: `todo22-free-recovery-20261016-v1`. Coordenação: TODO-22 existente.
 
 ## Decisão
 
-Reaproveitar o PC24x7 e a arquitetura já versionada em
-`chatgpt-operational-rules/docker-compose.pc24x7.yml`: PostgreSQL, gateway,
-worker e ingestão. Não criar outro scheduler nem tornar Render necessário.
-PDQ é o núcleo pretendido; RP executa desenvolvimento/validação e pode receber
-cópia de recuperação quando seu inventário permitir. Noteri é opcional.
-Custo incremental de licença/hosting: zero, utilizando hardware existente;
-energia, internet, capacidade de armazenamento e cotas não são ilimitados.
-Neon Free é fonte/cópia temporária acessível, não um novo primário automático.
+### Destino definitivo aprovado em 18/10/2026
 
-Há três resultados diferentes: preservar o que está acessível, reconstruir a
-operação, recuperar integralmente o histórico Render. Os dois primeiros não
-precisam esperar por Render; o terceiro depende de dados originais ou backup.
-Não fabricar equivalência, aprovações, leases, execução ou histórico ausente.
+O proprietário aprovou seguir a recomendação de PostgreSQL próprio. O destino
+definitivo é o PC24x7 elegível, com PostgreSQL 18 nativo, persistência sob controle
+do proprietário e cópia portátil criptografada fora do host. Neon fica somente
+como origem temporária dos dados atuais; consultar/exportar essa origem não é
+contratar nem escolher o Neon como destino definitivo.
+
+Reutilizar a transição [sem Docker já existente](dockerless-runtime-migration.md):
+serviços permanentes em Linux Debian/Ubuntu Server com systemd, somente depois
+de inventário de capacidade, compatibilidade e autorização do host. Funções
+dependentes de Windows permanecem nos serviços/Agendador já governados.
+Não reinstalar o sistema operacional, instalar um novo stack de contêineres,
+reaproveitar volumes PG16 em PG18 ou interromper serviços existentes por esta
+aprovação arquitetural. O Compose já versionado permanece legado/laboratório,
+não é a instrução de implantação do novo destino nativo.
+
+PDQ permanece o runtime canônico até corte autorizado. RP é candidato à
+implantação Linux/recuperação após comprovação do inventário, não um destino
+que já esteja instalado ou disponível. Noteri não vira dependência obrigatória.
+Reaproveitar gateway, worker e ingestão; não criar outro scheduler ou outra fila.
+O TODO Global continua sendo a fonte canônica de tarefas.
+
+Aiven permanece apenas uma contingência gerenciada a avaliar se o destino próprio
+não puder atender ao serviço. Não criar conta, banco ou migração na Aiven nesta
+etapa, nem substituir um provedor por outro automaticamente. Não contratar
+hosting, upgrade ou backup pago. PostgreSQL próprio elimina o prazo comercial
+de um plano de hospedagem; energia, disco, rede, manutenção e atualizações
+continuam necessários e não são uma garantia de custo total zero.
+
+### Duas frentes independentes, sem recomeçar
+
+**Preservação imediata:** usar o [backup hospedado existente](todo-hosted-backup.md)
+para retirar uma cópia cifrada da origem acessível, quando acesso restrito e
+custódia da chave estiverem habilitados. Esta frente não exige Desktop/Noteri
+ligados. Não duplicar código, PR ou jobs; não reutilizar a conta proprietária como
+atalho. A primeira cópia só conta após download, autenticação e restauração
+independente, não após upload ou um teste com dados sintéticos.
+
+**Destino definitivo:** preparar PostgreSQL nativo isolado no host autorizado,
+sem redirecionar a aplicação nem iniciar consumidores. A configuração deve
+manter autenticação protegida, conta de serviço limitada, porta restrita e
+diretório de dados novo. Depois de restaurar, validar o esquema completo, dados,
+persistência após restart autorizado e recuperação antes do corte.
+
+A decisão aprova a direção e a preparação reversível. Criação/movimentação de
+segredos, privilégios, troca de conexão, integração na main, migração de SO,
+reboot, exclusão e ativação de consumidores continuam sujeitos à autorização
+específica do alvo e ambiente. Nenhuma dessas ações é realizada por este documento.
+
+### Inventário real de migração — leitura de 18/10/2026
+
+Consultas pela integração oficial Neon em transações somente leitura retornaram:
+
+| Propriedade | Valor observado |
+| --- | --- |
+| Servidor | PostgreSQL 18.6 |
+| Banco completo, medido por pg_database_size | 9.003.008 bytes, aproximadamente 8,59 MiB |
+| Relações de todo_bus, incluindo índices/TOAST e sequences | 770.048 bytes |
+| Tabelas / sequences | 8 / 3 |
+| Funções do schema | 15: 12 em plpgsql e 3 em SQL; nenhuma SECURITY DEFINER |
+| Gatilhos não internos | 2 |
+| Extensões instaladas | somente plpgsql 1.0 |
+| Codificação e locale | UTF8, C.UTF-8, provedor builtin (b) |
+| Eventos / solicitações | 109 / 50 |
+| Role restrita todo_backup_reader | ausente na consulta |
+
+Tamanho físico não equivale ao tamanho de pg_dump, RAM necessária ou consumo de
+rede. As observações acima não são um backup nem certificam compatibilidade
+completa: corpos das funções, dependências dinâmicas e execução de gatilhos não
+foram testados nesta leitura. Preservar UTF8 e locale/provider na restauração;
+não herdar automaticamente o locale padrão de outra instalação.
+
+### Critério de corte e retorno
+
+Restaurar primeiro em banco vazio todo_restore_*, com role não superusuária,
+usando os utilitários da mesma PR/revisão. Além de contagens e hashes das tabelas,
+conferir sequences, definições das 15 funções, dois gatilhos, constraints,
+índices, proprietários e privilégios efetivos. Os fingerprints de linhas do
+utilitário atual NÃO substituem essa validação de esquema e comportamento.
+
+Conservar os eventos históricos sem replay. Provar um único evento novo
+controlado na cadeia até o TODO Global, incluindo idempotência, em ambiente
+isolado. Não liberar consumidores apenas porque as tabelas foram restauradas.
+
+A troca para um único primário exige janela de escrita controlada e snapshot
+final, leitura independente no destino e plano de retorno. Antes de aceitar
+novas escritas no destino, pode-se manter/reapontar o cliente para a origem
+inalterada; depois de novas escritas, o retorno exige reconciliá-las, nunca
+apontar silenciosamente para uma cópia antiga. Não excluir Neon/Render,
+backups ou volumes durante a migração.
+
+A recuperação integral do histórico exclusivo do Render permanece separada.
+Não fabricar equivalência, aprovações, leases ou histórico ausente.
+
+Checkpoint: `todo22-own-postgres-decision-20261018-v1`. Estado da implantação:
+PARCIAL; nenhum host instalado, dump real criado ou corte executado por este
+incremento documental.
 
 ## Fonte e compatibilidade verificadas em 16/10/2026
 
