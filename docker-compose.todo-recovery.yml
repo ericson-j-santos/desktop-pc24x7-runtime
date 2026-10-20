@@ -1,0 +1,28 @@
+# Isolated recovery target only. Never overlay the legacy PG16 Compose file.
+name: todo-recovery-isolated
+services:
+  recovery_db:
+    image: postgres:18.6@sha256:74935e72241653ca55e0414067e6d8763aceb8a810eb51b452253ec3dcfc4336
+    restart: "no"
+    environment:
+      POSTGRES_DB: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/recovery_admin_password
+      PGDATA: /var/lib/postgresql/18/docker
+    secrets:
+      - recovery_admin_password
+    ports:
+      - "127.0.0.1:55433:5432"
+    volumes:
+      - todo_recovery_pg18:/var/lib/postgresql
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U postgres -d postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    mem_limit: 1g
+secrets:
+  recovery_admin_password:
+    file: ${TODO_RECOVERY_ADMIN_PASSWORD_FILE:?existing protected file is required}
+volumes:
+  todo_recovery_pg18:
+    name: todo_recovery_pg18
