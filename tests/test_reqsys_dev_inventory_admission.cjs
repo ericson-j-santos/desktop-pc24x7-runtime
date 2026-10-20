@@ -122,3 +122,17 @@ test('test-of-test: removing admission is rejected after a valid baseline on bot
 });
 // Keep the new regression suite in the existing required hosted contract entrypoint.
 require('./test_reqsys_dev_inventory_resume.cjs');
+
+test('fixture integrity: LF preserves Git bytes and CRLF reproduces the observed Windows failure', () => {
+  const attributes = fs.readFileSync(path.join(__dirname, '../.gitattributes'), 'utf8');
+  assert.match(attributes, /^tests\/fixtures\/pr71_admission_before_resume\.cjs text eol=lf\r?$/m);
+  const source = fs.readFileSync(path.join(__dirname, 'fixtures/pr71_admission_before_resume.cjs'), 'utf8');
+  const hash = text => {
+    const bytes = Buffer.from(text, 'utf8');
+    return require('node:crypto').createHash('sha1').update('blob ' + bytes.length + '\0').update(bytes).digest('hex');
+  };
+  assert.equal(source.includes('\r\n'), false);
+  assert.equal(hash(source), '01045f0155d1af353ef4c19d1b3559ee2ae61906');
+  assert.equal(hash(source.replace(/\n/g, '\r\n')), '81f8df166834898292d4c12bd213dbe93df69791');
+  assert.notEqual(hash(source + '// negative integrity control\n'), '01045f0155d1af353ef4c19d1b3559ee2ae61906');
+});
