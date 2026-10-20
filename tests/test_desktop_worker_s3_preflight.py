@@ -439,18 +439,33 @@ class DesktopWorkerS3PreflightTest(unittest.TestCase):
         self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertIn("core.fsmonitor=false", captured["argv"])
-        self.assertIn("core.autocrlf=false", captured["argv"])
+        expected_default_autocrlf = "true" if os.name == "nt" else "false"
+        self.assertIn(
+            f"core.autocrlf={expected_default_autocrlf}",
+            captured["argv"],
+        )
 
-        with patch.object(p.subprocess, "run", side_effect=run):
-            self.assertEqual(
-                p._git_output(
-                    self.worker,
-                    ("status",),
-                    platform_name="nt",
-                ),
-                "ok",
-            )
-        self.assertIn("core.autocrlf=true", captured["argv"])
+        for platform_name, expected_autocrlf in (
+            ("nt", "true"),
+            ("posix", "false"),
+        ):
+            with self.subTest(platform_name=platform_name), patch.object(
+                p.subprocess,
+                "run",
+                side_effect=run,
+            ):
+                self.assertEqual(
+                    p._git_output(
+                        self.worker,
+                        ("status",),
+                        platform_name=platform_name,
+                    ),
+                    "ok",
+                )
+                self.assertIn(
+                    f"core.autocrlf={expected_autocrlf}",
+                    captured["argv"],
+                )
 
     def test_worker_contract_must_resolve_to_verified_checkout(self) -> None:
         app = self.worker / "app"
