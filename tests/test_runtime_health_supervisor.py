@@ -93,6 +93,28 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "shell: pwsh" not in workflow
 
 
+def test_canary_draft_gate_and_queue_watchdog_are_fail_closed() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "types: [opened, synchronize, reopened, ready_for_review]" in workflow
+    gate = (
+        "github.event_name != 'pull_request' || "
+        "(!github.event.pull_request.draft && "
+        "github.event.pull_request.head.repo.full_name == github.repository)"
+    )
+    assert workflow.count(gate) == 2
+    assert "name: Runtime canary queue watchdog" in workflow
+    assert 'STALL_AFTER_SECONDS: "300"' in workflow
+    assert "EXPECTED_RUNNER: DESKTOP-PDQK954-runtime" in workflow
+    assert "CANARY_JOB_NOT_UNIQUE" in workflow
+    assert "progress_watchdog.py" in workflow
+    assert "actions: write" in workflow
+    assert "cancelWorkflowRun" in workflow
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow
+    assert "last_material_progress_at: new Date(anchorMs).toISOString()" in workflow
+
+
 def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
     installer = (ROOT / "scripts" / "install_runtime_health_supervisor.py").read_text(
         encoding="utf-8"
