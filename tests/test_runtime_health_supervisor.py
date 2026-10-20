@@ -113,7 +113,9 @@ def test_canary_draft_gate_and_queue_watchdog_are_fail_closed() -> None:
     assert "actions: write" in workflow
     assert "cancelWorkflowRun" in workflow
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow
-    assert "last_material_progress_at: new Date(anchorMs).toISOString()" in workflow
+    assert "const anchor = new Date();" in workflow
+    assert "run.data.created_at" not in workflow
+    assert "last_material_progress_at: anchor.toISOString()" in workflow
 
 
 def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
