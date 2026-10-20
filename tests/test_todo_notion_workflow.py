@@ -10,7 +10,8 @@ WORKFLOW = ROOT / ".github/workflows/todo-notion-backup.yml"
 EXPECTED_GUARD = (
     "github.repository == 'ericson-j-santos/desktop-pc24x7-runtime' && "
     "github.ref == 'refs/heads/main' && "
-    "(github.event_name == 'workflow_dispatch' || "
+    "(github.event_name == 'push' || "
+    "github.event_name == 'workflow_dispatch' || "
     "(github.event_name == 'schedule' && vars.TODO_NOTION_SCHEDULE_ENABLED == 'true'))"
 )
 
@@ -51,6 +52,7 @@ def test_current_workflow_policy():
     ("needs: safety", "needs: []"),
     ("vars.TODO_NOTION_SCHEDULE_ENABLED == 'true'", "true"),
     ("environment: todo-notion-backup", "environment: other"),
+    ("github.event_name == 'push'", "github.event_name == 'pull_request'"),
     ("github.event_name == 'workflow_dispatch'", "github.event_name == 'pull_request'"),
     ("contents: read", "contents: write"),
     ("persist-credentials: false", "persist-credentials: true"),

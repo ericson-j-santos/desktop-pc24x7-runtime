@@ -68,7 +68,8 @@ jobs:
     if: >-
       github.repository == 'ericson-j-santos/desktop-pc24x7-runtime' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'push' ||
+       github.event_name == 'workflow_dispatch' ||
        (github.event_name == 'schedule' && vars.TODO_NOTION_SCHEDULE_ENABLED == 'true'))
     runs-on: ubuntu-24.04
     timeout-minutes: 25

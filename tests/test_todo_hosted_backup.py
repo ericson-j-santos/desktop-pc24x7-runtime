@@ -135,7 +135,6 @@ def test_preexisting_different_asset_is_not_overwritten(env):
 @pytest.mark.parametrize("field,value,reason", [
     ("GITHUB_ACTIONS", "false", "GITHUB_ACTIONS_REQUIRED"),
     ("GITHUB_EVENT_NAME", "pull_request", "TRUSTED_EVENT_REQUIRED"),
-    ("GITHUB_EVENT_NAME", "push", "TRUSTED_EVENT_REQUIRED"),
     ("GITHUB_REF", "refs/heads/feat/example", "MAIN_ONLY"),
     ("GITHUB_REPOSITORY", "untrusted/same-named", "REPOSITORY_MISMATCH"),
     ("GITHUB_SHA", "bad", "HEAD_SHA_REQUIRED"),
@@ -146,6 +145,11 @@ def test_hosted_execution_refuses_untrusted_context(env,field,value,reason):
     env[field] = value
     with pytest.raises(b.HostedBlocked, match=reason):
         b.git_identity(env)
+
+
+def test_hosted_execution_accepts_exact_main_push(env):
+    env["GITHUB_EVENT_NAME"] = "push"
+    assert b.git_identity(env) == env["GITHUB_SHA"]
 
 
 @pytest.mark.parametrize("field,value,reason", [

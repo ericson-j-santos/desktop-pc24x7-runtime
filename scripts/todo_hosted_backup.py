@@ -52,7 +52,7 @@ def sha256(data: bytes) -> str:
 
 def git_identity(env: dict[str, str]) -> str:
     require(env.get("GITHUB_ACTIONS") == "true", "GITHUB_ACTIONS_REQUIRED")
-    require(env.get("GITHUB_EVENT_NAME") in {"schedule", "workflow_dispatch"}, "TRUSTED_EVENT_REQUIRED")
+    require(env.get("GITHUB_EVENT_NAME") in {"push", "schedule", "workflow_dispatch"}, "TRUSTED_EVENT_REQUIRED")
     require(env.get("GITHUB_REF") == "refs/heads/main", "MAIN_ONLY")
     require(env.get("GITHUB_REPOSITORY") == EXPECTED_REPO, "REPOSITORY_MISMATCH")
     commit = env.get("GITHUB_SHA", "")

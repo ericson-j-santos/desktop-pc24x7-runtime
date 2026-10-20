@@ -30,7 +30,7 @@ Na repetição diária com asset válido, não há nova leitura do Notion nem no
 
 ## Configuração protegida para a primeira execução real
 
-O workflow `.github/workflows/todo-notion-backup.yml` admite testes sem segredos em PR/push. O job real só admite o repositório esperado, a branch main, um teste de segurança aprovado e os eventos `workflow_dispatch` ou `schedule`. Usa runner padrão `ubuntu-24.04`, environment `todo-notion-backup` e `contents: write` apenas nesse job.
+O workflow `.github/workflows/todo-notion-backup.yml` admite testes sem segredos em PR/push. O job real só admite o repositório esperado, a branch `main`, um teste de segurança aprovado e os eventos `push` da própria `main`, `workflow_dispatch` ou `schedule` explicitamente habilitado. O `push` de uma branch de PR não recebe segredos porque a guarda exige `refs/heads/main`. Usa runner padrão `ubuntu-24.04`, environment `todo-notion-backup` e `contents: write` apenas nesse job.
 
 | Local | Referência | Conteúdo |
 | --- | --- | --- |
@@ -49,7 +49,7 @@ A autorização de execução já foi recebida. O bloqueio observado é de capac
 
 ## Recuperação independente
 
-Depois de integrar a revisão validada na main e configurar as referências, executar um único `workflow_dispatch`. Conferir run, SHA executado, tag, Release/asset, digest e tamanho por leitura independente. Verificar também que o asset não pode ser baixado anonimamente; a listagem autenticada não prova essa restrição.
+Antes de integrar a revisão na `main`, configurar as referências protegidas e comprovar a custódia independente. O próprio `push` do merge passa a ser a primeira tentativa real, eliminando a dependência de um dispatch manual para o bootstrap. Se qualquer secret, variável, fingerprint ou aprovação de custódia estiver ausente ou inválida, o produtor falha fechado antes de ler o Notion e não cria backup; esse bloqueio não deve ser contornado reduzindo o preflight. `workflow_dispatch` permanece como rota manual de repetição quando um executor autorizado o disponibilizar. Conferir run, SHA executado, tag, Release/asset, digest e tamanho por leitura independente. Verificar também que o asset não pode ser baixado anonimamente; a listagem autenticada não prova essa restrição.
 
 Em recuperador autorizado independente de Desktop/Noteri e do produtor, baixar esse mesmo asset e conservar a referência externa do digest e do SHA esperado. A identidade de recuperação mantém a chave privada em arquivo protegido, apontado por `TODO_RECOVERY_IDENTITY_FILE`. O produtor não precisa dessa chave.
 
@@ -63,7 +63,7 @@ Registrar a evidência real vinculada a run/SHA/asset/digest e à identidade de 
 
 ## Agendamento e aceite
 
-O cron proposto é `43 4 * * *` (04:43 UTC). Depois da primeira recuperação real, habilitar a variável de repositório de schedule e observar uma execução posterior disparada por `schedule`, sem Desktop, Noteri, dot ou Codex. Repetir o download/restore dessa nova cópia para comprovar continuidade. O primeiro sucesso manual não comprova execução periódica.
+O cron proposto é `43 4 * * *` (04:43 UTC). Depois da primeira recuperação real, habilitar a variável de repositório de schedule e observar uma execução posterior disparada por `schedule`, sem Desktop, Noteri, dot ou Codex. Repetir o download/restore dessa nova cópia para comprovar continuidade. O primeiro sucesso do produtor, inclusive no push do merge, não comprova execução periódica.
 
 GitHub Actions pode atrasar ou descartar um schedule sob carga e desativar schedules de repositório público após 60 dias sem atividade. Cron sozinho não garante RPO de 24 horas. A operação precisa acompanhar a idade da última cópia restaurável e ter uma rota de recuperação quando o schedule falhar.
 
