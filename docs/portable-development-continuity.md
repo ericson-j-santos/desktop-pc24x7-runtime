@@ -21,12 +21,14 @@ final. Resultados skipped continuam sendo lacunas explícitas, não testes aprov
 
 O inventário de um Desktop real continua sendo uma etapa específica daquele host.
 Seu workflow separado conserva canário recente, identidade exata, Session Launcher,
-preflight, Gateway e leitura independente. CI hospedado verde não produz
-`physical_ready`, não comprova recovery/cutover e não autoriza integrar a PR #71.
+preflight, Gateway e leitura independente. A etiqueta `desktop-pdqk954`, incorporada
+na main durante este incremento, também é exigida no seletor desse inventário.
+CI hospedado verde não produz `physical_ready`, não comprova recovery/cutover e
+não autoriza integrar a PR #71.
 
 O bloqueio dessa etapa física não interrompe o desenvolvimento portátil.
-Não alterar labels, falsificar hostname, repetir canário sem pré-condição nova
-nem criar commits vazios para simular continuidade.
+Não alterar registro de runners, falsificar hostname, repetir canário sem
+pré-condição nova nem criar commits vazios para simular continuidade.
 
 ## Componentes compartilhados e limites de ativação
 
@@ -35,9 +37,19 @@ Regras consultadas: `chatgpt-operational-rules/main@a430688c499077f5472841560f22
 isso não instala nem qualifica automaticamente um host novo.
 
 A continuidade com lease/fencing, checkpoint durável e S3/CAS pertence à
-`engineering-worker-pool#34`, não a este runtime. Essa implementação foi localizada
-no SHA `5ef413c1c18996bd022c20987fb75dbb9ec47712`, ainda não integrada na leitura
-deste incremento. Não foi copiada, ativada ou tratada como failover homologado.
+`engineering-worker-pool#34`, não a este runtime. Na primeira leitura ela estava
+aberta no SHA `5ef413c1c18996bd022c20987fb75dbb9ec47712`. A revalidação confirmou
+merge em 20/10/2026 às 14:12:31 UTC, commit
+`e14870f9af1771de16594415c59fea6ec78e9135`. Esse merge não foi executado por esta
+frente. A capacidade compartilhada não foi duplicada nem provisionada aqui;
+merge de código não comprova o handoff operacional completo A→B.
+
+A PR #71 foi sincronizada com `main@644ee0f8702a94b4d7beb6aca331884bbd1182dd`,
+preservando os incrementos concorrentes de S3, backup, readback e isolamento de
+runners. O teste de bootstrap conserva tanto a nova etiqueta quanto o ambiente
+LOCALAPPDATA temporário; os mocks de plataforma do broker são isolados por teste.
+O teste de draft herdado da main valida agora a matriz hospedada em vez de exigir
+um único runner Windows, mantendo todos os controles de admissão física.
 
 TODO Global permanece a fonte de estado. Esta PR e os commits/logs são checkpoints
 de engenharia, não uma fila paralela nem confirmação de atualização do TODO Global.

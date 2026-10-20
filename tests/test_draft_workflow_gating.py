@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 
 import pytest
 
@@ -76,10 +77,32 @@ def test_rdc_recovery_job_keeps_nested_runs_on_and_manual_trigger() -> None:
         in content
     )
 
+
+def assert_hosted_ci_matrix(content: str) -> None:
+    assert re.search(r"^  pull_request:\s*$", content, re.M)
+    assert re.search(r"^    runs-on: \$\{\{ matrix\.os \}\}\s*$", content, re.M)
+    assert re.findall(r"^          - os: (\S+)\s*$", content, re.M) == [
+        "windows-latest", "ubuntu-latest"
+    ]
+    assert "self-hosted" not in content
+    assert not re.search(r"^\s+(needs|if):", content, re.M)
+
+
 def test_drafts_keep_hosted_ci_without_physical_claim() -> None:
+    assert_hosted_ci_matrix(workflow_text("ci.yml"))
+
+
+@pytest.mark.parametrize("old,new", [
+    ("- os: windows-latest", "- os: self-hosted"),
+    ("- os: ubuntu-latest", "- os: windows-latest"),
+    ("    timeout-minutes: 10", "    if: false\n    timeout-minutes: 10"),
+])
+def test_hosted_matrix_rejects_affinity_missing_os_and_suppression(old, new) -> None:
     content = workflow_text("ci.yml")
-    assert "pull_request:" in content
-    assert "runs-on: windows-latest" in content
+    assert_hosted_ci_matrix(content)
+    assert old in content
+    with pytest.raises(AssertionError):
+        assert_hosted_ci_matrix(content.replace(old, new, 1))
 
 
 # Workflow-level concurrency is acquired before a physical job can be skipped.
