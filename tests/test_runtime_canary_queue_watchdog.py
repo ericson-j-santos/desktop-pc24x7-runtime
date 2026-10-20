@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/runtime-canary.yml"
-START_MS = 1792484400000
+START_MS = 1792494000000
 JOB_NAME = "Runner, Docker and workers canary"
 RUNNER = "DESKTOP-PDQK954-runtime"
 
