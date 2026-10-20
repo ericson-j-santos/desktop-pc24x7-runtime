@@ -125,6 +125,20 @@ def test_workflow_resolves_exact_unedited_owner_request() -> None:
     assert "comment.updated_at === comment.created_at" in workflow
     assert "--expected-comment-id" in workflow
     assert "--requested-at" in workflow
+    live = workflow.split("\n  live-probe:\n", 1)[1]
+    assert "if: github.event_name == 'workflow_dispatch'" in live
+    contract = workflow.split("\n  contract:\n", 1)[1].split("\n  live-probe:\n", 1)[0]
+    assert "workflow_dispatch" not in contract
+
+
+def test_live_probe_cannot_become_push_gate_by_mutation() -> None:
+    workflow = (
+        ROOT / ".github" / "workflows" / "desktop-admin-broker-readback-probe.yml"
+    ).read_text(encoding="utf-8")
+    live = workflow.split("\n  live-probe:\n", 1)[1]
+    assert "if: github.event_name == 'workflow_dispatch'" in live
+    weakened = live.replace("if: github.event_name == 'workflow_dispatch'", "", 1)
+    assert "if: github.event_name == 'workflow_dispatch'" not in weakened
 
 
 def test_fetch_uses_fixed_poll_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:

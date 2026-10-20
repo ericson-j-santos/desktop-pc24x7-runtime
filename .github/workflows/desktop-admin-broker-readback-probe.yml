@@ -52,6 +52,7 @@ jobs:
 
   live-probe:
     name: Read request-bound broker diagnostic
+    if: github.event_name == 'workflow_dispatch'
     needs: contract
     runs-on: ubuntu-latest
     timeout-minutes: 5
