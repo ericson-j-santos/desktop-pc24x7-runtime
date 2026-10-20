@@ -119,10 +119,15 @@ def test_workflow_resolves_exact_unedited_owner_request() -> None:
         ROOT / ".github" / "workflows" / "desktop-admin-broker-readback-probe.yml"
     ).read_text(encoding="utf-8")
     assert "issues: read" in workflow
-    assert "github.paginate" in workflow
-    assert "issue_number: 2" in workflow
-    assert "comment.body === '/desktop-runtime admin status'" in workflow
-    assert "comment.updated_at === comment.created_at" in workflow
+    assert "workflow_dispatch:\n    inputs:\n      comment_id:" in workflow
+    assert "required: true" in workflow
+    assert "github.rest.issues.getComment" in workflow
+    assert "github.paginate" not in workflow
+    assert "EXPECTED_COMMENT_ID: ${{ inputs.comment_id }}" in workflow
+    assert "request.body !== '/desktop-runtime admin status'" in workflow
+    assert "request.updated_at !== request.created_at" in workflow
+    assert "request.issue_url !== 'https://api.github.com/repos/ericson-j-santos/desktop-pc24x7-runtime/issues/2'" in workflow
+    assert "BROKER_OWNER_REQUEST_UNVERIFIED" in workflow
     assert "--expected-comment-id" in workflow
     assert "--requested-at" in workflow
     live = workflow.split("\n  live-probe:\n", 1)[1]
