@@ -8,6 +8,7 @@ on:
       - config/runtime-supervisor.example.json
       - scripts/runtime_health_supervisor.py
       - tests/test_runtime_health_supervisor.py
+      - tests/test_runtime_canary_queue_watchdog.py
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
