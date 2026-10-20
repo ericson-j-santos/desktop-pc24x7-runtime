@@ -149,7 +149,7 @@ jobs:
     needs: [contract, admission]
     if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true' && needs.admission.outputs.admitted_attempt == github.run_attempt
     name: Inspect only owned ReqSys DEV runtime metadata
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 8
     env:
       ADMITTED_ATTEMPT: ${{ needs.admission.outputs.admitted_attempt }}

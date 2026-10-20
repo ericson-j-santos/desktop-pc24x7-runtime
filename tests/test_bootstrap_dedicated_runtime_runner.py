@@ -19,7 +19,7 @@ def test_contract_is_fixed_and_separate_from_reqsys_runner(monkeypatch, tmp_path
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert m.REPOSITORY == "ericson-j-santos/desktop-pc24x7-runtime"
     assert m.RUNNER_NAME == "DESKTOP-PDQK954-runtime"
-    assert m.RUNNER_LABELS == "pc24x7,desktop-runtime,runtime-dev"
+    assert m.RUNNER_LABELS == "pc24x7,desktop-runtime,runtime-dev,desktop-pdqk954"
     expected = tmp_path / "DesktopPC24x7Runtime" / "GitHubRunner"
     assert m.default_runner_home() == expected
     assert m.default_runner_home() == expected

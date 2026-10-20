@@ -10,14 +10,15 @@ Este repositório contém somente capacidades exclusivas do Desktop PC24x7:
 - recuperação governada do Remote Desktop Commander;
 - health/readiness e evidência do host;
 - startup/recovery e mecanismos fail-closed;
-- integração do host com runners/workers por contratos explícitos.
+- integração do host com runners/workers por contratos explícitos;
+- bootstrap host-local protegido para credenciais exigidas por esses contratos;
 - supervisor Pareto com circuit breaker e canário físico a cada cinco minutos.
 
 ## Fora de escopo
 
 - regras de negócio do ReqSys;
 - CI/merge queue/worker pool genéricos do Engineering Control Plane;
-- segredos, tokens ou credenciais;
+- valores de segredos, tokens ou credenciais no Git, além de sua criação ou rotação;
 - promoção/deploy de HML, STG ou PROD.
 
 ## Governança
@@ -30,6 +31,12 @@ haver equivalência validada neste repositório, incluindo testes e evidência r
 no Desktop.
 
 Runbook do supervisor: `docs/runtime-supervisor.md`.
+
+Runbook do bootstrap S3 do Worker Pool:
+`docs/WORKER_S3_CREDENTIAL_BOOTSTRAP.md`.
+
+Preflight físico do transporte S3 no Desktop:
+`docs/WORKER_S3_PHYSICAL_PREFLIGHT.md`.
 
 ## Estado
 

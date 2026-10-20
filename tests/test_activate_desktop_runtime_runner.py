@@ -21,7 +21,7 @@ def test_contract_is_repo_runner_and_labels_pinned() -> None:
     assert 'EXPECTED_HOST = "DESKTOP-PDQK954"' in text
     assert 'REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"' in text
     assert 'RUNNER_NAME = "DESKTOP-PDQK954-runtime"' in text
-    assert 'RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev"' in text
+    assert 'RUNNER_LABELS = "pc24x7,desktop-runtime,runtime-dev,desktop-pdqk954"' in text
     assert "ericson-j-santos/reqsys-v2-enterprise-real" not in text
     assert "REQSYS_GITHUB_RUNNER_HOME" not in text
     assert r"C:\actions-runner" not in text
@@ -69,7 +69,7 @@ def test_runtime_active_requires_registry_online_and_labels() -> None:
     assert "runner_registry_snapshot" in text
     assert "wait_runner_registry_online" in text
     assert 'repos/{REPOSITORY}/actions/runners' in text
-    assert 'REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev")' in text
+    assert 'REQUIRED_RUNNER_LABELS = ("self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev", "desktop-pdqk954")' in text
     assert 'state = "runner_registry_missing"' in text
     assert 'state = "runner_github_offline"' in text
     assert 'state = "runner_labels_mismatch"' in text
@@ -111,7 +111,7 @@ def test_label_repair_adds_only_missing_custom_label_without_restart(
     registry = {
         "present": True,
         "id": 42,
-        "labels": ["self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime"],
+        "labels": ["self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev"],
         "labels_ok": False,
     }
 
@@ -125,7 +125,7 @@ def test_label_repair_adds_only_missing_custom_label_without_restart(
         "runner_registry_snapshot",
         lambda gh: {
             **registry,
-            "labels": [*registry["labels"], "runtime-dev"],
+            "labels": [*registry["labels"], "desktop-pdqk954"],
             "labels_ok": True,
         },
     )
@@ -133,8 +133,33 @@ def test_label_repair_adds_only_missing_custom_label_without_restart(
     result = m.repair_runner_labels(Path("gh"), registry, allow_interactive_auth=False)
 
     assert result["repaired"] is True
-    assert result["added_labels"] == ["runtime-dev"]
-    assert calls == [(42, ["runtime-dev"])]
+    assert result["added_labels"] == ["desktop-pdqk954"]
+    assert calls == [(42, ["desktop-pdqk954"])]
+
+
+def test_rp23ogs_label_repair_never_requests_pdqk954_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = m.authorized_host("DESKTOP-RP23OGS")
+    monkeypatch.setattr(m, "RUNNER_LABELS", profile.runner_labels)
+    calls: list[list[str]] = []
+    registry = {
+        "present": True,
+        "id": 23,
+        "labels": ["self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev"],
+        "labels_ok": False,
+    }
+    monkeypatch.setattr(m, "request_runner_labels", lambda gh, runner_id, labels: calls.append(labels) or True)
+    monkeypatch.setattr(
+        m,
+        "runner_registry_snapshot",
+        lambda gh: {**registry, "labels": [*registry["labels"], "desktop-rp23ogs"], "labels_ok": True},
+    )
+
+    result = m.repair_runner_labels(Path("gh"), registry, allow_interactive_auth=False)
+
+    assert result["added_labels"] == ["desktop-rp23ogs"]
+    assert calls == [["desktop-rp23ogs"]]
 
 
 def test_registration_token_failure_does_not_mutate_runner(

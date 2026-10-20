@@ -2,6 +2,7 @@ name: Portfolio Bridge DEV Read-only Preflight
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     branches: [main]
     paths:
       - .github/workflows/portfolio-bridge-preflight-dev.yml
@@ -24,9 +25,9 @@ concurrency:
 
 jobs:
   prepare_runner:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Ensure dedicated Desktop runner labels
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 10
     env:
       RULES_SHA: cb340976ac9895fe572ff0321a4f68bbec99eceb
@@ -120,9 +121,9 @@ jobs:
 
   preflight:
     needs: prepare_runner
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Governed PC24x7 portfolio bridge dry-run
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 8
     env:
       RULES_SHA: cb340976ac9895fe572ff0321a4f68bbec99eceb
@@ -219,7 +220,7 @@ jobs:
       # Read-only: no task submission, no workflow tokens, and no deploy.
 
   prepare_runner_watchdog:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Ensure dedicated Desktop runner labels queue watchdog
     runs-on: windows-latest
 
@@ -258,12 +259,8 @@ jobs:
               return;
             }
 
-            const runResponse = await github.rest.actions.getWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: runId,
-            });
-            const progressAnchor = new Date(runResponse.data.created_at || Date.now());
+            // Each eligible job has its own fixed pickup window after its dependencies.
+            const progressAnchor = new Date();
 
             while (true) {
               const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
@@ -278,7 +275,12 @@ jobs:
 
               if (
                 targetJob &&
-                (targetJob.status !== 'queued' || Number(targetJob.runner_id || 0) > 0)
+                Number.isSafeInteger(targetJob.id) && targetJob.id > 0 &&
+                targetJob.run_id === runId &&
+                Number.isSafeInteger(targetJob.runner_id) && targetJob.runner_id > 0 &&
+                targetJob.runner_name === 'DESKTOP-PDQK954-runtime' &&
+                (targetJob.status === 'in_progress' ||
+                  (targetJob.status === 'completed' && targetJob.conclusion !== 'skipped'))
               ) {
                 fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
                   task_id: String(targetJob.id),
@@ -341,7 +343,7 @@ jobs:
             });
 
   preflight_runner_watchdog:
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     name: Governed PC24x7 portfolio bridge dry-run queue watchdog
     runs-on: windows-latest
     needs: prepare_runner
@@ -381,12 +383,8 @@ jobs:
               return;
             }
 
-            const runResponse = await github.rest.actions.getWorkflowRun({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              run_id: runId,
-            });
-            const progressAnchor = new Date(runResponse.data.created_at || Date.now());
+            // Each eligible job has its own fixed pickup window after its dependencies.
+            const progressAnchor = new Date();
 
             while (true) {
               const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
@@ -401,7 +399,12 @@ jobs:
 
               if (
                 targetJob &&
-                (targetJob.status !== 'queued' || Number(targetJob.runner_id || 0) > 0)
+                Number.isSafeInteger(targetJob.id) && targetJob.id > 0 &&
+                targetJob.run_id === runId &&
+                Number.isSafeInteger(targetJob.runner_id) && targetJob.runner_id > 0 &&
+                targetJob.runner_name === 'DESKTOP-PDQK954-runtime' &&
+                (targetJob.status === 'in_progress' ||
+                  (targetJob.status === 'completed' && targetJob.conclusion !== 'skipped'))
               ) {
                 fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
                   task_id: String(targetJob.id),

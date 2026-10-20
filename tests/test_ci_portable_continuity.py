@@ -69,7 +69,7 @@ def test_ci_contract_handles_windows_and_unix_line_endings():
 
 def test_physical_inventory_remains_a_separate_fail_closed_workflow():
     source = (ROOT / ".github/workflows/reqsys-dev-readonly-inventory.yml").read_text(encoding="utf-8")
-    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]" in source
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in source
     assert source.count("needs.admission.outputs.physical_ready == 'true'") == 2
     assert source.count("needs.admission.outputs.admitted_attempt == github.run_attempt") == 2
     assert "SESSION_LAUNCH_OK" in source

@@ -39,7 +39,7 @@ jobs:
   inspect:
     needs: contract
     name: Physical fixed-path supervisor receipt readback
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 6
     steps:
       - name: Checkout immutable Desktop source
