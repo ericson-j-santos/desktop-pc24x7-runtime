@@ -52,8 +52,14 @@ test('replay and missing history cannot manufacture a new precondition', () => {
   assert.deepEqual(assess(fixture()), assess(fixture()));
 });
 function api(data) {
-  return {rest: {repos: {getBranch: async () => ({data: {commit: {sha: data.mainSha}}})}, actions: {
-    listWorkflowRuns: async args => ({data: {workflow_runs: args.workflow_id.startsWith('dedicated-') ? [data.canary] : data.history}}),
+  return {rest: {repos: {getBranch: async args => ({data: {commit: {
+    sha: args.branch === 'main' ? data.mainSha : data.sha,
+  }}})}, actions: {
+    listWorkflowRuns: async args => {
+      const runs = args.workflow_id.startsWith('dedicated-') ? [data.canary] : data.history;
+      return {data: {workflow_runs: runs, total_count: runs.length}};
+    },
+    getWorkflowRun: async () => ({data: {...data.history[0], status: 'in_progress'}}),
     listJobsForWorkflowRun: async () => ({data: {jobs: data.jobs, total_count: data.jobs.length}}),
   }}};
 }
@@ -67,9 +73,11 @@ function setup() {
 test('adapter positive and negative controls use only read APIs', async () => {
   const positive = setup(); await admit({...positive, github: api(fixture())});
   assert.equal(positive.outputs.physical_ready, 'true'); assert.deepEqual(positive.failures, []);
+  assert.equal(positive.outputs.admitted_attempt, '1');
   const data = fixture(); data.history[1].updated_at = '2026-10-14T22:59:00Z';
   const negative = setup(); await admit({...negative, github: api(data)});
   assert.equal(negative.outputs.physical_ready, 'false');
+  assert.equal(negative.outputs.admitted_attempt, '');
   assert.deepEqual(negative.failures, ['NEW_RUNNER_PRECONDITION_REQUIRED']);
 });
 test('API errors are sanitized and keep physical admission closed', async () => {
@@ -81,7 +89,6 @@ test('API errors are sanitized and keep physical admission closed', async () => 
   assert.ok(!JSON.stringify(state.outputs).includes('secret-marker'));
 });
 function assertWorkflowBindings(workflow) {
-  // Windows checkout may materialize CRLF; validate the same contract on both OSes.
   const normalized = workflow.replace(/\r\n?/g, '\n');
   for (const name of ['pickup_watchdog', 'inspect']) {
     const section = normalized.split('\n  ' + name + ':\n')[1];
@@ -89,6 +96,7 @@ function assertWorkflowBindings(workflow) {
     const job = section.split(/\n  [a-z_]+:\n/)[0];
     assert.match(job, /needs: \[contract, admission\]/);
     assert.match(job, /needs\.admission\.outputs\.physical_ready == 'true'/);
+    assert.match(job, /needs\.admission\.outputs\.admitted_attempt == github\.run_attempt/);
   }
 }
 const workflow = () => fs.readFileSync(path.join(__dirname, '../.github/workflows/reqsys-dev-readonly-inventory.yml'), 'utf8');
@@ -108,5 +116,9 @@ test('test-of-test: removing admission is rejected after a valid baseline on bot
     assertWorkflowBindings(valid);
     const oldDependency = valid.replaceAll('needs: [contract, admission]', 'needs: contract');
     assert.throws(() => assertWorkflowBindings(oldDependency), {code: 'ERR_ASSERTION'});
+    const staleAttempt = valid.replaceAll('needs.admission.outputs.admitted_attempt == github.run_attempt', 'true');
+    assert.throws(() => assertWorkflowBindings(staleAttempt), {code: 'ERR_ASSERTION'});
   }
 });
+// Keep the new regression suite in the existing required hosted contract entrypoint.
+require('./test_reqsys_dev_inventory_resume.cjs');

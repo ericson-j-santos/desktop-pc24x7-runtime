@@ -12,6 +12,8 @@ on:
       - tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
       - scripts/reqsys_dev_inventory_admission.cjs
       - tests/test_reqsys_dev_inventory_admission.cjs
+      - scripts/reqsys_dev_inventory_resume.cjs
+      - tests/test_reqsys_dev_inventory_resume.cjs
       - scripts/reqsys_dev_broker_status_readback.py
       - tests/test_reqsys_dev_broker_status_readback.py
 
@@ -77,6 +79,8 @@ jobs:
         run: |
           node --check scripts/reqsys_dev_inventory_admission.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check scripts/reqsys_dev_inventory_resume.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/test_reqsys_dev_inventory_admission.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
@@ -92,6 +96,7 @@ jobs:
       actions: read
     outputs:
       physical_ready: ${{ steps.admit.outputs.physical_ready }}
+      admitted_attempt: ${{ steps.admit.outputs.admitted_attempt }}
     steps:
       - name: Checkout immutable admission policy
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -108,7 +113,7 @@ jobs:
 
   pickup_watchdog:
     needs: [contract, admission]
-    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true'
+    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true' && needs.admission.outputs.admitted_attempt == github.run_attempt
     name: Abort blocked physical inventory after 300 seconds
     runs-on: ubuntu-latest
     timeout-minutes: 8
@@ -116,6 +121,8 @@ jobs:
       contents: read
       actions: write
       issues: write
+    env:
+      ADMITTED_ATTEMPT: ${{ needs.admission.outputs.admitted_attempt }}
     steps:
       - name: Checkout immutable pickup watchdog
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -131,16 +138,21 @@ jobs:
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
+            if (!process.env.ADMITTED_ATTEMPT || process.env.ADMITTED_ATTEMPT !== process.env.GITHUB_RUN_ATTEMPT) {
+              core.setFailed('FRESH_ADMISSION_FOR_THIS_ATTEMPT_REQUIRED');
+              return;
+            }
             const watchdog = require('./scripts/reqsys_dev_inventory_pickup_watchdog.cjs');
             await watchdog.monitor({github, context, core});
 
   inspect:
     needs: [contract, admission]
-    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true'
+    if: needs.contract.result == 'success' && needs.admission.outputs.physical_ready == 'true' && needs.admission.outputs.admitted_attempt == github.run_attempt
     name: Inspect only owned ReqSys DEV runtime metadata
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
     timeout-minutes: 8
     env:
+      ADMITTED_ATTEMPT: ${{ needs.admission.outputs.admitted_attempt }}
       RULES_SHA: ddd09dc616181c0aaf46d33a194e9b00a6989332
       REQSYS_TARGET_SHA: ${{ needs.contract.outputs.expected_reqsys_sha }}
       REQSYS_SOURCE_SHA: ${{ github.sha }}
@@ -163,6 +175,8 @@ jobs:
         shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
+          if ([string]::IsNullOrWhiteSpace($env:ADMITTED_ATTEMPT) -or
+              $env:ADMITTED_ATTEMPT -ne $env:GITHUB_RUN_ATTEMPT) { throw 'FRESH_ADMISSION_FOR_THIS_ATTEMPT_REQUIRED' }
           if ($env:COMPUTERNAME -ne 'DESKTOP-PDQK954' -or
               $env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'DEDICATED_DESKTOP_REQUIRED' }
           if ($env:GITHUB_REF -ne 'refs/heads/fix/reqsys-dev-runtime-readonly-inventory-20261014') {
@@ -227,7 +241,7 @@ jobs:
         if: always() && steps.session.outputs.target_path != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: reqsys-dev-readonly-inventory-${{ github.run_id }}
+          name: reqsys-dev-readonly-inventory-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.session.outputs.target_path }}/.tmp/reqsys-dev-readonly-inventory/evidence.json
           if-no-files-found: error
           include-hidden-files: true
