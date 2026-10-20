@@ -2,6 +2,7 @@ name: PC24x7 Runtime Canary
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
     paths:
       - .github/workflows/runtime-canary.yml
       - config/runtime-supervisor.example.json
@@ -11,17 +12,18 @@ on:
     - cron: "*/5 * * * *"
   workflow_dispatch:
 
-concurrency:
-  group: pc24x7-runtime-canary
-  cancel-in-progress: false
-
 permissions:
   contents: read
 
 jobs:
   canary:
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    # Do not queue draft/fork workflows before their physical admission gate.
+    concurrency:
+      group: pc24x7-runtime-canary
+      cancel-in-progress: false
     name: Runner, Docker and workers canary
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4

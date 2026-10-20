@@ -132,10 +132,10 @@ def test_physical_workflow_is_sha_pinned_and_governed() -> None:
     assert "state_validated" in workflow
     assert '"--risk", "2"' in workflow
     assert "DESKTOP-PDQK954" in workflow
-    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow
     assert "TODO dispatcher physical E2E on Desktop" in workflow
     assert "name: Ensure dedicated Desktop runner labels" in workflow
-    assert "runs-on: [self-hosted, Windows, X64]" in workflow
+    assert "runs-on: [self-hosted, Windows, X64]" not in workflow
     assert "Repair runner label contract through Command Gateway" in workflow
     assert "scripts\\\\activate_desktop_runtime_runner.py" in workflow
     assert '"--confirm", "ACTIVATE-DESKTOP-RUNTIME-RUNNER"' in workflow
