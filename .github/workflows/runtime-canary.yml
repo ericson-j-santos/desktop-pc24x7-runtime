@@ -13,7 +13,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: pc24x7-runtime-canary
+  # PR validation must never queue behind the scheduled main canary.
+  group: pc24x7-runtime-canary-${{ github.event.number || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
