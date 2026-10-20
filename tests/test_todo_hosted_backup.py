@@ -147,8 +147,10 @@ def test_hosted_execution_refuses_untrusted_context(env,field,value,reason):
         b.git_identity(env)
 
 
-def test_hosted_execution_accepts_exact_main_push(env):
+def test_hosted_execution_accepts_exact_main_push(env, monkeypatch):
+    from types import SimpleNamespace
     env["GITHUB_EVENT_NAME"] = "push"
+    monkeypatch.setattr(b, "os", SimpleNamespace(name="posix"))
     assert b.git_identity(env) == env["GITHUB_SHA"]
 
 
