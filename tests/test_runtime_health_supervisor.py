@@ -91,6 +91,15 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "github.event.pull_request.head.sha || github.sha" in workflow
     assert workflow.count("shell: powershell") == 2
     assert "shell: pwsh" not in workflow
+    assert "name: Runtime canary queue watchdog" in workflow
+    assert 'STALL_AFTER_SECONDS: "300"' in workflow
+    assert "progress_watchdog.py" in workflow
+    assert "actions: write" in workflow
+    assert "cancelWorkflowRun" in workflow
+    assert "EXPECTED_RUNNER: DESKTOP-PDQK954-runtime" in workflow
+    assert "CANARY_JOB_NOT_UNIQUE" in workflow
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow
+    assert "last_material_progress_at: new Date(anchorMs).toISOString()" in workflow
 
 
 def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
