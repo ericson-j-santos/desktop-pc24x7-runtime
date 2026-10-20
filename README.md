@@ -35,6 +35,9 @@ Runbook do supervisor: `docs/runtime-supervisor.md`.
 Runbook do bootstrap S3 do Worker Pool:
 `docs/WORKER_S3_CREDENTIAL_BOOTSTRAP.md`.
 
+Preflight físico do transporte S3 no Desktop:
+`docs/WORKER_S3_PHYSICAL_PREFLIGHT.md`.
+
 ## Estado
 
 Repositório inicializado. A primeira migração é o plano de controle autônomo do

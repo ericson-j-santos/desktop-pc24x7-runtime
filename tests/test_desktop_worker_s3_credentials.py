@@ -148,8 +148,20 @@ class DesktopWorkerS3CredentialsTest(unittest.TestCase):
         stored = self.path.read_bytes()
         self.assertNotIn(ACCESS_KEY.encode(), stored)
         self.assertNotIn(SECRET_KEY.encode(), stored)
-        self.assertIn(self.path.parent, acl.secured)
-        self.assertIn(self.path, acl.checked)
+        self.assertTrue(
+            any(
+                path.exists() and os.path.samefile(self.path.parent, path)
+                for path in acl.secured
+            ),
+            "the physical credential directory must receive the private ACL",
+        )
+        self.assertTrue(
+            any(
+                path.exists() and os.path.samefile(self.path, path)
+                for path in acl.checked
+            ),
+            "the physical credential file must receive ACL readback",
+        )
         self.assertEqual(
             list(self.path.parent.glob("*.pending")),
             [],
