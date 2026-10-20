@@ -1,0 +1,90 @@
+name: ReqSys DEV request-bound broker diagnostic
+
+# Optional diagnostic only. Never schedules a Desktop job or authorizes inventory.
+on:
+  workflow_dispatch:
+    inputs:
+      comment_id:
+        description: 'Unedited owner status request in Desktop Runtime issue 2'
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  issues: read
+
+concurrency:
+  group: reqsys-dev-broker-diagnostic-${{ inputs.comment_id }}
+  cancel-in-progress: false
+
+jobs:
+  broker_readback:
+    name: Read explicit request-bound broker diagnostic
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      EXPECTED_COMMENT_ID: ${{ inputs.comment_id }}
+    steps:
+      - name: Checkout immutable request verifier
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Setup diagnostic Python 3.12
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+      - name: Verify exact unedited owner status request
+        id: request
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const rawId = process.env.EXPECTED_COMMENT_ID || '';
+            const commentId = Number(rawId);
+            if (!/^[1-9][0-9]{0,15}$/.test(rawId) || !Number.isSafeInteger(commentId) ||
+                context.repo.owner !== 'ericson-j-santos' ||
+                context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                context.eventName !== 'workflow_dispatch' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1') {
+              core.setFailed('BROKER_REQUEST_SCOPE_INVALID');
+              return;
+            }
+            let comment;
+            try {
+              ({data: comment} = await github.rest.issues.getComment({
+                ...context.repo, comment_id: commentId,
+              }));
+            } catch (_error) {
+              core.setFailed('BROKER_OWNER_REQUEST_READBACK_UNAVAILABLE');
+              return;
+            }
+            if (!comment || comment.id !== commentId ||
+                comment.user?.login !== 'ericson-j-santos' ||
+                comment.author_association !== 'OWNER' ||
+                comment.body !== '/desktop-runtime admin status' ||
+                comment.updated_at !== comment.created_at ||
+                comment.issue_url !== 'https://api.github.com/repos/ericson-j-santos/desktop-pc24x7-runtime/issues/2') {
+              core.setFailed('BROKER_OWNER_REQUEST_UNVERIFIED');
+              return;
+            }
+            const issued = Date.parse(comment.created_at);
+            const age = Date.now() - issued;
+            if (!Number.isFinite(issued) || age < 0 || age > 1800000) {
+              core.setFailed('BROKER_REQUEST_EXPIRED_OR_FUTURE');
+              return;
+            }
+            core.setOutput('issued_at', comment.created_at);
+      - name: Read fixed diagnostic once and reject unrelated or expired responses
+        id: readback
+        env:
+          EXPECTED_ISSUED_AT: ${{ steps.request.outputs.issued_at }}
+        run: python scripts/reqsys_dev_broker_status_readback.py
+      - name: Upload non-authoritative request-bound receipt
+        if: always() && steps.readback.outcome != 'skipped'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-dev-broker-preflight-${{ github.run_id }}
+          path: .tmp/reqsys-dev-broker-preflight/evidence.json
+          if-no-files-found: error
+          include-hidden-files: true
+          retention-days: 7

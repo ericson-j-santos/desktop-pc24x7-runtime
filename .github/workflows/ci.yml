@@ -17,15 +17,29 @@ concurrency:
 
 jobs:
   unit:
-    name: Python compile and tests
-    runs-on: windows-latest
+    name: ${{ matrix.check_name }}
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            check_name: Python compile and tests
+          - os: ubuntu-latest
+            check_name: Portable Linux compile and tests
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          persist-credentials: false
+
+      - name: Record exact tested revision
+        shell: pwsh
+        run: git rev-parse HEAD
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
           python-version: "3.12"
 
@@ -39,4 +53,14 @@ jobs:
 
       - name: Unit and negative-control tests
         shell: pwsh
-        run: python -m pytest
+        run: python -m pytest -ra
+
+      - name: Admission, resume and watchdog controls without physical dispatch
+        shell: pwsh
+        run: |
+          node --check scripts/reqsys_dev_inventory_admission.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --check scripts/reqsys_dev_inventory_resume.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node --test tests/test_reqsys_dev_inventory_admission.cjs tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
