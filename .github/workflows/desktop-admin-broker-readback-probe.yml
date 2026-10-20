@@ -12,9 +12,15 @@ on:
       - ".sdd/specs/desktop-admin-broker-readback-probe.requirements.md"
       - ".github/workflows/desktop-admin-broker-readback-probe.yml"
   workflow_dispatch:
+    inputs:
+      comment_id:
+        description: "Exact unedited owner status request in issue #2"
+        type: string
+        required: true
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: desktop-admin-broker-readback-probe-${{ github.ref }}
@@ -50,11 +56,54 @@ jobs:
           python -m pytest             tests/test_desktop_admin_broker_readback.py             tests/test_desktop_admin_broker_readback_probe.py -q
 
   live-probe:
-    name: Read latest broker diagnostic
+    name: Read request-bound broker diagnostic
+    if: github.event_name == 'workflow_dispatch'
     needs: contract
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      - name: Resolve exact fresh owner status request
+        id: request
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_COMMENT_ID: ${{ inputs.comment_id }}
+        with:
+          script: |
+            const rawId = process.env.EXPECTED_COMMENT_ID || '';
+            const commentId = Number(rawId);
+            if (!/^[1-9][0-9]{0,15}$/.test(rawId) || !Number.isSafeInteger(commentId)) {
+              core.setFailed('BROKER_REQUEST_SCOPE_INVALID');
+              return;
+            }
+            let request;
+            try {
+              ({data: request} = await github.rest.issues.getComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: commentId,
+              }));
+            } catch (_error) {
+              core.setFailed('BROKER_OWNER_REQUEST_READBACK_UNAVAILABLE');
+              return;
+            }
+            if (!request || request.id !== commentId ||
+                request.user?.login !== 'ericson-j-santos' ||
+                request.author_association !== 'OWNER' ||
+                request.body !== '/desktop-runtime admin status' ||
+                request.updated_at !== request.created_at ||
+                request.issue_url !== 'https://api.github.com/repos/ericson-j-santos/desktop-pc24x7-runtime/issues/2') {
+              core.setFailed('BROKER_OWNER_REQUEST_UNVERIFIED');
+              return;
+            }
+            const issued = Date.parse(request.created_at);
+            const age = Date.now() - issued;
+            if (!Number.isFinite(issued) || age < 0 || age > 1800000) {
+              core.setFailed('BROKER_OWNER_STATUS_REQUEST_EXPIRED');
+              return;
+            }
+            core.setOutput('comment_id', String(request.id));
+            core.setOutput('created_at', request.created_at);
+
       - name: Checkout exact SHA
         uses: actions/checkout@v4
         with:
@@ -62,8 +111,16 @@ jobs:
           persist-credentials: false
 
       - name: Probe fixed ntfy readback
+        env:
+          EXPECTED_COMMENT_ID: ${{ steps.request.outputs.comment_id }}
+          EXPECTED_REQUESTED_AT: ${{ steps.request.outputs.created_at }}
         run: |
-          python scripts/desktop_admin_broker_readback_probe.py             --evidence-file artifacts/desktop-admin-broker-readback/evidence.json             --max-age-seconds 900             --timeout-seconds 10
+          python scripts/desktop_admin_broker_readback_probe.py \
+            --evidence-file artifacts/desktop-admin-broker-readback/evidence.json \
+            --max-age-seconds 900 \
+            --timeout-seconds 10 \
+            --expected-comment-id "$EXPECTED_COMMENT_ID" \
+            --requested-at "$EXPECTED_REQUESTED_AT"
 
       - name: Upload sanitized evidence
         if: always()
