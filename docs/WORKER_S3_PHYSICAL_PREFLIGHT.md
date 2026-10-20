@@ -26,6 +26,14 @@ credential, or assert S4U merely because DPAPI decryption succeeded.
 - Place the output outside either Git worktree, preferably in the governed
   runtime evidence directory.
 
+Checkout cleanliness means logical Git cleanliness under a deterministic
+line-ending policy. Because the verifier deliberately ignores system and global
+Git configuration, it explicitly uses `core.autocrlf=true` on Windows and
+`core.autocrlf=false` on POSIX. On Windows this accepts only Git's canonical
+CRLF/LF representation of the same content; substantive content changes,
+ignored files, `skip-worktree`, and `assume-unchanged` entries still block the
+preflight.
+
 ## Invocation contract
 
 Invoke the script via the Command Gateway with these non-secret inputs:

@@ -75,7 +75,20 @@ ContractLoader = Callable[[CheckoutIdentity], WorkerTransportContract]
 CredentialRunner = Callable[[credentials.S3Route, Callable[[Any, credentials.S3Route], Any]], Any]
 
 
-def _git_output(root: Path, arguments: tuple[str, ...]) -> str:
+def _git_output(
+    root: Path,
+    arguments: tuple[str, ...],
+    *,
+    platform_name: str | None = None,
+) -> str:
+    selected_platform = os.name if platform_name is None else platform_name
+    if selected_platform not in {"nt", "posix"}:
+        raise PhysicalPreflightError("worker_pool_checkout_invalid")
+    # Git for Windows normally materializes text files with CRLF through its
+    # system-level core.autocrlf=true.  We intentionally ignore untrusted
+    # system/global Git config below, so restore that one deterministic clean
+    # conversion rule explicitly.  Repository .gitattributes still wins.
+    autocrlf = "true" if selected_platform == "nt" else "false"
     environment = {
         key: value
         for key, value in os.environ.items()
@@ -94,6 +107,7 @@ def _git_output(root: Path, arguments: tuple[str, ...]) -> str:
                 "git",
                 "-c", "core.fsmonitor=false",
                 "-c", "core.untrackedCache=false",
+                "-c", f"core.autocrlf={autocrlf}",
                 *arguments,
             ],
             cwd=root,

@@ -291,6 +291,93 @@ class DesktopWorkerS3PreflightTest(unittest.TestCase):
         ):
             p._verify_checkout(repository, head, tree, "worker_pool")
 
+    def test_git_for_windows_autocrlf_checkout_is_clean_without_system_config(
+        self,
+    ) -> None:
+        repository = self.root / "windows-autocrlf-worker"
+        repository.mkdir()
+
+        def git(*arguments: str) -> str:
+            completed = subprocess.run(
+                ["git", *arguments],
+                cwd=repository,
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=20,
+            )
+            return completed.stdout.strip()
+
+        git("init", "--quiet")
+        (repository / ".gitignore").write_bytes(b"__pycache__/\r\n")
+        (repository / "module.py").write_bytes(b"VALUE = 1\r\n")
+        git("-c", "core.autocrlf=true", "add", ".gitignore", "module.py")
+        git(
+            "-c", "core.autocrlf=true",
+            "-c", "user.name=Test",
+            "-c", "user.email=test@example.invalid",
+            "commit", "--quiet", "-m", "windows autocrlf fixture",
+        )
+        head = git("rev-parse", "HEAD")
+        tree = git("rev-parse", "HEAD^{tree}")
+        status_arguments = (
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+            "--ignored=matching",
+            "-z",
+        )
+
+        # This is the false dirty result produced by the old verifier after it
+        # hid Git for Windows' system-level core.autocrlf=true.
+        self.assertIn(
+            "module.py",
+            p._git_output(
+                repository,
+                status_arguments,
+                platform_name="posix",
+            ),
+        )
+
+        def windows_git_runner(root: Path, arguments: tuple[str, ...]) -> str:
+            return p._git_output(root, arguments, platform_name="nt")
+
+        identity = p._verify_checkout(
+            repository,
+            head,
+            tree,
+            "worker_pool",
+            git_runner=windows_git_runner,
+        )
+        self.assertEqual(identity.head, head)
+
+        (repository / "module.py").write_bytes(b"VALUE = 12345\r\n")
+        with self.assertRaisesRegex(
+            p.PhysicalPreflightError, "worker_pool_checkout_invalid",
+        ):
+            p._verify_checkout(
+                repository,
+                head,
+                tree,
+                "worker_pool",
+                git_runner=windows_git_runner,
+            )
+        (repository / "module.py").write_bytes(b"VALUE = 1\r\n")
+
+        ignored = repository / "__pycache__"
+        ignored.mkdir()
+        (ignored / "module.pyc").write_bytes(b"synthetic")
+        with self.assertRaisesRegex(
+            p.PhysicalPreflightError, "worker_pool_checkout_invalid",
+        ):
+            p._verify_checkout(
+                repository,
+                head,
+                tree,
+                "worker_pool",
+                git_runner=windows_git_runner,
+            )
+
     def test_ignored_content_or_special_index_flags_are_rejected(self) -> None:
         def controlled_git(_root: Path, arguments: tuple[str, ...]) -> str:
             if arguments == ("rev-parse", "--show-toplevel"):
@@ -352,6 +439,33 @@ class DesktopWorkerS3PreflightTest(unittest.TestCase):
         self.assertEqual(environment["GIT_CONFIG_NOSYSTEM"], "1")
         self.assertEqual(environment["GIT_CONFIG_GLOBAL"], os.devnull)
         self.assertIn("core.fsmonitor=false", captured["argv"])
+        expected_default_autocrlf = "true" if os.name == "nt" else "false"
+        self.assertIn(
+            f"core.autocrlf={expected_default_autocrlf}",
+            captured["argv"],
+        )
+
+        for platform_name, expected_autocrlf in (
+            ("nt", "true"),
+            ("posix", "false"),
+        ):
+            with self.subTest(platform_name=platform_name), patch.object(
+                p.subprocess,
+                "run",
+                side_effect=run,
+            ):
+                self.assertEqual(
+                    p._git_output(
+                        self.worker,
+                        ("status",),
+                        platform_name=platform_name,
+                    ),
+                    "ok",
+                )
+                self.assertIn(
+                    f"core.autocrlf={expected_autocrlf}",
+                    captured["argv"],
+                )
 
     def test_worker_contract_must_resolve_to_verified_checkout(self) -> None:
         app = self.worker / "app"
