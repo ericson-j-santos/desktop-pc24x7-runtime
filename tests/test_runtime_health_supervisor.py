@@ -102,3 +102,47 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
     assert 'trigger.Repetition.Interval = "PT1M"' in installer
     assert "principal.LogonType = 2" in installer
     assert "task_readback_failed" in installer
+
+
+def test_canary_draft_gate_and_queue_watchdog_are_fail_closed() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "types: [opened, synchronize, reopened, ready_for_review]" in workflow
+    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
+    gate = (
+        "github.event_name != 'pull_request' || "
+        "(!github.event.pull_request.draft && "
+        "github.event.pull_request.head.repo.full_name == github.repository)"
+    )
+    assert workflow.count(gate) == 2
+    assert "name: Runtime canary queue watchdog" in workflow
+    assert 'STALL_AFTER_SECONDS: "300"' in workflow
+    assert "EXPECTED_RUNNER: DESKTOP-PDQK954-runtime" in workflow
+    assert "CANARY_JOB_NOT_UNIQUE" in workflow
+    assert "progress_watchdog.py" in workflow
+    assert "actions: write" in workflow
+    assert "cancelWorkflowRun" in workflow
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow
+    assert "const anchor = new Date();" in workflow
+    assert "run.data.created_at" not in workflow
+    assert "last_material_progress_at: anchor.toISOString()" in workflow
+
+
+def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
+    installer = (ROOT / "scripts" / "install_runtime_health_supervisor.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'TASK_LEAF = "DesktopPc24x7RuntimeHealthSupervisor"' in installer
+    assert "definition.Triggers.Create(8)" in installer
+    assert 'trigger.Repetition.Interval = "PT1M"' in installer
+    assert "principal.LogonType = 2" in installer
+    assert "task_readback_failed" in installer
+
+
+
+def test_canary_queue_is_isolated_per_pr_without_cancelling_active_runs() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(encoding="utf-8")
+    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow

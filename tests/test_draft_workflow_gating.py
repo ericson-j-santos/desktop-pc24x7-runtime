@@ -17,7 +17,7 @@ PHYSICAL_GATE = (
 PR_TYPES = "types: [opened, synchronize, reopened, ready_for_review]"
 
 PHYSICAL_WORKFLOWS = {
-    "runtime-canary.yml": 1,
+    "runtime-canary.yml": 2,
     "engineering-worker-pool-smoke-dev.yml": 3,
     "ollama-local-benchmark-dev.yml": 2,
     "portfolio-bridge-preflight-dev.yml": 4,
@@ -109,7 +109,7 @@ def test_hosted_matrix_rejects_affinity_missing_os_and_suppression(old, new) -> 
 # Keep the existing host lock, but acquire it only for admitted physical jobs.
 CANARY_JOB_LOCK = (
     "    concurrency:\n"
-    "      group: pc24x7-runtime-canary\n"
+    "      group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}\n"
     "      cancel-in-progress: false\n"
 )
 
@@ -121,7 +121,8 @@ def assert_canary_lock_scope(content: str) -> None:
     assert PHYSICAL_GATE in jobs, "physical admission must remain fail-closed"
     assert CANARY_JOB_LOCK in jobs, "admitted jobs must keep the existing host lock"
     assert jobs.index(PHYSICAL_GATE) < jobs.index(CANARY_JOB_LOCK)
-    assert content.count("group: pc24x7-runtime-canary") == 1
+    assert content.count("format('pc24x7-runtime-canary-pr-{0}'") == 1
+    assert "|| 'pc24x7-runtime-canary'" in content
 
 
 def test_canary_skips_drafts_before_acquiring_host_lock() -> None:
@@ -133,7 +134,9 @@ def test_canary_preserves_serialization_without_cancelling_active_jobs() -> None
     assert CANARY_JOB_LOCK in content
     assert "cancel-in-progress: true" not in content
     assert "  contents: read" in content
-    assert "actions: write" not in content
+    assert "actions: write" in content
+    canary = content.split("  canary:\n", 1)[1].split("\n  queue_watchdog:", 1)[0]
+    assert "actions: write" not in canary
     assert "    timeout-minutes: 4" in content
     assert "  schedule:\n    - cron: \"*/5 * * * *\"" in content
     assert "  workflow_dispatch:" in content
@@ -151,7 +154,7 @@ def test_canary_lock_guard_rejects_regressions(fault: str) -> None:
     elif fault == "no-lock":
         content = content.replace(CANARY_JOB_LOCK, "", 1)
     elif fault == "renamed-lock":
-        content = content.replace("group: pc24x7-runtime-canary", "group: unshared", 1)
+        content = content.replace("pc24x7-runtime-canary-pr-{0}", "unshared-pr-{0}", 1)
     else:
         content = content.replace(PHYSICAL_GATE, "    if: true", 1)
     with pytest.raises(AssertionError):

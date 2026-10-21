@@ -8,6 +8,7 @@ on:
       - config/runtime-supervisor.example.json
       - scripts/runtime_health_supervisor.py
       - tests/test_runtime_health_supervisor.py
+      - tests/test_runtime_canary_queue_watchdog.py
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
@@ -20,7 +21,7 @@ jobs:
     if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
     # Do not queue draft/fork workflows before their physical admission gate.
     concurrency:
-      group: pc24x7-runtime-canary
+      group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}
       cancel-in-progress: false
     name: Runner, Docker and workers canary
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
@@ -95,3 +96,133 @@ jobs:
             session-launch.json
           if-no-files-found: error
           retention-days: 14
+  queue_watchdog:
+    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    name: Runtime canary queue watchdog
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+      contents: read
+    env:
+      TARGET_RUN_ID: ${{ github.run_id }}
+      TARGET_JOB_NAME: Runner, Docker and workers canary
+      EXPECTED_RUNNER: DESKTOP-PDQK954-runtime
+      STALL_AFTER_SECONDS: "300"
+      CORRELATION_ID: runtime-canary-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Resolve canonical operational rules
+        id: rules
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              branch: 'main',
+            });
+            const sha = String(branch.data.commit.sha || '').toLowerCase();
+            if (!/^[0-9a-f]{40}$/.test(sha)) {
+              core.setFailed('RULES_SHA_UNVERIFIED');
+              return;
+            }
+            core.setOutput('sha', sha);
+
+      - name: Checkout canonical progress watchdog
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ steps.rules.outputs.sha }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Observe exact runner pickup without renewing progress
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const runId = Number(process.env.TARGET_RUN_ID);
+            const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
+            // Setup/rules checkout is not time waiting for physical pickup.
+            // Fix the observation anchor once; polling must never renew it.
+            const anchor = new Date();
+            while (true) {
+              const response = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+                filter: 'latest',
+              });
+              const matches = response.data.jobs.filter(
+                (item) => item.name === process.env.TARGET_JOB_NAME,
+              );
+              if (matches.length > 1) {
+                core.setFailed('CANARY_JOB_NOT_UNIQUE');
+                return;
+              }
+              const job = matches[0] || null;
+              const pickedUp = job
+                && Number.isSafeInteger(job.runner_id)
+                && job.runner_id > 0
+                && job.runner_name === process.env.EXPECTED_RUNNER
+                && Boolean(job.started_at)
+                && ['in_progress', 'completed'].includes(job.status);
+              if (pickedUp) {
+                const observed = new Date().toISOString();
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: String(job.id),
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: job.status === 'completed' ? 'completed' : 'running',
+                  last_material_progress_at: observed,
+                  last_observation_at: observed,
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+              const noProgressMs = Date.now() - anchor.getTime();
+              if (noProgressMs >= stallMs) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: job ? String(job.id) : 'runtime-canary-job-not-created',
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: 'queued',
+                  last_material_progress_at: anchor.toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+              await sleep(Math.min(15000, stallMs - noProgressMs));
+            }
+
+      - name: Evaluate canonical progress watchdog
+        id: watchdog
+        continue-on-error: true
+        run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
+
+      - name: Fail closed and cancel stalled canary
+        if: steps.watchdog.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('progress-watchdog-output.json')) {
+              core.setFailed('PROGRESS_WATCHDOG_EVIDENCE_MISSING');
+              return;
+            }
+            const decision = JSON.parse(fs.readFileSync('progress-watchdog-output.json', 'utf8'));
+            if (decision.decision !== 'block') {
+              core.setFailed(`PROGRESS_WATCHDOG_INVALID_DECISION:${decision.decision || 'missing'}`);
+              return;
+            }
+            core.setFailed(`SELF_HOSTED_RUNNER_UNAVAILABLE:${decision.no_progress_seconds}s`);
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.TARGET_RUN_ID),
+            });
+
