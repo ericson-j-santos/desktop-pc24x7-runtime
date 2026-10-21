@@ -41,7 +41,7 @@ jobs:
   physical_readback:
     needs: contract
     name: Inspect fixed supervisor version on dedicated Desktop runner
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 7
     steps:
       - name: Checkout fixed Desktop source revision

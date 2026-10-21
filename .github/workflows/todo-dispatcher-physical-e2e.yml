@@ -22,7 +22,7 @@ concurrency:
 jobs:
   prepare_runner:
     name: Ensure dedicated Desktop runner labels
-    runs-on: [self-hosted, Windows, X64]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 6
     env:
       RULES_SHA: 5d1f603241dde37a597d2b7bdc5e07425db7b451
@@ -124,7 +124,7 @@ jobs:
   physical_e2e:
     needs: prepare_runner
     name: TODO dispatcher physical E2E on Desktop
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 8
     env:
       RULES_SHA: 5d1f603241dde37a597d2b7bdc5e07425db7b451

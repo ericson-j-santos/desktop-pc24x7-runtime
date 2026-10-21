@@ -15,11 +15,27 @@ m = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 
 
-def test_contract_is_fixed_and_separate_from_reqsys_runner() -> None:
+def test_contract_is_fixed_and_separate_from_reqsys_runner(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     assert m.REPOSITORY == "ericson-j-santos/desktop-pc24x7-runtime"
     assert m.RUNNER_NAME == "DESKTOP-PDQK954-runtime"
-    assert m.RUNNER_LABELS == "pc24x7,desktop-runtime,runtime-dev"
-    assert "Pc24x7GitHubRunner" not in str(m.default_runner_home())
+    assert m.RUNNER_LABELS == "pc24x7,desktop-runtime,runtime-dev,desktop-pdqk954"
+    expected = tmp_path / "DesktopPC24x7Runtime" / "GitHubRunner"
+    assert m.default_runner_home() == expected
+    assert m.default_runner_home() == expected
+    assert "Pc24x7GitHubRunner" not in str(expected)
+    assert not expected.exists()
+
+
+@pytest.mark.parametrize("localappdata", [None, ""])
+def test_missing_localappdata_fails_closed(monkeypatch, localappdata) -> None:
+    if localappdata is None:
+        monkeypatch.delenv("LOCALAPPDATA", raising=False)
+    else:
+        monkeypatch.setenv("LOCALAPPDATA", localappdata)
+    with pytest.raises(m.BootstrapError) as error:
+        m.default_runner_home()
+    assert error.value.state == "localappdata_missing"
 
 
 def test_local_auth_fallback_is_non_interactive_and_owner_bound() -> None:

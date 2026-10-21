@@ -182,3 +182,4 @@ def test_replay_produces_same_observation_receipt() -> None:
     second = observe(job())
     assert first == second
     assert len(first["writes"]) == 1
+

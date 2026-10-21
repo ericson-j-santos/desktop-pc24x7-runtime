@@ -1,0 +1,2 @@
+# Preserve the audited pre-change source bytes on Windows and Unix checkouts.
+tests/fixtures/pr71_admission_before_resume.cjs text eol=lf

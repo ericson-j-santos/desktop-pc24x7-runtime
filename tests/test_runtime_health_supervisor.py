@@ -82,7 +82,7 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
         encoding="utf-8"
     )
-    assert 'runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]' in workflow
+    assert 'runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]' in workflow
     assert "--require-runner-version-preflight" in workflow
     assert "steps.session.outputs.target_path" in workflow
     assert "scripts\\command_gateway.py" in workflow
@@ -91,6 +91,17 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "github.event.pull_request.head.sha || github.sha" in workflow
     assert workflow.count("shell: powershell") == 2
     assert "shell: pwsh" not in workflow
+
+
+def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
+    installer = (ROOT / "scripts" / "install_runtime_health_supervisor.py").read_text(
+        encoding="utf-8"
+    )
+    assert 'TASK_LEAF = "DesktopPc24x7RuntimeHealthSupervisor"' in installer
+    assert "definition.Triggers.Create(8)" in installer
+    assert 'trigger.Repetition.Interval = "PT1M"' in installer
+    assert "principal.LogonType = 2" in installer
+    assert "task_readback_failed" in installer
 
 
 def test_canary_draft_gate_and_queue_watchdog_are_fail_closed() -> None:
@@ -127,3 +138,11 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
     assert 'trigger.Repetition.Interval = "PT1M"' in installer
     assert "principal.LogonType = 2" in installer
     assert "task_readback_failed" in installer
+
+
+def test_canary_serialization_keeps_physical_jobs_exclusive() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(encoding="utf-8")
+    canary = workflow.split("  canary:\\n", 1)[1].split("\\n  queue_watchdog:", 1)[0]
+    assert "group: pc24x7-runtime-canary" in canary
+    assert "cancel-in-progress: false" in canary
+    assert "desktop-pdqk954" in canary

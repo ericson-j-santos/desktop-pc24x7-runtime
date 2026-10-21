@@ -273,8 +273,8 @@ def test_physical_workflow_requires_session_launcher_and_command_gateway() -> No
     assert "python scripts/engineering_worker_pool_smoke_dev.py" not in workflow
     assert "cancel-in-progress: true" in workflow
     assert "name: Ensure dedicated Desktop runner labels" in workflow
-    assert workflow.count("runs-on: [self-hosted, Windows, X64]") == 1
-    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev]" in workflow
+    assert "runs-on: [self-hosted, Windows, X64]" not in workflow
+    assert workflow.count("runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]") == 2
     assert 'if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954")' in workflow
     assert "DESKTOP_BOOTSTRAP_HOST_MISMATCH" in workflow
     assert "--non-interactive-auth" in workflow

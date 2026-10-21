@@ -47,7 +47,7 @@ def test_canary_persists_runner_version_contract() -> None:
 def test_canary_queue_is_bounded_fail_closed() -> None:
     raw = workflow_text()
     assert "name: Dedicated runner queue watchdog" in raw
-    assert 'STALL_AFTER_SECONDS: "60"' in raw
+    assert 'STALL_AFTER_SECONDS: "300"' in raw
     assert "progress_watchdog.py" in raw
     assert "actions: write" in raw
     assert "cancelWorkflowRun" in raw

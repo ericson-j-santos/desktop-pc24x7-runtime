@@ -67,6 +67,8 @@ def validate_message(
     event: dict[str, Any],
     *,
     max_age_seconds: int,
+    expected_comment_id: int,
+    requested_at: str,
     reference_time: datetime | None = None,
 ) -> dict[str, Any]:
     if event.get("event") != "message" or event.get("topic") != TOPIC:
@@ -101,6 +103,17 @@ def validate_message(
     comment_id = payload.get("comment_id")
     if not isinstance(comment_id, int) or comment_id <= 0:
         raise ProbeError("readback_comment_id_invalid")
+    if not isinstance(expected_comment_id, int) or expected_comment_id <= 0:
+        raise ProbeError("expected_comment_id_invalid")
+    if comment_id != expected_comment_id:
+        raise ProbeError("readback_comment_mismatch")
+
+    requested = _parse_iso(requested_at)
+    request_age = (reference - requested).total_seconds()
+    if request_age < -60 or request_age > 1800:
+        raise ProbeError("request_not_fresh")
+    if generated < requested:
+        raise ProbeError("readback_before_request")
 
     return {
         "schema_version": "1",
@@ -110,6 +123,8 @@ def validate_message(
         "host": EXPECTED_HOST,
         "source_sha": source_sha,
         "comment_id": comment_id,
+        "requested_at": requested.isoformat(),
+        "request_age_seconds": round(max(request_age, 0.0), 3),
         "action": str(payload.get("action") or "")[:80],
         "status": str(payload.get("status") or "unknown")[:40],
         "error_code": str(payload.get("error_code") or "")[:120],
@@ -159,7 +174,13 @@ def fetch_latest(timeout_seconds: float = 10.0) -> list[dict[str, Any]]:
     return events
 
 
-def probe(*, max_age_seconds: int, timeout_seconds: float = 10.0) -> dict[str, Any]:
+def probe(
+    *,
+    max_age_seconds: int,
+    expected_comment_id: int,
+    requested_at: str,
+    timeout_seconds: float = 10.0,
+) -> dict[str, Any]:
     if not 30 <= max_age_seconds <= 3600:
         raise ProbeError("max_age_seconds_out_of_range")
     events = fetch_latest(timeout_seconds)
@@ -169,7 +190,12 @@ def probe(*, max_age_seconds: int, timeout_seconds: float = 10.0) -> dict[str, A
     ]
     if not candidates:
         raise ProbeError("ntfy_message_missing")
-    return validate_message(candidates[-1], max_age_seconds=max_age_seconds)
+    return validate_message(
+        candidates[-1],
+        max_age_seconds=max_age_seconds,
+        expected_comment_id=expected_comment_id,
+        requested_at=requested_at,
+    )
 
 
 def write_evidence(path: Path, payload: dict[str, Any]) -> None:
@@ -185,10 +211,14 @@ def main() -> int:
     parser.add_argument("--evidence-file", type=Path, required=True)
     parser.add_argument("--max-age-seconds", type=int, default=900)
     parser.add_argument("--timeout-seconds", type=float, default=10.0)
+    parser.add_argument("--expected-comment-id", type=int, required=True)
+    parser.add_argument("--requested-at", required=True)
     args = parser.parse_args()
     try:
         evidence = probe(
             max_age_seconds=args.max_age_seconds,
+            expected_comment_id=args.expected_comment_id,
+            requested_at=args.requested_at,
             timeout_seconds=args.timeout_seconds,
         )
     except (ProbeError, UnicodeDecodeError, OSError, ValueError) as exc:
