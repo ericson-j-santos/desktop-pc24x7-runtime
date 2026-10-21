@@ -17,7 +17,7 @@ PHYSICAL_GATE = (
 PR_TYPES = "types: [opened, synchronize, reopened, ready_for_review]"
 
 PHYSICAL_WORKFLOWS = {
-    "runtime-canary.yml": 1,
+    "runtime-canary.yml": 2,
     "engineering-worker-pool-smoke-dev.yml": 3,
     "ollama-local-benchmark-dev.yml": 2,
     "portfolio-bridge-preflight-dev.yml": 4,
@@ -109,7 +109,7 @@ def test_hosted_matrix_rejects_affinity_missing_os_and_suppression(old, new) -> 
 # Keep the existing host lock, but acquire it only for admitted physical jobs.
 CANARY_JOB_LOCK = (
     "    concurrency:\n"
-    "      group: pc24x7-runtime-canary\n"
+    "      group: pc24x7-runtime-canary-${{ github.event.number || github.ref_name }}\n"
     "      cancel-in-progress: false\n"
 )
 
@@ -133,7 +133,9 @@ def test_canary_preserves_serialization_without_cancelling_active_jobs() -> None
     assert CANARY_JOB_LOCK in content
     assert "cancel-in-progress: true" not in content
     assert "  contents: read" in content
-    assert "actions: write" not in content
+    assert "actions: write" in content
+    canary = content.split("  canary:\\n", 1)[1].split("\\n  queue_watchdog:", 1)[0]
+    assert "actions: write" not in canary
     assert "    timeout-minutes: 4" in content
     assert "  schedule:\n    - cron: \"*/5 * * * *\"" in content
     assert "  workflow_dispatch:" in content
