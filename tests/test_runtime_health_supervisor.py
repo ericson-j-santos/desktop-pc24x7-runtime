@@ -140,9 +140,9 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
     assert "task_readback_failed" in installer
 
 
-def test_canary_serialization_keeps_physical_jobs_exclusive() -> None:
+
+def test_canary_queue_is_isolated_per_pr_without_cancelling_active_runs() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(encoding="utf-8")
-    canary = workflow.split("  canary:\\n", 1)[1].split("\\n  queue_watchdog:", 1)[0]
-    assert "group: pc24x7-runtime-canary" in canary
-    assert "cancel-in-progress: false" in canary
-    assert "desktop-pdqk954" in canary
+    assert "group: pc24x7-runtime-canary-${{ github.event.number || github.ref_name }}" in workflow
+    assert "cancel-in-progress: false" in workflow
+    assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow
