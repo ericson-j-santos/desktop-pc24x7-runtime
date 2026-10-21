@@ -154,7 +154,7 @@ def test_canary_lock_guard_rejects_regressions(fault: str) -> None:
     elif fault == "no-lock":
         content = content.replace(CANARY_JOB_LOCK, "", 1)
     elif fault == "renamed-lock":
-        content = content.replace("group: pc24x7-runtime-canary", "group: unshared", 1)
+        content = content.replace("pc24x7-runtime-canary-pr-{0}", "unshared-pr-{0}", 1)
     else:
         content = content.replace(PHYSICAL_GATE, "    if: true", 1)
     with pytest.raises(AssertionError):

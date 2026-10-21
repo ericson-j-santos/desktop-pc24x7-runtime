@@ -143,6 +143,6 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
 
 def test_canary_queue_is_isolated_per_pr_without_cancelling_active_runs() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(encoding="utf-8")
-    assert "group: pc24x7-runtime-canary-${{ github.event.number || github.ref_name }}" in workflow
+    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow
