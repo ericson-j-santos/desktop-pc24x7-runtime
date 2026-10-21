@@ -109,7 +109,7 @@ def test_hosted_matrix_rejects_affinity_missing_os_and_suppression(old, new) -> 
 # Keep the existing host lock, but acquire it only for admitted physical jobs.
 CANARY_JOB_LOCK = (
     "    concurrency:\n"
-    "      group: pc24x7-runtime-canary-${{ github.event.number || github.ref_name }}\n"
+    "      group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}\n"
     "      cancel-in-progress: false\n"
 )
 

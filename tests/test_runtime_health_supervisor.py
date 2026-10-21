@@ -109,7 +109,7 @@ def test_canary_draft_gate_and_queue_watchdog_are_fail_closed() -> None:
         encoding="utf-8"
     )
     assert "types: [opened, synchronize, reopened, ready_for_review]" in workflow
-    assert "group: pc24x7-runtime-canary-${{ github.event.number || github.ref_name }}" in workflow
+    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
     gate = (
         "github.event_name != 'pull_request' || "
         "(!github.event.pull_request.draft && "
