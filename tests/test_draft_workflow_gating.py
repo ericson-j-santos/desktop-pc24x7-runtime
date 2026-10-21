@@ -121,7 +121,8 @@ def assert_canary_lock_scope(content: str) -> None:
     assert PHYSICAL_GATE in jobs, "physical admission must remain fail-closed"
     assert CANARY_JOB_LOCK in jobs, "admitted jobs must keep the existing host lock"
     assert jobs.index(PHYSICAL_GATE) < jobs.index(CANARY_JOB_LOCK)
-    assert content.count("group: pc24x7-runtime-canary") == 1
+    assert content.count("format('pc24x7-runtime-canary-pr-{0}'") == 1
+    assert "|| 'pc24x7-runtime-canary'" in content
 
 
 def test_canary_skips_drafts_before_acquiring_host_lock() -> None:
