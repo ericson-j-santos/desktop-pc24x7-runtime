@@ -2,22 +2,77 @@ name: Dedicated Runtime Runner E2E
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnostic:
+        description: Fixed diagnostic only; never accepts commands or targets
+        type: choice
+        required: true
+        default: runner-identity
+        options: [runner-identity, native-postgres-inventory]
+      inventory_source_sha:
+        description: Full reviewed main SHA; required only for native inventory
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
 
 concurrency:
-  group: dedicated-runtime-runner-e2e-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ inputs.diagnostic == 'native-postgres-inventory' && format('native-pg-inventory-954-{0}', github.run_id) || format('dedicated-runtime-runner-e2e-{0}', github.ref) }}
+  cancel-in-progress: ${{ inputs.diagnostic != 'native-postgres-inventory' }}
 
 jobs:
   resolve_rules:
     name: Resolve canonical operational rules
     runs-on: windows-latest
     timeout-minutes: 2
+    permissions:
+      contents: read
+      actions: read
     outputs:
       rules_sha: ${{ steps.rules.outputs.sha }}
+      inventory_admitted_at: ${{ steps.inventory_admission.outputs.admitted_at }}
     steps:
+      - name: Admit fixed inventory from reviewed current main and successful native CI
+        id: inventory_admission
+        if: inputs.diagnostic == 'native-postgres-inventory'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          INVENTORY_SOURCE_SHA: ${{ inputs.inventory_source_sha }}
+        with:
+          script: |
+            if (context.eventName !== 'workflow_dispatch' || context.actor !== 'ericson-j-santos' ||
+                context.repo.owner !== 'ericson-j-santos' || context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                context.ref !== 'refs/heads/main' || process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                !/^[0-9a-f]{40}$/.test(process.env.INVENTORY_SOURCE_SHA || '') ||
+                process.env.INVENTORY_SOURCE_SHA !== context.sha) {
+              throw new Error('NATIVE_INVENTORY_SCOPE_REJECTED');
+            }
+            const {data: branch} = await github.rest.repos.getBranch({...context.repo, branch: 'main'});
+            if (branch.commit.sha !== context.sha) throw new Error('NATIVE_INVENTORY_MAIN_MOVED');
+            const {data: runs} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: context.sha,
+              branch: 'main', event: 'push', status: 'completed', per_page: 100,
+            });
+            const run = runs.workflow_runs.find(r => r.head_sha === context.sha &&
+              r.head_branch === 'main' && r.event === 'push' && r.conclusion === 'success' &&
+              r.repository.full_name === 'ericson-j-santos/desktop-pc24x7-runtime');
+            if (!run) throw new Error('NATIVE_INVENTORY_EXACT_SHA_CI_REQUIRED');
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo, run_id: run.id, filter: 'latest', per_page: 100,
+            });
+            if (jobs.total_count !== jobs.jobs.length) throw new Error('NATIVE_INVENTORY_CI_INCOMPLETE');
+            for (const name of ['Python compile and tests', 'Portable Linux compile and tests']) {
+              const job = jobs.jobs.find(j => j.name === name && j.status === 'completed' &&
+                j.conclusion === 'success' && j.runner_id > 0);
+              if (!job || !job.steps.some(s => s.name === 'Unit and negative-control tests' &&
+                    s.status === 'completed' && s.conclusion === 'success')) {
+                throw new Error('NATIVE_INVENTORY_REAL_CI_EVIDENCE_REQUIRED');
+              }
+            }
+            core.setOutput('admitted_at', new Date().toISOString());
+
       - name: Resolve main SHA and require rules 1.6.9+
         id: rules
         uses: actions/github-script@v7
@@ -60,8 +115,21 @@ jobs:
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
       CORRELATION_ID: dedicated-runner-${{ github.run_id }}-${{ github.run_attempt }}
-      EVIDENCE_REL: artifacts/dedicated-runner-e2e/evidence.json
+      EVIDENCE_REL: ${{ inputs.diagnostic == 'native-postgres-inventory' && 'artifacts/native-pg-inventory/evidence.json' || 'artifacts/dedicated-runner-e2e/evidence.json' }}
+      INVENTORY_ADMITTED_AT: ${{ needs.resolve_rules.outputs.inventory_admitted_at }}
     steps:
+      - name: Reject stale native pickup before checkout or bootstrap
+        if: inputs.diagnostic == 'native-postgres-inventory'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const age = Date.now() - Date.parse(process.env.INVENTORY_ADMITTED_AT || '');
+            if (!Number.isFinite(age) || age < 0 || age > 300000 ||
+                process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
+                require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954') {
+              throw new Error('NATIVE_INVENTORY_PICKUP_EXPIRED_OR_WRONG_HOST');
+            }
+
       - name: Checkout exact runtime SHA
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
@@ -119,6 +187,7 @@ jobs:
           "RUNNER_DEPRECATION_API_STATUS=$($data.runner_version_preflight.deprecation_api_status)" | Add-Content $env:GITHUB_ENV
 
       - name: Prove exact host, repository, runner and version through Command Gateway
+        if: inputs.diagnostic != 'native-postgres-inventory'
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
@@ -145,8 +214,36 @@ jobs:
           & python $gateway @gatewayArgs
           exit $LASTEXITCODE
 
+      - name: Read fixed native PostgreSQL metadata through Command Gateway
+        if: inputs.diagnostic == 'native-postgres-inventory'
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+          INVENTORY_SESSION_VALIDATED: 'true'
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\native_windows_pg_inventory.py"
+          $gatewayArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "1",
+            "--timeout", "60",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", "-B", $script
+          )
+          & python $gateway @gatewayArgs
+          exit $LASTEXITCODE
+
       - name: Upload sanitized evidence
-        if: always() && steps.session.outputs.target_path != ''
+        if: always() && inputs.diagnostic != 'native-postgres-inventory' && steps.session.outputs.target_path != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dedicated-runner-e2e-${{ github.run_id }}
@@ -237,8 +334,15 @@ jobs:
         shell: pwsh
         run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
 
+      - name: Report expired native pickup without cancellation
+        if: steps.watchdog.outcome == 'failure' && inputs.diagnostic == 'native-postgres-inventory'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            core.setFailed('NATIVE_INVENTORY_PICKUP_EXPIRED_NO_COLLECTION_ALLOWED');
+
       - name: Fail closed and cancel stalled canary
-        if: steps.watchdog.outcome == 'failure'
+        if: steps.watchdog.outcome == 'failure' && inputs.diagnostic != 'native-postgres-inventory'
         uses: actions/github-script@v7
         with:
           script: |
