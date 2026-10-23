@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ inputs.diagnostic == 'native-postgres-inventory' && 'native-pg-inventory-954' || format('dedicated-runtime-runner-e2e-{0}', github.ref) }}
+  group: ${{ inputs.diagnostic == 'native-postgres-inventory' && format('native-pg-inventory-954-{0}', github.run_id) || format('dedicated-runtime-runner-e2e-{0}', github.ref) }}
   cancel-in-progress: ${{ inputs.diagnostic != 'native-postgres-inventory' }}
 
 jobs:
@@ -34,7 +34,7 @@ jobs:
       rules_sha: ${{ steps.rules.outputs.sha }}
       inventory_admitted_at: ${{ steps.inventory_admission.outputs.admitted_at }}
     steps:
-      - name: Admit one fixed inventory from reviewed current main and successful native CI
+      - name: Admit fixed inventory from reviewed current main and successful native CI
         id: inventory_admission
         if: inputs.diagnostic == 'native-postgres-inventory'
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea

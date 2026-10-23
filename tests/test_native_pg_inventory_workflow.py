@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/dedicated-runtime-runner-e2e.yml"
-ADMISSION = "Admit one fixed inventory from reviewed current main and successful native CI"
+ADMISSION = "Admit fixed inventory from reviewed current main and successful native CI"
 PICKUP = "Reject stale native pickup before checkout or bootstrap"
 HARNESS = r"""
 const fs = require('node:fs');
@@ -16,9 +16,11 @@ const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const outputs = {};
 const sandbox = {
   context: input.context,
+  inputs: input.inputs,
+  format: (template, ...args) => template.replace(/\{(\d+)\}/g, (_, i) => args[Number(i)]),
   process: {env: input.env},
   core: {setOutput: (k, v) => {outputs[k] = v;}},
-  github: {rest: {
+  github: {run_id: input.run_id, ref: input.ref, rest: {
     repos: {getBranch: async () => ({data: {commit: {sha: input.main_sha}}})},
     actions: {
       listWorkflowRuns: async () => ({data: {workflow_runs: input.runs}}),
@@ -73,11 +75,11 @@ def fixture():
     }
 
 
-def execute(data, step=ADMISSION):
+def execute(data, step=ADMISSION, source=None):
     node = shutil.which("node")
     if not node:
         raise AssertionError("Node.js required; do not skip real admission contract tests")
-    data = {**data, "source": javascript_step(step)}
+    data = {**data, "source": javascript_step(step) if source is None else source}
     with tempfile.TemporaryDirectory(prefix="native-inventory-contract-") as folder:
         harness = Path(folder) / "harness.cjs"
         harness.write_text(HARNESS, encoding="utf-8")
@@ -174,11 +176,33 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
 
     def test_native_mode_cannot_cancel_other_work(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("'native-pg-inventory-954'", raw)
+        self.assertIn("format('native-pg-inventory-954-{0}', github.run_id)", raw)
         self.assertIn("cancel-in-progress: $" + "{{ inputs.diagnostic != 'native-postgres-inventory' }}", raw)
         cancel = raw.split("      - name: Fail closed and cancel stalled canary", 1)[1]
         self.assertIn("if: steps.watchdog.outcome == 'failure' && inputs.diagnostic != 'native-postgres-inventory'", cancel)
         self.assertIn("NATIVE_INVENTORY_PICKUP_EXPIRED_NO_COLLECTION_ALLOWED", raw)
+
+    def test_native_groups_are_unique_and_legacy_behavior_is_unchanged(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        block = raw.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+        group, cancel = [line.split(": ", 1)[1].strip()[3:-2].strip()
+                         for line in block.strip().splitlines()]
+        source = ("core.setOutput('group', (" + group + "));"
+                  "core.setOutput('cancel', (" + cancel + "));")
+        results = []
+        for run_id in ("100", "101"):
+            data = {**fixture(), "inputs": {"diagnostic": "native-postgres-inventory"},
+                    "run_id": run_id, "ref": "refs/heads/main"}
+            output = execute(data, source=source)
+            self.assertTrue(output["ok"])
+            self.assertIs(output["outputs"]["cancel"], False)
+            results.append(output["outputs"]["group"])
+        self.assertEqual(results, ["native-pg-inventory-954-100", "native-pg-inventory-954-101"])
+        data["inputs"]["diagnostic"] = "runner-identity"
+        output = execute(data, source=source)
+        self.assertEqual(output["outputs"]["group"],
+                         "dedicated-runtime-runner-e2e-refs/heads/main")
+        self.assertIs(output["outputs"]["cancel"], True)
 
     def test_same_input_replay_does_not_dispatch(self):
         first, second = execute(fixture()), execute(fixture())

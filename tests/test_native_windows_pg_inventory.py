@@ -220,13 +220,31 @@ class NativeInventoryTests(unittest.TestCase):
 
     def test_output_is_fixed_and_no_overwrite(self):
         with tempfile.TemporaryDirectory() as directory:
-            with patch.object(inventory.Path, "cwd", return_value=Path(directory)):
+            canonical = Path(directory).resolve()
+            with patch.object(inventory.Path, "cwd", return_value=canonical):
                 inventory.write_report(result())
-                file = Path(directory) / inventory.OUTPUT
+                file = canonical / inventory.OUTPUT
                 first = file.read_bytes()
                 with self.assertRaises(FileExistsError):
                     inventory.write_report(result())
                 self.assertEqual(file.read_bytes(), first)
+
+    def test_noncanonical_output_root_rejected_before_write(self):
+        with tempfile.TemporaryDirectory() as directory:
+            canonical = Path(directory).resolve()
+            noncanonical = canonical / "unused" / ".."
+            with patch.object(inventory.Path, "cwd", return_value=noncanonical):
+                with self.assertRaisesRegex(inventory.InventoryBlocked, "OUTPUT_ROOT_REJECTED"):
+                    inventory.write_report(result())
+            self.assertFalse((canonical / inventory.OUTPUT.parent).exists())
+
+    def test_tcp_scope_discloses_transient_metadata_without_emitting_owners(self):
+        scope = result()["scope"]
+        self.assertEqual(scope["tcp_snapshot"],
+                         "all_listeners_transient_then_candidate_port_filter")
+        self.assertIs(scope["tcp_owners_emitted"], False)
+        self.assertIs(scope["tcp_owners_resolved"], False)
+        self.assertNotIn("tcp_owners_collected", scope)
 
     def test_all_sections_are_required(self):
         data = result()
