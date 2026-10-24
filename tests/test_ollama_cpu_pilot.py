@@ -189,12 +189,18 @@ def test_invalid_inputs_and_endpoint_are_rejected():
         mod.http_json("/api/pull")
 
 
-def test_physical_workflow_is_only_manual_governed_and_bounded():
+def test_physical_workflow_is_explicitly_gated_governed_and_bounded():
     content = WORKFLOW.read_text(encoding="utf-8")
     trigger = content.split("\npermissions:", 1)[0]
     assert "  workflow_dispatch:" in trigger
     assert "\n  push:" not in trigger
-    assert "\n  pull_request:" not in trigger
+    assert "\n  pull_request:" in trigger
+    assert "types: [ready_for_review]" in trigger
+    assert "types: [opened" not in trigger
+    assert "types: [synchronize" not in trigger
+    assert "head.ref == 'feat/ollama-cpu-pilot-dev-20261024'" in content
+    assert "head.repo.full_name == github.repository" in content
+    assert "'inventory' || inputs.mode" in content
     assert "\n  schedule:" not in trigger
     assert "refs/heads/main" in content
     assert "self-hosted, Windows, X64, pc24x7" in content
