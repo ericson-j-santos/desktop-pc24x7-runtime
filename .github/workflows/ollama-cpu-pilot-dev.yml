@@ -110,7 +110,7 @@ jobs:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
           SESSION_ID: ${{ steps.session.outputs.session_id }}
           ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
-          PILOT_MODE: ${{ github.event_name == 'pull_request' && 'inventory' || inputs.mode }}
+          PILOT_MODE: ${{ github.event_name == 'pull_request' && 'smoke' || inputs.mode }}
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:PILOT_MODE -notin @("inventory", "smoke")) { throw "INVALID_PILOT_MODE" }
