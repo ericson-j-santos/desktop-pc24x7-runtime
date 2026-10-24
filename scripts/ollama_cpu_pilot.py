@@ -73,17 +73,37 @@ def smoke(model: dict[str, Any]) -> dict[str, Any]:
         "/api/generate",
         payload={
             "model": MODEL,
-            "prompt": f"Responda apenas com {SENTINEL}, sem explicacoes.",
+            "prompt": (
+                f"Retorne SOMENTE um objeto JSON com a chave sentinel e o valor {SENTINEL}. "
+                "Sem outras chaves, frases ou Markdown."
+            ),
+            "format": {
+                "type": "object",
+                "properties": {"sentinel": {"type": "string", "enum": [SENTINEL]}},
+                "required": ["sentinel"],
+                "additionalProperties": False,
+            },
             "stream": False,
             "keep_alive": "1m",
             "options": {"temperature": 0, "seed": 42, "num_ctx": CONTEXT_TOKENS, "num_predict": 32},
         },
         timeout=120,
     )
-    if (generated.get("model") != MODEL or generated.get("done") is not True
-            or not isinstance(generated.get("response"), str)
-            or generated["response"].strip() != SENTINEL):
-        raise PilotBlocked("inference_validation_failed")
+    if generated.get("model") != MODEL:
+        raise PilotBlocked("model_identity_mismatch")
+    if generated.get("done") is not True:
+        raise PilotBlocked("generation_incomplete")
+    raw_response = generated.get("response")
+    if not isinstance(raw_response, str) or len(raw_response) > 2048:
+        raise PilotBlocked("response_schema_invalid")
+    try:
+        parsed_response = json.loads(raw_response)
+    except ValueError:
+        raise PilotBlocked("response_json_invalid") from None
+    if (type(parsed_response) is not dict
+            or set(parsed_response) != {"sentinel"}
+            or parsed_response["sentinel"] != SENTINEL):
+        raise PilotBlocked("response_contract_mismatch")
     loaded = http_json("/api/ps").get("models")
     if not isinstance(loaded, list):
         raise PilotBlocked("loaded_models_invalid")
