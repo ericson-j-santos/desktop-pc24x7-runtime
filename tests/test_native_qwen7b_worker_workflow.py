@@ -13,19 +13,24 @@ def test_native_worker_runs_only_on_approved_dispatch_or_exact_pr_transition():
     t = workflow()
     trigger = t.split("\npermissions:", 1)[0]
     assert "  workflow_dispatch:" in trigger
-    assert "types: [ready_for_review]" in trigger
+    assert "types: [edited]" in trigger
     assert "branches: [main]" in trigger
     assert "\n  push:" not in trigger and "\n  schedule:" not in trigger
     assert "types: [synchronize]" not in trigger
+    assert "types: [ready_for_review]" not in trigger
     assert "head.repo.full_name == github.repository" in t
-    assert "head.ref == 'feat/native-qwen7b-worker-e2e-20261024'" in t
-    assert t.count("github.event.action == 'ready_for_review'") == 2
-    assert t.count("github.ref == 'refs/heads/main'") == 2
+    assert "head.ref == 'test/native-qwen7b-git-eol-one-shot-20261024'" in t
+    assert "github.event.pull_request.draft == true" in t
+    assert "github.actor == 'ericson-j-santos'" in t
+    assert t.count("github.event.action == 'edited'") == 1
+    assert t.count("github.ref == 'refs/heads/main'") == 1
+    assert "github.event.changes.body.from" in t
+    assert "NATIVE_QWEN_EOLOPS_20261024_7B_ONCE" in t
 
 
 def test_exact_source_rules_host_and_governed_gateway():
     t = workflow()
-    assert "WORKER_POOL_SHA: 3f992e68273eb516e9da175fb3efc5c0feb5348e" in t
+    assert "WORKER_POOL_SHA: 493c83519fc4e1ade94b860cce7b7b0ea18812a4" in t
     assert "RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661" in t
     assert "NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e" in t
     assert 'NATIVE_OLLAMA_DEV: "1"' in t
@@ -63,3 +68,17 @@ def test_fail_closed_watchdog_and_no_extra_execution():
     assert "docker exec" not in t.lower()
     assert "secrets." not in t
     assert "actions: write" in t  # watchdog only
+
+
+def test_admission_checks_exact_shas_and_executed_ci_before_physical_job():
+    t = workflow()
+    assert "  admission:" in t
+    assert "Native E2E immutable check admission" in t
+    assert t.count("needs: admission") == 2
+    assert t.count("if: needs.admission.result == 'success'") == 2
+    assert "github.rest.checks.listForRef" in t
+    assert "PR_CURRENT_STATE_CHANGED" in t
+    assert "PR_MAIN_SHA_CHANGED" in t
+    assert "WORKER_REQUIRED_CHECK_NOT_EXECUTED_" in t
+    assert "DESKTOP_REQUIRED_CHECK_NOT_EXECUTED_" in t
+    assert "x.status === 'completed' && x.conclusion === 'success'" in t
