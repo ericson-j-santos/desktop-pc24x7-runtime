@@ -1,6 +1,13 @@
 name: Ollama CPU Pilot DEV (manual)
 
 on:
+  pull_request:
+    types: [ready_for_review]
+    branches: [main]
+    paths:
+      - .github/workflows/ollama-cpu-pilot-dev.yml
+      - scripts/ollama_cpu_pilot.py
+      - tests/test_ollama_cpu_pilot.py
   workflow_dispatch:
     inputs:
       mode:
@@ -21,7 +28,12 @@ concurrency:
 
 jobs:
   pilot:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
+       github.event.pull_request.draft == false)
     name: Read-only local Ollama CPU pilot
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 5
@@ -41,7 +53,7 @@ jobs:
       - name: Checkout pilot exact reviewed SHA
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 1
           persist-credentials: false
 
@@ -98,7 +110,7 @@ jobs:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
           SESSION_ID: ${{ steps.session.outputs.session_id }}
           ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
-          PILOT_MODE: ${{ inputs.mode }}
+          PILOT_MODE: ${{ github.event_name == 'pull_request' && 'inventory' || inputs.mode }}
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:PILOT_MODE -notin @("inventory", "smoke")) { throw "INVALID_PILOT_MODE" }
@@ -123,7 +135,12 @@ jobs:
           exit $LASTEXITCODE
 
   physical_runner_watchdog:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
+       github.event.pull_request.draft == false)
     name: Physical runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2
