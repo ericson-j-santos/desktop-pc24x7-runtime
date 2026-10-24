@@ -24,6 +24,7 @@ def test_one_shot_dispatcher_is_exact_main_ci_gated_and_fixed_scope():
     assert "workflow_id: 'dedicated-runtime-runner-e2e.yml'" in raw
     assert "diagnostic: 'native-postgres-inventory'" in raw
     assert "inventory_source_sha: headSha" in raw
+    assert "inventory_dispatch_provenance: 'one-shot:20261024-pdqk954'" in raw
 
 
 def test_one_shot_dispatcher_is_bounded_and_duplicate_safe():

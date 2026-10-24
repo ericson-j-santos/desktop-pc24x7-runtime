@@ -14,6 +14,11 @@ on:
         type: string
         required: false
         default: ''
+      inventory_dispatch_provenance:
+        description: Fixed one-shot provenance; empty for owner dispatches
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -40,9 +45,15 @@ jobs:
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         env:
           INVENTORY_SOURCE_SHA: ${{ inputs.inventory_source_sha }}
+          INVENTORY_DISPATCH_PROVENANCE: ${{ inputs.inventory_dispatch_provenance }}
         with:
           script: |
-            if (context.eventName !== 'workflow_dispatch' || context.actor !== 'ericson-j-santos' ||
+            const ownerDispatch = context.actor === 'ericson-j-santos' &&
+              !process.env.INVENTORY_DISPATCH_PROVENANCE;
+            const authorizedOneShot = context.actor === 'github-actions[bot]' &&
+              process.env.INVENTORY_DISPATCH_PROVENANCE === 'one-shot:20261024-pdqk954';
+            if (context.eventName !== 'workflow_dispatch' ||
+                (!ownerDispatch && !authorizedOneShot) ||
                 context.repo.owner !== 'ericson-j-santos' || context.repo.repo !== 'desktop-pc24x7-runtime' ||
                 context.ref !== 'refs/heads/main' || process.env.GITHUB_RUN_ATTEMPT !== '1' ||
                 !/^[0-9a-f]{40}$/.test(process.env.INVENTORY_SOURCE_SHA || '') ||
