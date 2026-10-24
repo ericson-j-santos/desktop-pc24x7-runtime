@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 WORKFLOW = Path(__file__).parents[1] / ".github/workflows/dedicated-runtime-runner-e2e.yml"
@@ -17,6 +18,7 @@ const outputs = {};
 const sandbox = {
   context: input.context,
   inputs: input.inputs,
+  fromJSON: JSON.parse,
   format: (template, ...args) => template.replace(/\{(\d+)\}/g, (_, i) => args[Number(i)]),
   process: {env: input.env},
   core: {setOutput: (k, v) => {outputs[k] = v;}},
@@ -31,7 +33,9 @@ const sandbox = {
     if (name !== 'os') throw new Error('MODULE_FORBIDDEN');
     return {hostname: () => input.host};
   },
-  Date,
+  Date: class extends Date {
+    static now() { return input.now_ms === undefined ? Date.now() : input.now_ms; }
+  },
 };
 (async () => {
   try {
@@ -74,6 +78,15 @@ def fixture():
         ]},
     }
 
+
+
+def pickup_fixture(age_ms=0):
+    data = fixture()
+    data["now_ms"] = 1_800_000_000_000
+    data["env"]["INVENTORY_ADMITTED_AT"] = datetime.fromtimestamp(
+        (data["now_ms"] - age_ms) / 1000, timezone.utc,
+    ).isoformat()
+    return data
 
 def execute(data, step=ADMISSION, source=None):
     node = shutil.which("node")
@@ -216,6 +229,69 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         self.assertIn("artifacts/native-pg-inventory/evidence.json", raw)
         upload = raw.split("      - name: Upload sanitized evidence", 1)[1].split("  queue_watchdog:", 1)[0]
         self.assertIn("if: always() && inputs.diagnostic != 'native-postgres-inventory'", upload)
+
+    def test_native_routing_matches_existing_dedicated_labels_only(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        job = raw.split("\n  e2e:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
+        line = next(line.strip() for line in job.splitlines()
+                    if line.strip().startswith("runs-on:"))
+        expression = line.split(": ", 1)[1][3:-2].strip()
+        data = {**fixture(), "inputs": {"diagnostic": "native-postgres-inventory"}}
+        output = execute(data, source="core.setOutput('labels', (" + expression + "));")
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["outputs"]["labels"],
+                         ["self-hosted", "Windows", "X64", "pc24x7",
+                          "desktop-runtime", "runtime-dev"])
+
+    def test_non_native_routing_preserves_all_legacy_labels(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        job = raw.split("\n  e2e:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
+        line = next(line.strip() for line in job.splitlines()
+                    if line.strip().startswith("runs-on:"))
+        expression = line.split(": ", 1)[1][3:-2].strip()
+        for mode in ("runner-identity", "", "unexpected-mode"):
+            data = {**fixture(), "inputs": {"diagnostic": mode}}
+            output = execute(data, source="core.setOutput('labels', (" + expression + "));")
+            self.assertTrue(output["ok"])
+            self.assertEqual(output["outputs"]["labels"],
+                             ["self-hosted", "Windows", "X64", "pc24x7",
+                              "desktop-runtime", "runtime-dev", "desktop-pdqk954"])
+
+    def test_fresh_exact_native_runner_and_host_pass_pickup_guard(self):
+        self.assertTrue(execute(pickup_fixture(), PICKUP)["ok"])
+
+    def test_wrong_runner_or_host_rejected_before_checkout(self):
+        for runner, host in (("other-runtime", "DESKTOP-PDQK954"),
+                             ("DESKTOP-PDQK954-runtime", "OTHER-HOST")):
+            data = pickup_fixture()
+            data["env"]["RUNNER_NAME"] = runner
+            data["host"] = host
+            self.assertFalse(execute(data, PICKUP)["ok"])
+
+    def test_missing_invalid_or_future_pickup_time_rejected(self):
+        future = pickup_fixture(age_ms=-1)["env"]["INVENTORY_ADMITTED_AT"]
+        for admitted_at in ("", "invalid-time", future):
+            data = pickup_fixture()
+            data["env"]["INVENTORY_ADMITTED_AT"] = admitted_at
+            self.assertFalse(execute(data, PICKUP)["ok"])
+
+    def test_pickup_ttl_boundary_is_not_relaxed(self):
+        self.assertTrue(execute(pickup_fixture(age_ms=300_000), PICKUP)["ok"])
+        self.assertFalse(execute(pickup_fixture(age_ms=300_001), PICKUP)["ok"])
+
+    def test_identity_guard_is_first_native_step_and_cannot_be_ignored(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        job = raw.split("\n  e2e:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
+        steps = job.split("    steps:\n", 1)[1]
+        self.assertTrue(steps.startswith("      - name: " + PICKUP + "\n"))
+        guard = steps.split("\n      - name:", 1)[0]
+        self.assertIn("if: inputs.diagnostic == 'native-postgres-inventory'", guard)
+        self.assertNotIn("continue-on-error", guard)
+        self.assertIn("process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime'", guard)
+        self.assertIn("hostname().toUpperCase() !== 'DESKTOP-PDQK954'", guard)
+        self.assertIn("age > 300000", guard)
+        self.assertNotIn("permissions:", job)
+        self.assertNotIn("listSelfHostedRunners", raw)
 
 
 if __name__ == "__main__":
