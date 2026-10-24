@@ -2,7 +2,7 @@ name: Native Qwen7B Worker Real Code E2E DEV
 
 on:
   pull_request:
-    types: [ready_for_review]
+    types: [edited]
     branches: [main]
     paths:
       - .github/workflows/native-qwen7b-worker-e2e-dev.yml
@@ -17,18 +17,87 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  native_e2e:
+  admission:
     if: >-
       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
+      (github.event_name == 'pull_request' && github.event.action == 'edited' &&
+       github.actor == 'ericson-j-santos' &&
        github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.head.ref == 'feat/native-qwen7b-worker-e2e-20261024' &&
-       github.event.pull_request.draft == false)
+       github.event.pull_request.head.ref == 'test/native-qwen7b-git-eol-one-shot-20261024' &&
+       github.event.pull_request.draft == true &&
+       contains(github.event.pull_request.body, 'NATIVE_QWEN_EOLOPS_20261024_7B_ONCE') &&
+       !contains(github.event.changes.body.from, 'NATIVE_QWEN_EOLOPS_20261024_7B_ONCE'))
+    name: Native E2E immutable check admission
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: read
+    env:
+      WORKER_POOL_SHA: 493c83519fc4e1ade94b860cce7b7b0ea18812a4
+    steps:
+      - name: Assert exact reviewed SHAs and real CI jobs
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expectedWorkerSha = process.env.WORKER_POOL_SHA;
+            if (!/^[0-9a-f]{40}$/.test(expectedWorkerSha)) {
+              core.setFailed('WORKER_SHA_INVALID');
+              return;
+            }
+            const expectedDesktopSha = context.payload.pull_request?.head?.sha || context.sha;
+            const observedPr = context.payload.pull_request
+              ? (await github.rest.pulls.get({owner: context.repo.owner, repo: context.repo.repo, pull_number: context.payload.pull_request.number})).data
+              : null;
+            if (observedPr &&
+                (observedPr.state !== 'open' || !observedPr.draft ||
+                 observedPr.head.sha !== expectedDesktopSha ||
+                 observedPr.head.ref !== 'test/native-qwen7b-git-eol-one-shot-20261024')) {
+              core.setFailed('PR_CURRENT_STATE_CHANGED');
+              return;
+            }
+            const currentMain = await github.rest.repos.getBranch({
+              owner: context.repo.owner, repo: context.repo.repo, branch: 'main'
+            });
+            if (observedPr && currentMain.data.commit.sha !== observedPr.base.sha) {
+              core.setFailed('PR_MAIN_SHA_CHANGED');
+              return;
+            }
+            const [wp,desktop] = await Promise.all([
+              github.rest.checks.listForRef({owner:'ericson-j-santos', repo:'engineering-worker-pool', ref:expectedWorkerSha, per_page:100}),
+              github.rest.checks.listForRef({owner:context.repo.owner, repo:context.repo.repo, ref:expectedDesktopSha, per_page:100})
+            ]);
+            function hasPassingExecutedCheck(records, exactName, sha) {
+              return records.data.check_runs.some(x =>
+                x.name === exactName && x.head_sha === sha &&
+                x.status === 'completed' && x.conclusion === 'success' &&
+                x.started_at && x.completed_at && x.external_id !== 'SKIPPED'
+              );
+            }
+            for (const name of ['test', 'native-contract']) {
+              if (!hasPassingExecutedCheck(wp, name, expectedWorkerSha)) {
+                core.setFailed('WORKER_REQUIRED_CHECK_NOT_EXECUTED_' + name);
+                return;
+              }
+            }
+            for (const name of ['Python compile and tests', 'Portable Linux compile and tests']) {
+              if (!hasPassingExecutedCheck(desktop, name, expectedDesktopSha)) {
+                core.setFailed('DESKTOP_REQUIRED_CHECK_NOT_EXECUTED_' + name);
+                return;
+              }
+            }
+            core.info('NATIVE_E2E_GATES_VERIFIED desktop=' + expectedDesktopSha +
+                      ' worker=' + expectedWorkerSha);
+
+  native_e2e:
+    needs: admission
+    if: needs.admission.result == 'success'
     name: Native Qwen 7B code repair E2E on Desktop
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 11
     env:
-      WORKER_POOL_SHA: 3f992e68273eb516e9da175fb3efc5c0feb5348e
+      WORKER_POOL_SHA: 493c83519fc4e1ade94b860cce7b7b0ea18812a4
       RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661
       NATIVE_OLLAMA_DEV: "1"
       NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e
@@ -129,12 +198,8 @@ jobs:
           exit $LASTEXITCODE
 
   physical_runner_watchdog:
-    if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.head.ref == 'feat/native-qwen7b-worker-e2e-20261024' &&
-       github.event.pull_request.draft == false)
+    needs: admission
+    if: needs.admission.result == 'success'
     name: Physical runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2
