@@ -37,7 +37,7 @@ jobs:
 
     steps:
       - name: Assert authorized Desktop
-        shell: pwsh
+        shell: powershell
         run: |
           if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") { throw "WRONG_NATIVE_HOST" }
 
@@ -76,7 +76,7 @@ jobs:
 
       - name: Governed session bootstrap
         id: session
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = "Stop"
           $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
@@ -101,7 +101,7 @@ jobs:
           "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
 
       - name: Governed native Ollama real-source repair and independent readback
-        shell: pwsh
+        shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
           SESSION_ID: ${{ steps.session.outputs.session_id }}
