@@ -27,7 +27,10 @@ class FakeMetadata:
         return [{"major": 10, "minor": 0, "build": 22631}]
 
     def wsl(self):
-        return [{"alias": "distro-1", "wsl_version": 2, "state": "unknown"}]
+        return [{"alias": "distro-1", "wsl_version": 2,
+                 "distribution_family": "ubuntu", "is_default": True,
+                 "storage_volume_alias": "fixed-volume-1",
+                 "eligible_for_native_probe": True, "state": "unknown"}]
 
     def pg_services(self):
         return [{"alias": "pg-service-1", "state": "stopped"}]
@@ -36,18 +39,21 @@ class FakeMetadata:
         return [{"layout_major": 18, "component": "postgres", "file_version": "18.0.0.0"}]
 
     def fixed_disks(self):
-        return [{"alias": "fixed-volume-1", "size_gib_floor": 100, "available_gib_floor": 20}]
+        return [{"alias": "fixed-volume-1", "size_gib_floor": 100,
+                 "available_gib_floor": 20, "backup_capacity_candidate": True}]
 
     def tcp(self):
-        return [{"port": 5432, "family": "ipv4", "bind": "loopback"}]
+        return [{"port": 5432, "family": "ipv4", "bind": "loopback",
+                 "owner_category": "native_postgres"}]
 
 
 def result(factory=FakeMetadata, env=None, host=inventory.EXPECTED_HOST, platform="win32"):
     return inventory.report(env or valid_env(), host, platform, factory)
 
 
-def ipv4_row(port=5432, address=b"\x7f\x00\x00\x01", state=2):
-    return struct.pack("<I", state) + address + port.to_bytes(2, "big") + b"\0\0" + bytes(12)
+def ipv4_row(port=5432, address=b"\x7f\x00\x00\x01", state=2, pid=123):
+    return (struct.pack("<I", state) + address + port.to_bytes(2, "big") + b"\0\0" +
+            bytes(8) + struct.pack("<I", pid))
 
 
 def ipv6_row(port=5432, address=bytes(15) + b"\1", state=2):
@@ -141,7 +147,10 @@ class NativeInventoryTests(unittest.TestCase):
     def test_private_name_cannot_replace_alias(self):
         class Name(FakeMetadata):
             def wsl(self):
-                return [{"alias": "private-name", "wsl_version": 2, "state": "unknown"}]
+                return [{"alias": "private-name", "wsl_version": 2,
+                         "distribution_family": "ubuntu", "is_default": True,
+                         "storage_volume_alias": "fixed-volume-1",
+                         "eligible_for_native_probe": True, "state": "unknown"}]
         with self.assertRaises(inventory.InventoryBlocked):
             result(Name)
 
@@ -155,7 +164,10 @@ class NativeInventoryTests(unittest.TestCase):
     def test_boolean_cannot_fake_version(self):
         class Wrong(FakeMetadata):
             def wsl(self):
-                return [{"alias": "distro-1", "wsl_version": True, "state": "unknown"}]
+                return [{"alias": "distro-1", "wsl_version": True,
+                         "distribution_family": "ubuntu", "is_default": True,
+                         "storage_volume_alias": "fixed-volume-1",
+                         "eligible_for_native_probe": True, "state": "unknown"}]
         with self.assertRaises(inventory.InventoryBlocked):
             result(Wrong)
 
@@ -172,11 +184,13 @@ class NativeInventoryTests(unittest.TestCase):
 
     def test_ipv4_loopback(self):
         rows = inventory.parse_tcp_table(struct.pack("<I", 1) + ipv4_row(), 2)
-        self.assertEqual(rows, [{"port": 5432, "family": "ipv4", "bind": "loopback"}])
+        self.assertEqual(rows, [{"port": 5432, "family": "ipv4", "bind": "loopback",
+                                 "owner_category": "unresolved"}])
 
     def test_ipv6_loopback(self):
         rows = inventory.parse_tcp_table(struct.pack("<I", 1) + ipv6_row(), 23)
-        self.assertEqual(rows, [{"port": 5432, "family": "ipv6", "bind": "loopback"}])
+        self.assertEqual(rows, [{"port": 5432, "family": "ipv6", "bind": "loopback",
+                                 "owner_category": "unresolved"}])
 
     def test_wildcard_and_other_bind(self):
         self.assertEqual(inventory.bind_class(bytes(4)), "wildcard")
@@ -238,13 +252,31 @@ class NativeInventoryTests(unittest.TestCase):
                     inventory.write_report(result())
             self.assertFalse((canonical / inventory.OUTPUT.parent).exists())
 
-    def test_tcp_scope_discloses_transient_metadata_without_emitting_owners(self):
+    def test_tcp_scope_discloses_only_categorized_owner_metadata(self):
         scope = result()["scope"]
         self.assertEqual(scope["tcp_snapshot"],
                          "all_listeners_transient_then_candidate_port_filter")
-        self.assertIs(scope["tcp_owners_emitted"], False)
-        self.assertIs(scope["tcp_owners_resolved"], False)
-        self.assertNotIn("tcp_owners_collected", scope)
+        self.assertIs(scope["tcp_owner_categories_emitted"], True)
+        self.assertIs(scope["raw_process_identity_emitted"], False)
+
+    def test_process_and_distro_categories_are_closed(self):
+        self.assertEqual(inventory.process_category(r"C:\\Program Files\\PostgreSQL\\postgres.exe"),
+                         "native_postgres")
+        self.assertEqual(inventory.process_category(r"C:\\Windows\\System32\\wslhost.exe"), "wsl")
+        self.assertEqual(inventory.process_category(r"C:\\unknown\\service.exe"), "other")
+        self.assertEqual(inventory.distro_family("Ubuntu-24.04"), "ubuntu")
+        self.assertEqual(inventory.distro_family("Debian"), "debian")
+
+    def test_pid_is_used_only_for_classification_and_not_emitted(self):
+        rows = inventory.parse_tcp_table(struct.pack("<I", 1) + ipv4_row(pid=456), 2,
+                                         lambda pid: "docker" if pid == 456 else "other")
+        self.assertEqual(rows[0]["owner_category"], "docker")
+        self.assertNotIn("pid", rows[0])
+
+    def test_backup_mapping_is_capacity_only_and_unselected(self):
+        data = result()
+        self.assertTrue(data["sections"]["fixed_disks"]["items"][0]["backup_capacity_candidate"])
+        self.assertFalse(data["backup_destination_selected"])
 
     def test_all_sections_are_required(self):
         data = result()

@@ -25,6 +25,9 @@ OUTPUT = Path("artifacts/native-pg-inventory/evidence.json")
 PORTS = (5432, 8000, 15432, 18210)
 MAJORS = tuple(range(10, 19))
 COMPONENTS = ("postgres", "pg_ctl", "psql")
+OWNER_CATEGORIES = ("native_postgres", "wsl", "docker", "system", "other", "unresolved")
+DISTRO_FAMILIES = ("ubuntu", "debian", "other", "unknown")
+MIN_BACKUP_GIB = 10
 MAX_ROWS = 4096
 MAX_BYTES = 1024 * 1024
 SHA = re.compile(r"[0-9a-f]{40}")
@@ -92,7 +95,27 @@ def bind_class(address: bytes) -> str:
     return "other"
 
 
-def parse_tcp_table(raw: bytes, family: int) -> list[dict]:
+def process_category(image_name: str) -> str:
+    name = image_name.rsplit("\\", 1)[-1].casefold()
+    if name == "postgres.exe":
+        return "native_postgres"
+    if (name.startswith("wsl") and name.endswith(".exe")) or name in {"vmmem", "vmmemwsl"}:
+        return "wsl"
+    if name in {"com.docker.backend.exe", "dockerd.exe", "docker-proxy.exe"}:
+        return "docker"
+    return "other"
+
+
+def distro_family(name: str) -> str:
+    normalized = name.casefold()
+    if "ubuntu" in normalized:
+        return "ubuntu"
+    if "debian" in normalized:
+        return "debian"
+    return "other" if normalized else "unknown"
+
+
+def parse_tcp_table(raw: bytes, family: int, classify_pid=None) -> list[dict]:
     # Windows DWORD is always 32-bit, including 64-bit Windows.
     if family not in (2, 23) or len(raw) < 4 or len(raw) > MAX_BYTES:
         raise InventoryBlocked("INVALID_TCP_TABLE")
@@ -106,13 +129,19 @@ def parse_tcp_table(raw: bytes, family: int) -> list[dict]:
         if family == 2:
             state = struct.unpack_from("<I", row)[0]
             address, port_bytes = row[4:8], row[8:10]
+            pid = struct.unpack_from("<I", row, 20)[0]
         else:
             state = struct.unpack_from("<I", row, 48)[0]
             address, port_bytes = row[:16], row[20:22]
+            pid = struct.unpack_from("<I", row, 52)[0]
         port = int.from_bytes(port_bytes, "big")
         if state == 2 and port in PORTS:
-            found.add((port, "ipv4" if family == 2 else "ipv6", bind_class(address)))
-    return [{"port": p, "family": f, "bind": b} for p, f, b in sorted(found)]
+            owner = classify_pid(pid) if classify_pid else "unresolved"
+            if owner not in OWNER_CATEGORIES:
+                raise InventoryBlocked("INVALID_PROCESS_CATEGORY")
+            found.add((port, "ipv4" if family == 2 else "ipv6", bind_class(address), owner))
+    return [{"port": p, "family": f, "bind": b, "owner_category": o}
+            for p, f, b, o in sorted(found)]
 
 
 def safe_section(call):
@@ -164,6 +193,14 @@ class WindowsMetadata:
             keys = self.keys(reg.HKEY_CURRENT_USER, base, 64)
         except FileNotFoundError:
             return []
+        try:
+            with reg.OpenKey(reg.HKEY_CURRENT_USER, base, 0, reg.KEY_READ) as root:
+                default_key, default_kind = reg.QueryValueEx(root, "DefaultDistribution")
+        except FileNotFoundError:
+            default_key, default_kind = "", None
+        if default_kind not in (None, reg.REG_SZ) or not isinstance(default_key, str):
+            raise InventoryBlocked("WSL_REGISTRY_INVALID")
+        volume_aliases = {root.casefold(): alias for root, alias, _, _ in self.fixed_volumes()}
         result = []
         for key in keys:
             with reg.OpenKey(reg.HKEY_CURRENT_USER, base + "\\" + key, 0, reg.KEY_READ) as child:
@@ -171,8 +208,26 @@ class WindowsMetadata:
                     number, _ = reg.QueryValueEx(child, "Version")
                 except FileNotFoundError:
                     number = None
+                try:
+                    name, name_kind = reg.QueryValueEx(child, "DistributionName")
+                except FileNotFoundError:
+                    name, name_kind = "", None
+                try:
+                    location, location_kind = reg.QueryValueEx(child, "BasePath")
+                except FileNotFoundError:
+                    location, location_kind = "", None
+            if name_kind not in (None, reg.REG_SZ) or not isinstance(name, str) or len(name) > 256:
+                raise InventoryBlocked("WSL_REGISTRY_INVALID")
+            if location_kind not in (None, reg.REG_SZ) or not isinstance(location, str) or len(location) > 32768:
+                raise InventoryBlocked("WSL_REGISTRY_INVALID")
+            drive_root = location[:3].casefold() if re.match(r"^[A-Za-z]:\\", location) else ""
+            family = distro_family(name)
             result.append({"alias": "distro-" + str(len(result) + 1),
                            "wsl_version": number if type(number) is int and number in (1, 2) else None,
+                           "distribution_family": family,
+                           "is_default": key.casefold() == default_key.casefold(),
+                           "storage_volume_alias": volume_aliases.get(drive_root, "unknown"),
+                           "eligible_for_native_probe": number == 2 and family in ("ubuntu", "debian"),
                            "state": "unknown"})
         return result
 
@@ -269,7 +324,7 @@ class WindowsMetadata:
                 result.append({"layout_major": major, "component": component, "file_version": version})
         return result
 
-    def fixed_disks(self):
+    def fixed_volumes(self):
         drives = self.fn(self.kernel, "GetLogicalDrives", ctypes.c_uint32, [])()
         if drives == 0:
             raise ctypes.WinError(ctypes.get_last_error())
@@ -287,10 +342,36 @@ class WindowsMetadata:
             available, total, unused = ctypes.c_uint64(), ctypes.c_uint64(), ctypes.c_uint64()
             if not free(root, ctypes.byref(available), ctypes.byref(total), ctypes.byref(unused)):
                 raise ctypes.WinError(ctypes.get_last_error())
-            result.append({"alias": "fixed-volume-" + str(len(result) + 1),
-                           "size_gib_floor": total.value // 2**30,
-                           "available_gib_floor": available.value // 2**30})
+            result.append((root, "fixed-volume-" + str(len(result) + 1),
+                           total.value // 2**30, available.value // 2**30))
         return result
+
+    def fixed_disks(self):
+        return [{"alias": alias, "size_gib_floor": total,
+                 "available_gib_floor": available,
+                 "backup_capacity_candidate": available >= MIN_BACKUP_GIB}
+                for _, alias, total, available in self.fixed_volumes()]
+
+    def classify_pid(self, pid):
+        if pid == 4:
+            return "system"
+        open_process = self.fn(self.kernel, "OpenProcess", ctypes.c_void_p,
+                               [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32])
+        query_name = self.fn(self.kernel, "QueryFullProcessImageNameW", ctypes.c_int,
+                             [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_wchar_p,
+                              ctypes.POINTER(ctypes.c_uint32)])
+        close = self.fn(self.kernel, "CloseHandle", ctypes.c_int, [ctypes.c_void_p])
+        handle = open_process(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return "unresolved"
+        try:
+            capacity = ctypes.c_uint32(32768)
+            image = ctypes.create_unicode_buffer(capacity.value)
+            if not query_name(handle, 0, image, ctypes.byref(capacity)):
+                return "unresolved"
+            return process_category(image.value)
+        finally:
+            close(handle)
 
     def tcp(self):
         query = self.fn(self.iphelper, "GetExtendedTcpTable", ctypes.c_uint32,
@@ -307,7 +388,7 @@ class WindowsMetadata:
             # Concurrent growth is unavailable, not an unbounded retry or empty list.
             if code != 0 or size.value > len(data):
                 raise InventoryBlocked("TCP_QUERY_FAILED")
-            result.extend(parse_tcp_table(data.raw[:size.value], family))
+            result.extend(parse_tcp_table(data.raw[:size.value], family, self.classify_pid))
         return result
 
 
@@ -318,7 +399,7 @@ def report(env, host, platform, backend_factory=WindowsMetadata):
                 (("os", "os_version"), ("wsl", "wsl"), ("pg_services", "pg_services"),
                  ("pg_binaries", "pg_binaries"), ("fixed_disks", "fixed_disks"),
                  ("candidate_tcp_listeners", "tcp"))}
-    result = {"contract": "native-pg-inventory-v1", **identity,
+    result = {"contract": "native-pg-inventory-v2", **identity,
               "status": "measured" if all(s["status"] == "measured" for s in sections.values()) else "partial",
               "sections": sections,
               "scope": {"wsl": "current_runner_hkcu_only",
@@ -326,13 +407,17 @@ def report(env, host, platform, backend_factory=WindowsMetadata):
                         "binaries": "program_files_postgresql_10_through_18_only",
                         "tcp_ports": list(PORTS),
                         "tcp_snapshot": "all_listeners_transient_then_candidate_port_filter",
-                        "tcp_owners_emitted": False, "tcp_owners_resolved": False},
+                        "tcp_owner_categories_emitted": True,
+                        "raw_process_identity_emitted": False,
+                        "wsl_raw_identity_emitted": False,
+                        "backup_candidate_minimum_gib": MIN_BACKUP_GIB},
               "linux_started": False, "database_connected": False,
               "database_contents_read": False, "application_environment_read": False,
               "credentials_read": False, "configuration_changed": False,
               "systemd_verified": False, "storage_durability_verified": False,
               "backup_restore_verified": False, "restart_verified": False,
-              "database_target_qualified": False, "ready_for_installation": False}
+              "database_target_qualified": False, "backup_destination_selected": False,
+              "ready_for_installation": False}
     validate_report(result)
     return result
 
@@ -345,21 +430,26 @@ def validate_report(value):
         "database_connected", "database_contents_read", "application_environment_read",
         "credentials_read", "configuration_changed", "systemd_verified",
         "storage_durability_verified", "backup_restore_verified", "restart_verified",
-        "database_target_qualified", "ready_for_installation",
+        "database_target_qualified", "backup_destination_selected", "ready_for_installation",
     }
     if not isinstance(value, dict) or set(value) != expected_keys:
         raise InventoryBlocked("REPORT_SCHEMA_REJECTED")
     sections = value["sections"]
     schemas = {
         "os": {"major": (0, 100), "minor": (0, 100), "build": (0, 1000000)},
-        "wsl": {"alias": r"distro-[1-9][0-9]?", "wsl_version": (None, 1, 2), "state": ("unknown",)},
+        "wsl": {"alias": r"distro-[1-9][0-9]?", "wsl_version": (None, 1, 2),
+                "distribution_family": DISTRO_FAMILIES, "is_default": (False, True),
+                "storage_volume_alias": r"(?:fixed-volume-[1-9][0-9]?|unknown)",
+                "eligible_for_native_probe": (False, True), "state": ("unknown",)},
         "pg_services": {"alias": r"pg-service-[1-9][0-9]?", "state": tuple(STATES.values()) + ("unknown",)},
         "pg_binaries": {"layout_major": MAJORS, "component": COMPONENTS,
                         "file_version": r"[0-9]{1,5}(\.[0-9]{1,5}){3}"},
         "fixed_disks": {"alias": r"fixed-volume-[1-9][0-9]?",
-                        "size_gib_floor": (0, 2**32), "available_gib_floor": (0, 2**32)},
+                        "size_gib_floor": (0, 2**32), "available_gib_floor": (0, 2**32),
+                        "backup_capacity_candidate": (False, True)},
         "candidate_tcp_listeners": {"port": PORTS, "family": ("ipv4", "ipv6"),
-                                    "bind": ("loopback", "wildcard", "other")},
+                                    "bind": ("loopback", "wildcard", "other"),
+                                    "owner_category": OWNER_CATEGORIES},
     }
     if set(sections) != set(schemas):
         raise InventoryBlocked("REPORT_SCHEMA_REJECTED")
@@ -382,6 +472,8 @@ def validate_report(value):
                     valid = isinstance(data, str) and re.fullmatch(rule, data) is not None
                 elif key in ("major", "minor", "build", "size_gib_floor", "available_gib_floor"):
                     valid = type(data) is int and rule[0] <= data <= rule[1]
+                elif isinstance(rule[0], bool):
+                    valid = type(data) is bool and data in rule
                 else:
                     valid = data in rule and (type(data) is int if isinstance(rule[0], int) else True)
                     if key == "wsl_version":
@@ -419,7 +511,7 @@ def main():
         evidence = report(env, socket.gethostname(), sys.platform)
         write_report(evidence)
     except (InventoryBlocked, OSError, ValueError, KeyError, TypeError):
-        print('{"contract":"native-pg-inventory-v1","status":"blocked"}')
+        print('{"contract":"native-pg-inventory-v2","status":"blocked"}')
         return 3
     # The allowlisted receipt is recoverable from job logs without billed artifact storage.
     print(json.dumps(evidence, sort_keys=True))
