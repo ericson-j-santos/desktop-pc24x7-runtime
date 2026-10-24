@@ -1,0 +1,250 @@
+name: Native Qwen7B Worker Real Code E2E DEV
+
+on:
+  pull_request:
+    types: [ready_for_review]
+    branches: [main]
+    paths:
+      - .github/workflows/native-qwen7b-worker-e2e-dev.yml
+      - tests/test_native_qwen7b_worker_workflow.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-qwen7b-worker-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native_e2e:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'feat/native-qwen7b-worker-e2e-20261024' &&
+       github.event.pull_request.draft == false)
+    name: Native Qwen 7B code repair E2E on Desktop
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
+    timeout-minutes: 11
+    env:
+      WORKER_POOL_SHA: 3f992e68273eb516e9da175fb3efc5c0feb5348e
+      RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661
+      NATIVE_OLLAMA_DEV: "1"
+      NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e
+      TARGET_REPO: C:\dev\reqsys-v2-enterprise-real
+      CORRELATION_ID: native-qwen7b-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Assert authorized Desktop
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954") { throw "WRONG_NATIVE_HOST" }
+
+      - name: Checkout reviewed runtime SHA
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout immutable Worker Pool source
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_POOL_SHA }}
+          path: external/engineering-worker-pool
+          persist-credentials: false
+
+      - name: Checkout canonical operational rules
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+
+      - name: Resolve ReqSys SHA for governed local worktree
+        id: anchor
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { data } = await github.rest.repos.getBranch({
+              owner: "ericson-j-santos", repo: "reqsys-v2-enterprise-real", branch: "main"
+            });
+            core.setOutput("sha", data.commit.sha);
+
+      - name: Governed session bootstrap
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $anchorSha = "${{ steps.anchor.outputs.sha }}"
+          $launcherArgs = @(
+            "--policy", $policy,
+            "--repo", $env:TARGET_REPO,
+            "--session-prefix", "native-qwen7b",
+            "--correlation-id", $env:CORRELATION_ID,
+            "--expected-head", $anchorSha,
+            "--sync-ref", "origin/main"
+          )
+          $raw = & python $launcher @launcherArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = (@($raw)[-1] | ConvertFrom-Json)
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true -or $data.head -ne $anchorSha) {
+            throw "NATIVE_SESSION_LAUNCH_BLOCKED"
+          }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Governed native Ollama real-source repair and independent readback
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $worker = Join-Path $env:GITHUB_WORKSPACE "external\engineering-worker-pool\scripts\native_structured_worker_e2e.py"
+          $argv = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "2",
+            "--timeout", "490",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", $worker,
+            "--expected-source-sha", $env:WORKER_POOL_SHA,
+            "--correlation-id", $env:CORRELATION_ID
+          )
+          & python $gateway @argv
+          exit $LASTEXITCODE
+
+  physical_runner_watchdog:
+    if: >-
+      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
+       github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.head.ref == 'feat/native-qwen7b-worker-e2e-20261024' &&
+       github.event.pull_request.draft == false)
+    name: Physical runner queue watchdog
+    runs-on: windows-latest
+    timeout-minutes: 2
+    permissions:
+      actions: write
+      contents: read
+    env:
+      RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661
+      TARGET_RUN_ID: ${{ github.run_id }}
+      TARGET_JOB_NAME: Native Qwen 7B code repair E2E on Desktop
+      STALL_AFTER_SECONDS: "60"
+      CORRELATION_ID: native-qwen7b-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
+
+    steps:
+      - name: Checkout canonical progress watchdog
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Observe physical runner pickup
+        id: observe
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+            const stallMs = Number(process.env.STALL_AFTER_SECONDS) * 1000;
+            const runId = Number(process.env.TARGET_RUN_ID);
+            if (!Number.isInteger(runId) || runId <= 0) {
+              core.setFailed('PHYSICAL_RUN_ID_INVALID');
+              return;
+            }
+
+            const progressAnchor = new Date();
+
+            while (true) {
+              const jobsResponse = await github.rest.actions.listJobsForWorkflowRun({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                run_id: runId,
+                per_page: 100,
+              });
+              const targetJob = jobsResponse.data.jobs.find(
+                (job) => job.name === process.env.TARGET_JOB_NAME,
+              ) || null;
+
+              if (
+                targetJob &&
+                (targetJob.status !== 'queued' || Number(targetJob.runner_id || 0) > 0)
+              ) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: String(targetJob.id),
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: targetJob.status === 'completed' ? 'completed' : 'running',
+                  last_material_progress_at: new Date().toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              const noProgressMs = Date.now() - progressAnchor.getTime();
+              if (noProgressMs >= stallMs) {
+                fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({
+                  task_id: targetJob ? String(targetJob.id) : 'physical-runner-job-not-created',
+                  correlation_id: process.env.CORRELATION_ID,
+                  state: 'queued',
+                  last_material_progress_at: progressAnchor.toISOString(),
+                  last_observation_at: new Date().toISOString(),
+                  stall_after_seconds: Number(process.env.STALL_AFTER_SECONDS),
+                  alternative_route_available: false,
+                }));
+                return;
+              }
+
+              await sleep(Math.min(15000, stallMs - noProgressMs));
+            }
+
+      - name: Evaluate canonical progress watchdog
+        id: watchdog
+        continue-on-error: true
+        shell: pwsh
+        run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
+
+      - name: Fail closed and cancel stalled physical run
+        if: steps.watchdog.outcome == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            if (!fs.existsSync('progress-watchdog-output.json')) {
+              core.setFailed('PROGRESS_WATCHDOG_EVIDENCE_MISSING');
+              return;
+            }
+            const decision = JSON.parse(fs.readFileSync('progress-watchdog-output.json', 'utf8'));
+            if (decision.decision !== 'block') {
+              core.setFailed(`PROGRESS_WATCHDOG_INVALID_DECISION:${decision.decision || 'missing'}`);
+              return;
+            }
+
+            core.setFailed(
+              `SELF_HOSTED_RUNNER_UNAVAILABLE: sem progresso material por ${decision.no_progress_seconds}s`,
+            );
+            await github.rest.actions.cancelWorkflowRun({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              run_id: Number(process.env.TARGET_RUN_ID),
+            });
