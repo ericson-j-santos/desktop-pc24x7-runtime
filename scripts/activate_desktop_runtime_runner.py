@@ -507,7 +507,12 @@ def _runner_log_path(root: Path) -> Path:
 
 def runner_running(root: Path) -> bool:
     watchdog = _load_watchdog_runtime()
-    return bool(watchdog.runner_running(root))
+    try:
+        return bool(watchdog.runner_running(root))
+    except watchdog.WatchdogError as exc:
+        if str(exc) != "runner_listener_identity_unverifiable":
+            raise
+        return False
 
 
 def start_runner(root: Path) -> bool:
@@ -975,12 +980,14 @@ def main() -> int:
             }
         )
         return 4
-    except Exception:
+    except Exception as exc:
         emit(
             {
                 "ok": False,
                 "state": "unexpected_error",
                 "error_code": "unexpected_error",
+                "exception_type": type(exc).__name__,
+                "exception_message": str(exc),
                 "rdc_required": False,
                 "production_touched": False,
                 "registration_token_consumed_in_memory": token_consumed,
