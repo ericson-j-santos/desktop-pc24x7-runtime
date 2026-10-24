@@ -42,6 +42,13 @@ def test_exact_source_rules_host_and_governed_gateway():
     assert "persist-credentials: false" in t
 
 
+def test_native_runner_uses_preinstalled_windows_powershell_not_missing_pwsh():
+    source = workflow().split("\n  physical_runner_watchdog:", 1)[0]
+    assert source.count("shell: powershell") == 3
+    assert "shell: pwsh" not in source
+    assert 'if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954")' in source
+
+
 def test_fail_closed_watchdog_and_no_extra_execution():
     t = workflow()
     assert "physical_runner_watchdog:" in t
