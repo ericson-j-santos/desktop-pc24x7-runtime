@@ -200,7 +200,7 @@ def test_physical_workflow_is_explicitly_gated_governed_and_bounded():
     assert "types: [synchronize" not in trigger
     assert "head.ref == 'feat/ollama-cpu-pilot-dev-20261024'" in content
     assert "head.repo.full_name == github.repository" in content
-    assert "'inventory' || inputs.mode" in content
+    assert "'smoke' || inputs.mode" in content
     assert "\n  schedule:" not in trigger
     assert "refs/heads/main" in content
     assert "self-hosted, Windows, X64, pc24x7" in content
