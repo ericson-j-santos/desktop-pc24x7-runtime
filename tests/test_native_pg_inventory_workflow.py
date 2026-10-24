@@ -179,7 +179,8 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
     def test_gateway_and_session_preserved(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
         native = raw.split("      - name: Read fixed native PostgreSQL metadata", 1)[1]
-        native = native.split("      - name: Upload sanitized evidence", 1)[0]
+        native = native.split("\n      - name:", 1)[0]
+        self.assertNotIn("native_windows_pg_readback.py", native)
         for required in ("command_gateway.py", '"--risk", "1"', '"--expected-head"',
                          '"--session-id"', '"--timeout", "60"', '"python", "-B", $script'):
             self.assertIn(required, native)
