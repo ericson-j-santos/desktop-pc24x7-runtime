@@ -59,17 +59,47 @@ jobs:
               r.head_branch === 'main' && r.event === 'push' && r.conclusion === 'success' &&
               r.repository.full_name === 'ericson-j-santos/desktop-pc24x7-runtime');
             if (!run) throw new Error('NATIVE_INVENTORY_EXACT_SHA_CI_REQUIRED');
-            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
-              ...context.repo, run_id: run.id, filter: 'latest', per_page: 100,
-            });
-            if (jobs.total_count !== jobs.jobs.length) throw new Error('NATIVE_INVENTORY_CI_INCOMPLETE');
-            for (const name of ['Python compile and tests', 'Portable Linux compile and tests']) {
-              const job = jobs.jobs.find(j => j.name === name && j.status === 'completed' &&
-                j.conclusion === 'success' && j.runner_id > 0);
-              if (!job || !job.steps.some(s => s.name === 'Unit and negative-control tests' &&
-                    s.status === 'completed' && s.conclusion === 'success')) {
-                throw new Error('NATIVE_INVENTORY_REAL_CI_EVIDENCE_REQUIRED');
+            const requiredJobs = new Map([
+              ['Python compile and tests', 'windows-latest'],
+              ['Portable Linux compile and tests', 'ubuntu-latest'],
+            ]);
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            let jobs = {total_count: 0, jobs: []};
+            let missing = [];
+            let incompletePage = false;
+            for (let attempt = 1; attempt <= 3; attempt++) {
+              ({data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+                ...context.repo, run_id: run.id, filter: 'latest', per_page: 100,
+              }));
+              incompletePage = jobs.total_count !== jobs.jobs.length;
+              missing = [];
+              for (const [name, expectedLabel] of requiredJobs) {
+                const job = jobs.jobs.find(j => j.name === name && j.run_id === run.id &&
+                  j.status === 'completed' && j.conclusion === 'success' &&
+                  Boolean(j.started_at) && Boolean(j.completed_at) &&
+                  Array.isArray(j.labels) && j.labels.includes(expectedLabel));
+                if (!job || !job.steps.some(s => s.name === 'Unit and negative-control tests' &&
+                      s.status === 'completed' && s.conclusion === 'success')) {
+                  missing.push(name);
+                }
               }
+              if (!incompletePage && missing.length === 0) break;
+              if (attempt < 3) await sleep(5000);
+            }
+            if (incompletePage) throw new Error('NATIVE_INVENTORY_CI_INCOMPLETE');
+            if (missing.length) {
+              const summary = [...requiredJobs].map(([name, expectedLabel]) => {
+                const job = jobs.jobs.find(item => item.name === name);
+                const step = job && job.steps.find(
+                  item => item.name === 'Unit and negative-control tests');
+                return {name, found: Boolean(job), run_matches: job?.run_id === run.id,
+                  status: job?.status || null, conclusion: job?.conclusion || null,
+                  started: Boolean(job?.started_at), completed: Boolean(job?.completed_at),
+                  expected_label: Boolean(job?.labels?.includes(expectedLabel)),
+                  required_step: step ? `${step.status}/${step.conclusion}` : null};
+              });
+              core.info(`NATIVE_INVENTORY_CI_EVIDENCE_SUMMARY:${JSON.stringify(summary)}`);
+              throw new Error('NATIVE_INVENTORY_REAL_CI_EVIDENCE_REQUIRED');
             }
             core.setOutput('admitted_at', new Date().toISOString());
 
