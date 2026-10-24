@@ -15,6 +15,7 @@ const fs = require('node:fs');
 const vm = require('node:vm');
 const input = JSON.parse(fs.readFileSync(0, 'utf8'));
 const outputs = {};
+let jobsCall = 0;
 const sandbox = {
   context: input.context,
   inputs: input.inputs,
@@ -26,13 +27,16 @@ const sandbox = {
     repos: {getBranch: async () => ({data: {commit: {sha: input.main_sha}}})},
     actions: {
       listWorkflowRuns: async () => ({data: {workflow_runs: input.runs}}),
-      listJobsForWorkflowRun: async () => ({data: input.jobs}),
+      listJobsForWorkflowRun: async () => ({data: input.jobs_sequence
+        ? input.jobs_sequence[Math.min(jobsCall++, input.jobs_sequence.length - 1)]
+        : input.jobs}),
     },
   }},
   require: name => {
     if (name !== 'os') throw new Error('MODULE_FORBIDDEN');
     return {hostname: () => input.host};
   },
+  setTimeout: callback => callback(),
   Date: class extends Date {
     static now() { return input.now_ms === undefined ? Date.now() : input.now_ms; }
   },
@@ -71,7 +75,11 @@ def fixture():
                   "conclusion": "success",
                   "repository": {"full_name": "ericson-j-santos/desktop-pc24x7-runtime"}}],
         "jobs": {"total_count": 2, "jobs": [
-            {"name": name, "status": "completed", "conclusion": "success", "runner_id": 1,
+            {"name": name, "run_id": 1, "status": "completed", "conclusion": "success",
+             "runner_id": 0, "started_at": "2026-10-24T17:29:30Z",
+             "completed_at": "2026-10-24T17:30:00Z",
+             "labels": ["windows-latest"] if name == "Python compile and tests"
+                       else ["ubuntu-latest"],
              "steps": [{"name": "Unit and negative-control tests", "status": "completed",
                         "conclusion": "success"}]}
             for name in ("Python compile and tests", "Portable Linux compile and tests")
@@ -139,11 +147,25 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
             data["runs"][0][key] = value
             self.assertFalse(execute(data)["ok"])
 
-    def test_skipped_or_unpicked_job_rejected(self):
-        for key, value in (("conclusion", "skipped"), ("status", "queued"), ("runner_id", 0)):
+    def test_skipped_or_unexecuted_hosted_job_rejected(self):
+        for key, value in (("conclusion", "skipped"), ("status", "queued"),
+                           ("started_at", None), ("completed_at", None)):
             data = fixture()
             data["jobs"]["jobs"][0][key] = value
             self.assertFalse(execute(data)["ok"])
+
+    def test_wrong_hosted_ci_identity_rejected(self):
+        for key, value in (("run_id", 2), ("labels", ["self-hosted"])):
+            data = fixture()
+            data["jobs"]["jobs"][0][key] = value
+            self.assertFalse(execute(data)["ok"])
+
+    def test_transient_hosted_ci_metadata_is_retried(self):
+        data = fixture()
+        incomplete = json.loads(json.dumps(data["jobs"]))
+        incomplete["jobs"][0]["labels"] = []
+        data["jobs_sequence"] = [incomplete, data["jobs"]]
+        self.assertTrue(execute(data)["ok"])
 
     def test_skipped_test_step_rejected(self):
         data = fixture()
