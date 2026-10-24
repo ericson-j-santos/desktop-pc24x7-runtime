@@ -253,7 +253,7 @@ def test_runner_process_snapshot_fails_closed_when_identity_is_unverifiable(
     runner_home = make_runner_home(tmp_path)
     monkeypatch.setattr(m, "_runner_process_ids", lambda: [1111])
     monkeypatch.setattr(m, "_process_executable_path", lambda pid: None)
-    with pytest.raises(m.WatchdogError, match="identidade"):
+    with pytest.raises(m.WatchdogError, match="runner_listener_identity_unverifiable"):
         m.runner_process_snapshot(runner_home)
 
 

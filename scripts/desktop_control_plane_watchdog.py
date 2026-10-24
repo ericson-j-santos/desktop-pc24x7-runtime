@@ -11,7 +11,6 @@ Objetivo:
 from __future__ import annotations
 
 import argparse
-import csv
 import ctypes
 from ctypes import wintypes
 import json
@@ -167,35 +166,65 @@ def discover_runner_home(explicit: Path | None = None) -> Path:
     )
 
 
-def _tasklist(image: str) -> subprocess.CompletedProcess[str]:
-    system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
-    tasklist = system_root / "System32" / "tasklist.exe"
-    return subprocess.run(
-        [str(tasklist), "/FI", f"IMAGENAME eq {image}", "/FO", "CSV", "/NH"],
-        capture_output=True,
-        text=True,
-        encoding=locale.getpreferredencoding(False) or "utf-8",
-        errors="replace",
-        timeout=15,
-        check=False,
-    )
-
-
 def _runner_process_ids() -> list[int]:
     if os.name != "nt":
         return []
-    result = _tasklist(RUNNER_PROCESS)
-    if result.returncode != 0:
-        raise WatchdogError(f"tasklist do runner falhou: exit={result.returncode}")
+
+    class ProcessEntry32W(ctypes.Structure):
+        _fields_ = [
+            ("dwSize", wintypes.DWORD),
+            ("cntUsage", wintypes.DWORD),
+            ("th32ProcessID", wintypes.DWORD),
+            ("th32DefaultHeapID", ctypes.c_size_t),
+            ("th32ModuleID", wintypes.DWORD),
+            ("cntThreads", wintypes.DWORD),
+            ("th32ParentProcessID", wintypes.DWORD),
+            ("pcPriClassBase", wintypes.LONG),
+            ("dwFlags", wintypes.DWORD),
+            ("szExeFile", wintypes.WCHAR * 260),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_snapshot = kernel32.CreateToolhelp32Snapshot
+    create_snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+    create_snapshot.restype = wintypes.HANDLE
+    process_first = kernel32.Process32FirstW
+    process_first.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    process_first.restype = wintypes.BOOL
+    process_next = kernel32.Process32NextW
+    process_next.argtypes = [wintypes.HANDLE, ctypes.POINTER(ProcessEntry32W)]
+    process_next.restype = wintypes.BOOL
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    snapshot = create_snapshot(0x00000002, 0)  # TH32CS_SNAPPROCESS
+    if snapshot == wintypes.HANDLE(-1).value:
+        raise WatchdogError(
+            f"snapshot de processos falhou: winerror={ctypes.get_last_error()}"
+        )
     pids: list[int] = []
-    for row in csv.reader(result.stdout.splitlines()):
-        if len(row) < 2 or row[0].strip().casefold() != RUNNER_PROCESS.casefold():
-            continue
-        try:
-            pids.append(int(row[1].strip().replace(",", "")))
-        except ValueError as exc:
-            raise WatchdogError("PID inválido ao inspecionar runner") from exc
-    return pids
+    try:
+        entry = ProcessEntry32W()
+        entry.dwSize = ctypes.sizeof(ProcessEntry32W)
+        if not process_first(snapshot, ctypes.byref(entry)):
+            error = ctypes.get_last_error()
+            if error == 18:  # ERROR_NO_MORE_FILES
+                return []
+            raise WatchdogError(f"enumeração de processos falhou: winerror={error}")
+        while True:
+            if entry.szExeFile.casefold() == RUNNER_PROCESS.casefold():
+                pids.append(int(entry.th32ProcessID))
+            if not process_next(snapshot, ctypes.byref(entry)):
+                error = ctypes.get_last_error()
+                if error not in (0, 18):  # ERROR_NO_MORE_FILES
+                    raise WatchdogError(
+                        f"enumeração de processos falhou: winerror={error}"
+                    )
+                break
+        return pids
+    finally:
+        close_handle(snapshot)
 
 
 def _process_executable_path(pid: int) -> Path | None:
@@ -249,7 +278,7 @@ def runner_process_snapshot(runner_home: Path) -> dict[str, Any]:
     if len(matching) > 1:
         raise WatchdogError("mais de um listener pertence ao runner governado")
     if not matching and unresolved:
-        raise WatchdogError("identidade do Runner.Listener.exe não pôde ser verificada")
+        raise WatchdogError("runner_listener_identity_unverifiable")
     return {
         "expected_executable": str(expected),
         "matching_pids": matching,
@@ -279,7 +308,15 @@ def _creationflags() -> int:
 def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
     runner_home = validate_runner_home(runner_home)
     version_info = inspect_runner_version(runner_home)
-    snapshot = runner_process_snapshot(runner_home)
+    try:
+        snapshot = runner_process_snapshot(runner_home)
+    except WatchdogError as exc:
+        if str(exc) != "runner_listener_identity_unverifiable":
+            raise
+        # Outro listener pode estar protegido/elevado e, portanto, sem caminho
+        # consultável nesta sessão. Não o encerramos nem presumimos que pertença
+        # ao runner governado; tentamos somente iniciar o contrato local exato.
+        snapshot = {"matching_pids": [], "unresolved_pids": _runner_process_ids()}
     if snapshot["matching_pids"]:
         return {
             "status": "process_running",
