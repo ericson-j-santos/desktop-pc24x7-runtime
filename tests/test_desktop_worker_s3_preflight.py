@@ -328,6 +328,32 @@ class DesktopWorkerS3PreflightTest(unittest.TestCase):
             "-z",
         )
 
+        # Prove the intended LF index / CRLF worktree fixture, then warm the
+        # stat cache under the correct Windows conversion rule.
+        module_file = repository / "module.py"
+        self.assertEqual(module_file.read_bytes(), b"VALUE = 1\r\n")
+        self.assertRegex(
+            git("ls-files", "--eol", "--", "module.py"),
+            r"^i/lf\s+w/crlf\s",
+        )
+        self.assertEqual(
+            p._git_output(repository, status_arguments, platform_name="nt"),
+            "",
+        )
+        # Changing autocrlf alone does not invalidate a clean index stat cache.
+        # Move mtime by whole seconds without changing bytes so the negative
+        # control must compare content regardless of Git's racy-index timing.
+        before = module_file.stat()
+        os.utime(
+            module_file,
+            ns=(before.st_atime_ns, before.st_mtime_ns - 2_000_000_000),
+        )
+        self.assertLess(
+            module_file.stat().st_mtime_ns // 1_000_000_000,
+            before.st_mtime_ns // 1_000_000_000,
+        )
+        self.assertEqual(module_file.read_bytes(), b"VALUE = 1\r\n")
+
         # This is the false dirty result produced by the old verifier after it
         # hid Git for Windows' system-level core.autocrlf=true.
         self.assertIn(
@@ -363,6 +389,8 @@ class DesktopWorkerS3PreflightTest(unittest.TestCase):
                 git_runner=windows_git_runner,
             )
         (repository / "module.py").write_bytes(b"VALUE = 1\r\n")
+        # Isolate the ignored-content control from the preceding content change.
+        self.assertEqual(windows_git_runner(repository, status_arguments), "")
 
         ignored = repository / "__pycache__"
         ignored.mkdir()
