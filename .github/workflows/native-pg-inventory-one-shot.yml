@@ -1,0 +1,68 @@
+name: Native PostgreSQL inventory one-shot dispatcher
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: native-pg-inventory-one-shot-20261024-pdqk954
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch governed native PostgreSQL inventory once
+    if: >-
+      github.event.workflow_run.event == 'push' &&
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_branch == 'main' &&
+      github.event.workflow_run.repository.full_name == github.repository &&
+      github.event.workflow_run.head_repository.full_name == github.repository &&
+      github.event.workflow_run.actor.login == 'ericson-j-santos' &&
+      contains(github.event.workflow_run.head_commit.message,
+        '[native-pg-inventory-once:20261024-pdqk954]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Dispatch exact-main governed inventory without duplication
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const source = context.payload.workflow_run;
+            const headSha = source.head_sha;
+            if (!/^[0-9a-f]{40}$/.test(headSha || '')) {
+              throw new Error('ONE_SHOT_SOURCE_SHA_INVALID');
+            }
+            const {data: branch} = await github.rest.repos.getBranch({
+              ...context.repo, branch: 'main',
+            });
+            if (branch.commit.sha !== headSha) {
+              throw new Error('ONE_SHOT_MAIN_MOVED');
+            }
+            const {data: existing} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo,
+              workflow_id: 'dedicated-runtime-runner-e2e.yml',
+              branch: 'main',
+              event: 'workflow_dispatch',
+              per_page: 100,
+            });
+            const duplicate = existing.workflow_runs.find(run => run.head_sha === headSha);
+            if (duplicate) {
+              core.notice(`ONE_SHOT_ALREADY_DISPATCHED:${duplicate.id}`);
+              return;
+            }
+            await github.rest.actions.createWorkflowDispatch({
+              ...context.repo,
+              workflow_id: 'dedicated-runtime-runner-e2e.yml',
+              ref: 'main',
+              inputs: {
+                diagnostic: 'native-postgres-inventory',
+                inventory_source_sha: headSha,
+              },
+            });
+            core.notice(`ONE_SHOT_DISPATCH_ACCEPTED:${headSha}`);
