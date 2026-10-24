@@ -63,6 +63,7 @@ jobs:
               inputs: {
                 diagnostic: 'native-postgres-inventory',
                 inventory_source_sha: headSha,
+                inventory_dispatch_provenance: 'one-shot:20261024-pdqk954',
               },
             });
             core.notice(`ONE_SHOT_DISPATCH_ACCEPTED:${headSha}`);
