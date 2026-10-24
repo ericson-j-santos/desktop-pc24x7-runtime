@@ -8,7 +8,7 @@ on:
         type: choice
         required: true
         default: runner-identity
-        options: [runner-identity, native-postgres-inventory]
+        options: [runner-identity, native-postgres-inventory, native-postgres-readback]
       inventory_source_sha:
         description: Full reviewed main SHA; required only for native inventory
         type: string
@@ -19,8 +19,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ inputs.diagnostic == 'native-postgres-inventory' && format('native-pg-inventory-954-{0}', github.run_id) || format('dedicated-runtime-runner-e2e-{0}', github.ref) }}
-  cancel-in-progress: ${{ inputs.diagnostic != 'native-postgres-inventory' }}
+  group: ${{ (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback') && format('native-pg-inventory-954-{0}', github.run_id) || format('dedicated-runtime-runner-e2e-{0}', github.ref) }}
+  cancel-in-progress: ${{ (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback') }}
 
 jobs:
   resolve_rules:
@@ -36,7 +36,7 @@ jobs:
     steps:
       - name: Admit fixed inventory from reviewed current main and successful native CI
         id: inventory_admission
-        if: inputs.diagnostic == 'native-postgres-inventory'
+        if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback')
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         env:
           INVENTORY_SOURCE_SHA: ${{ inputs.inventory_source_sha }}
@@ -110,7 +110,8 @@ jobs:
   e2e:
     needs: resolve_rules
     name: Pickup on dedicated Desktop runtime runner
-    # Only the fixed native lane uses the runner's existing six-label contract.
+    # Only the existing inventory lane keeps its six-label contract.
+    # Readback requires the Desktop identity label; do not retag any runner.
     # Before dispatch, read back the complete runner registry: id 2 must be the
     # unique eligible DESKTOP-PDQK954-runtime runner, online/idle. Keep the
     # identity/TTL guard first; labels alone never prove physical host identity.
@@ -119,11 +120,11 @@ jobs:
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
       CORRELATION_ID: dedicated-runner-${{ github.run_id }}-${{ github.run_attempt }}
-      EVIDENCE_REL: ${{ inputs.diagnostic == 'native-postgres-inventory' && 'artifacts/native-pg-inventory/evidence.json' || 'artifacts/dedicated-runner-e2e/evidence.json' }}
+      EVIDENCE_REL: ${{ (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback') && 'artifacts/native-pg-inventory/evidence.json' || 'artifacts/dedicated-runner-e2e/evidence.json' }}
       INVENTORY_ADMITTED_AT: ${{ needs.resolve_rules.outputs.inventory_admitted_at }}
     steps:
       - name: Reject stale native pickup before checkout or bootstrap
-        if: inputs.diagnostic == 'native-postgres-inventory'
+        if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback')
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
@@ -191,7 +192,7 @@ jobs:
           "RUNNER_DEPRECATION_API_STATUS=$($data.runner_version_preflight.deprecation_api_status)" | Add-Content $env:GITHUB_ENV
 
       - name: Prove exact host, repository, runner and version through Command Gateway
-        if: inputs.diagnostic != 'native-postgres-inventory'
+        if: (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback')
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
@@ -246,8 +247,36 @@ jobs:
           & python $gateway @gatewayArgs
           exit $LASTEXITCODE
 
+      - name: Read fixed PostgreSQL listener owners and legacy receipts through Command Gateway
+        if: inputs.diagnostic == 'native-postgres-readback'
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+          INVENTORY_SESSION_VALIDATED: 'true'
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\native_windows_pg_readback.py"
+          $gatewayArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "1",
+            "--timeout", "60",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", "-B", $script
+          )
+          & python $gateway @gatewayArgs
+          exit $LASTEXITCODE
+
       - name: Upload sanitized evidence
-        if: always() && inputs.diagnostic != 'native-postgres-inventory' && steps.session.outputs.target_path != ''
+        if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback') && steps.session.outputs.target_path != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dedicated-runner-e2e-${{ github.run_id }}
@@ -339,14 +368,14 @@ jobs:
         run: python _rules/scripts/progress_watchdog.py --input progress-watchdog-input.json --output progress-watchdog-output.json
 
       - name: Report expired native pickup without cancellation
-        if: steps.watchdog.outcome == 'failure' && inputs.diagnostic == 'native-postgres-inventory'
+        if: steps.watchdog.outcome == 'failure' && (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback')
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
             core.setFailed('NATIVE_INVENTORY_PICKUP_EXPIRED_NO_COLLECTION_ALLOWED');
 
       - name: Fail closed and cancel stalled canary
-        if: steps.watchdog.outcome == 'failure' && inputs.diagnostic != 'native-postgres-inventory'
+        if: steps.watchdog.outcome == 'failure' && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback')
         uses: actions/github-script@v7
         with:
           script: |
@@ -366,4 +395,5 @@ jobs:
               repo: context.repo.repo,
               run_id: Number(process.env.TARGET_RUN_ID),
             });
+
 
