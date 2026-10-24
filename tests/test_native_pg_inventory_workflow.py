@@ -294,7 +294,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         self.assertNotIn("permissions:", job)
         self.assertNotIn("listSelfHostedRunners", raw)
 
-    def test_readback_mode_uses_existing_six_label_native_route(self):
+    def test_readback_identity_label_excludes_other_host_with_shared_runtime_labels(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
         job = raw.split("\n  e2e:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
         line = next(line.strip() for line in job.splitlines()
@@ -305,7 +305,20 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         self.assertTrue(output["ok"])
         self.assertEqual(output["outputs"]["labels"],
                          ["self-hosted", "Windows", "X64", "pc24x7",
-                          "desktop-runtime", "runtime-dev"])
+                          "desktop-runtime", "runtime-dev", "desktop-pdqk954"])
+        common = {"self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev"}
+        registry = {2: common | {"desktop-pdqk954"}, 24: common | {"desktop-rp23ogs"}}
+        required = set(output["outputs"]["labels"])
+        self.assertEqual([runner_id for runner_id, labels in registry.items()
+                          if required <= labels], [2])
+        # Negative control: the prior six-label selector admits both hosts.
+        self.assertEqual([runner_id for runner_id, labels in registry.items()
+                          if common <= labels], [2, 24])
+        # Losing the identity label must not silently fall back to the other PC.
+        registry[2] = common
+        self.assertEqual([runner_id for runner_id, labels in registry.items()
+                          if required <= labels], [])
+
 
     def test_every_mode_selects_exactly_one_fixed_gateway_payload(self):
         raw = WORKFLOW.read_text(encoding="utf-8")

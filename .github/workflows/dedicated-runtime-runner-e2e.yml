@@ -110,11 +110,12 @@ jobs:
   e2e:
     needs: resolve_rules
     name: Pickup on dedicated Desktop runtime runner
-    # Only the two fixed native lanes use the runner's six-label contract.
+    # Only the existing inventory lane keeps its six-label contract.
+    # Readback requires the Desktop identity label; do not retag any runner.
     # Before dispatch, read back the complete runner registry: id 2 must be the
     # unique eligible DESKTOP-PDQK954-runtime runner, online/idle. Keep the
     # identity/TTL guard first; labels alone never prove physical host identity.
-    runs-on: ${{ fromJSON((inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback') && '["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev"]' || '["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
+    runs-on: ${{ fromJSON(inputs.diagnostic == 'native-postgres-inventory' && '["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev"]' || '["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
     timeout-minutes: 10
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
