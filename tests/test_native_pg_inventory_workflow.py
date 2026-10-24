@@ -171,7 +171,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         raw = WORKFLOW.read_text(encoding="utf-8")
         trigger = raw.split("\npermissions:", 1)[0]
         self.assertIn("default: runner-identity", trigger)
-        self.assertIn("options: [runner-identity, native-postgres-inventory]", trigger)
+        self.assertIn("options: [runner-identity, native-postgres-inventory, native-postgres-readback]", trigger)
         for forbidden in ("\n  push:", "\n  schedule:", "\n  pull_request:", "\n      command:",
                           "\n      host:", "\n      path:", "\n      url:"):
             self.assertNotIn(forbidden, trigger)
@@ -190,9 +190,9 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
     def test_native_mode_cannot_cancel_other_work(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("format('native-pg-inventory-954-{0}', github.run_id)", raw)
-        self.assertIn("cancel-in-progress: $" + "{{ inputs.diagnostic != 'native-postgres-inventory' }}", raw)
+        self.assertIn("cancel-in-progress: $" + "{{ (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback') }}", raw)
         cancel = raw.split("      - name: Fail closed and cancel stalled canary", 1)[1]
-        self.assertIn("if: steps.watchdog.outcome == 'failure' && inputs.diagnostic != 'native-postgres-inventory'", cancel)
+        self.assertIn("if: steps.watchdog.outcome == 'failure' && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback')", cancel)
         self.assertIn("NATIVE_INVENTORY_PICKUP_EXPIRED_NO_COLLECTION_ALLOWED", raw)
 
     def test_native_groups_are_unique_and_legacy_behavior_is_unchanged(self):
@@ -228,7 +228,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         raw = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("artifacts/native-pg-inventory/evidence.json", raw)
         upload = raw.split("      - name: Upload sanitized evidence", 1)[1].split("  queue_watchdog:", 1)[0]
-        self.assertIn("if: always() && inputs.diagnostic != 'native-postgres-inventory'", upload)
+        self.assertIn("if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback')", upload)
 
     def test_native_routing_matches_existing_dedicated_labels_only(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
@@ -285,7 +285,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         steps = job.split("    steps:\n", 1)[1]
         self.assertTrue(steps.startswith("      - name: " + PICKUP + "\n"))
         guard = steps.split("\n      - name:", 1)[0]
-        self.assertIn("if: inputs.diagnostic == 'native-postgres-inventory'", guard)
+        self.assertIn("if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback')", guard)
         self.assertNotIn("continue-on-error", guard)
         self.assertIn("process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime'", guard)
         self.assertIn("hostname().toUpperCase() !== 'DESKTOP-PDQK954'", guard)
@@ -293,6 +293,77 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         self.assertNotIn("permissions:", job)
         self.assertNotIn("listSelfHostedRunners", raw)
 
+    def test_readback_mode_uses_existing_six_label_native_route(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        job = raw.split("\n  e2e:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
+        line = next(line.strip() for line in job.splitlines()
+                    if line.strip().startswith("runs-on:"))
+        expression = line.split(": ", 1)[1][3:-2].strip()
+        data = {**fixture(), "inputs": {"diagnostic": "native-postgres-readback"}}
+        output = execute(data, source="core.setOutput('labels', (" + expression + "));")
+        self.assertTrue(output["ok"])
+        self.assertEqual(output["outputs"]["labels"],
+                         ["self-hosted", "Windows", "X64", "pc24x7",
+                          "desktop-runtime", "runtime-dev"])
+
+    def test_every_mode_selects_exactly_one_fixed_gateway_payload(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        names = ("Prove exact host, repository, runner and version through Command Gateway",
+                 "Read fixed native PostgreSQL metadata through Command Gateway",
+                 "Read fixed PostgreSQL listener owners and legacy receipts through Command Gateway")
+        for mode, expected in (("runner-identity", 0), ("native-postgres-inventory", 1),
+                               ("native-postgres-readback", 2)):
+            enabled = []
+            for index, name in enumerate(names):
+                block = raw.split("      - name: " + name + "\n", 1)[1].split("\n      - name:", 1)[0]
+                condition = next(line.strip()[4:] for line in block.splitlines()
+                                 if line.strip().startswith("if: "))
+                data = {**fixture(), "inputs": {"diagnostic": mode}}
+                output = execute(data, source="core.setOutput('enabled', (" + condition + "));")
+                self.assertTrue(output["ok"])
+                if output["outputs"]["enabled"]:
+                    enabled.append(index)
+            self.assertEqual(enabled, [expected])
+
+    def test_readback_has_no_cancellation_or_artifact_upload(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        for name in ("Upload sanitized evidence", "Fail closed and cancel stalled canary"):
+            block = raw.split("      - name: " + name + "\n", 1)[1].split("\n      - name:", 1)[0]
+            self.assertIn("inputs.diagnostic != 'native-postgres-inventory'", block)
+            self.assertIn("inputs.diagnostic != 'native-postgres-readback'", block)
+
+    def test_readback_shares_admission_first_guard_and_fixed_gateway_only(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        for name in (ADMISSION, PICKUP):
+            block = raw.split("      - name: " + name + "\n", 1)[1].split("\n      - name:", 1)[0]
+            condition = next(line.strip()[4:] for line in block.splitlines()
+                             if line.strip().startswith("if: "))
+            for mode in ("native-postgres-inventory", "native-postgres-readback"):
+                output = execute({**fixture(), "inputs": {"diagnostic": mode}},
+                                 source="core.setOutput('enabled', (" + condition + "));")
+                self.assertTrue(output["outputs"]["enabled"])
+        block = raw.split("      - name: Read fixed PostgreSQL listener owners", 1)[1]
+        block = block.split("      - name: Upload sanitized evidence", 1)[0]
+        for required in ("native_windows_pg_readback.py", "command_gateway.py",
+                         '"--risk", "1"', '"--expected-head"', '"--session-id"',
+                         '"--timeout", "60"', '"python", "-B", $script'):
+            self.assertIn(required, block)
+        for forbidden in ("inputs.command", "inputs.path", "inputs.host", "native_windows_pg_readback.py --"):
+            self.assertNotIn(forbidden, block)
+
+    def test_readback_concurrency_is_unique_and_cannot_cancel(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        block = raw.split("\nconcurrency:\n", 1)[1].split("\njobs:", 1)[0]
+        group, cancel = [line.split(": ", 1)[1].strip()[3:-2].strip()
+                         for line in block.strip().splitlines()]
+        data = {**fixture(), "inputs": {"diagnostic": "native-postgres-readback"},
+                "run_id": "102", "ref": "refs/heads/main"}
+        output = execute(data, source=("core.setOutput('group', (" + group + "));"
+                                       "core.setOutput('cancel', (" + cancel + "));"))
+        self.assertEqual(output["outputs"]["group"], "native-pg-inventory-954-102")
+        self.assertIs(output["outputs"]["cancel"], False)
+
 
 if __name__ == "__main__":
     unittest.main()
+
