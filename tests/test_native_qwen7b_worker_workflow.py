@@ -25,7 +25,7 @@ def test_native_worker_runs_only_on_approved_dispatch_or_exact_pr_transition():
 
 def test_exact_source_rules_host_and_governed_gateway():
     t = workflow()
-    assert "WORKER_POOL_SHA: 6b341736500b52ab4e760702b0b16be309220f1c" in t
+    assert "WORKER_POOL_SHA: 34fcbe54ff6cf22877d2828d42dbf40eeffeca45" in t
     assert "RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661" in t
     assert "NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e" in t
     assert 'NATIVE_OLLAMA_DEV: "1"' in t
