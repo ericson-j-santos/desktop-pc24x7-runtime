@@ -33,7 +33,7 @@ def weights():
 def generation():
     return {
         "model": "qwen2.5-coder:7b", "done": True,
-        "response": "OLLAMA_CPU_PILOT_OK\n",
+        "response": json.dumps({"sentinel": "OLLAMA_CPU_PILOT_OK"}),
         "eval_count": 8, "eval_duration": 2_000_000_000,
     }
 
@@ -117,6 +117,8 @@ def test_smoke_uses_exact_local_model_and_checks_loaded_weights(monkeypatch, cap
             assert payload["model"] == "qwen2.5-coder:7b"
             assert payload["options"]["num_ctx"] == 2048
             assert payload["options"]["num_predict"] == 32
+            assert payload["format"]["properties"]["sentinel"]["enum"] == ["OLLAMA_CPU_PILOT_OK"]
+            assert payload["format"]["additionalProperties"] is False
             assert payload["stream"] is False
             return generation()
         if path == "/api/ps":
@@ -136,9 +138,12 @@ def test_smoke_uses_exact_local_model_and_checks_loaded_weights(monkeypatch, cap
 @pytest.mark.parametrize(
     "broken,reason",
     [
-        ({"model": "different:7b"}, "inference_validation_failed"),
-        ({"response": "model failed to obey"}, "inference_validation_failed"),
-        ({"done": False}, "inference_validation_failed"),
+        ({"model": "different:7b"}, "model_identity_mismatch"),
+        ({"response": "model failed to obey"}, "response_json_invalid"),
+        ({"done": False}, "generation_incomplete"),
+        ({"response": json.dumps({"sentinel": "WRONG"})}, "response_contract_mismatch"),
+        ({"response": json.dumps({"sentinel": "OLLAMA_CPU_PILOT_OK", "extra": True})}, "response_contract_mismatch"),
+        ({"response": 5}, "response_schema_invalid"),
         ({"eval_count": 0}, "inference_metrics_missing"),
     ],
 )
