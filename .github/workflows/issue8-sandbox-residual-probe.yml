@@ -78,12 +78,30 @@ jobs:
             const activePhysical=allRuns.data.workflow_runs.some(x=>
               x.id!==context.runId && x.status!=='completed' &&
               x.name==='Issue 8 Qwen7B fenced Git bundle and hosted CAS DEV');
+            const sourceBase='21fd68dec6f0da92b3e7da201463401ac5429d64';
+            // This is a historical, read-only probe: the Worker main may
+            // advance as long as the reviewed source commit remains ancestral.
+            // The Qwen Builder's separate SHA-current gate is NOT changed.
+            const [lineage,reviewedFile]=await Promise.all([
+              github.rest.repos.compareCommitsWithBasehead({
+                owner,repo:'engineering-worker-pool',
+                basehead:sourceBase+'...'+worker.data.commit.sha
+              }),
+              github.rest.repos.getContent({
+                owner,repo:'engineering-worker-pool',
+                path:'app/portfolio_bridge.py',ref:sourceBase
+              }),
+            ]);
+            const oldCommitStillCanonical=
+              (lineage.data.status==='ahead'||lineage.data.status==='identical') &&
+              lineage.data.behind_by===0 && reviewedFile.data.type==='file' &&
+              reviewedFile.data.sha==='d9a25c574163c49f695e774609949160d94f4490';
             if (pr.state!=='open' || !pr.draft || pr.head.sha!==sha ||
                 pr.head.ref!=='feat/issue8-fenced-qwen-bundle-20261025' ||
                 pr.head.repo?.full_name!==owner+'/'+repo ||
                 pr.base.sha!=='a0437b0deb7db42fb91866fe8e77359844579cf6' ||
                 main.data.commit.sha!=='a0437b0deb7db42fb91866fe8e77359844579cf6' ||
-                worker.data.commit.sha!=='21fd68dec6f0da92b3e7da201463401ac5429d64' ||
+                !oldCommitStillCanonical ||
                 !pr.body?.includes('OWNER_ISSUE8_READONLY_PROBE_20261025_ONCE') ||
                 failed.data.head_sha!=='50d35e3126d68872c9b3c9d7edde34878d39508e' ||
                 failed.data.status!=='completed' || failed.data.conclusion!=='failure' ||

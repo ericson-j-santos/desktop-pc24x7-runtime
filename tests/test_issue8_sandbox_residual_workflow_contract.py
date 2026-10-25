@@ -12,6 +12,10 @@ def test_one_shot_owner_and_sha_guard_and_no_model_job():
     assert "github.actor == 'ericson-j-santos'" in text
     assert "needs.admission.result == 'success'" in text
     assert "source_sha=" not in text
+    assert "compareCommitsWithBasehead" in text
+    assert "lineage.data.behind_by===0" in text
+    assert "reviewedFile.data.sha==='d9a25c574163c49f695e774609949160d94f4490'" in text
+    assert "worker.data.commit.sha!=='21fd68dec6f0da92b3e7da201463401ac5429d64'" not in text
     assert "40214413825" in text
     assert "SESSION_LAUNCH_OK" in text
     assert "--require-runner-version-preflight" in text
