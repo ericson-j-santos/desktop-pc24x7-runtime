@@ -19,7 +19,6 @@ def valid_env():
         inventory.EXPECTED_RUNNER, "Windows", "X64", "123", "1",
         "ericson-j-santos", "workflow_dispatch", "2.329.0", "true", "true", "true",
         inventory.datetime.now(inventory.timezone.utc).isoformat(),
-        "",
     )))
 
 
@@ -93,29 +92,12 @@ class NativeInventoryTests(unittest.TestCase):
             result(platform="linux")
 
     def test_all_provenance_fields_fail_closed(self):
-        for key in (name for name in inventory.CI_KEYS
-                    if name != "INVENTORY_DISPATCH_PROVENANCE"):
+        for key in inventory.CI_KEYS:
             with self.subTest(key=key):
                 env = valid_env()
                 env[key] = ""
                 with self.assertRaises(inventory.InventoryBlocked):
                     result(env=env)
-
-    def test_exact_one_shot_bot_provenance_allowed(self):
-        env = valid_env()
-        env["GITHUB_ACTOR"] = "github-actions[bot]"
-        env["INVENTORY_DISPATCH_PROVENANCE"] = "one-shot:20261024-pdqk954"
-        self.assertEqual(result(env=env)["status"], "measured")
-
-    def test_owner_or_bot_provenance_must_be_exact(self):
-        for actor, provenance in (("ericson-j-santos", "one-shot:20261024-pdqk954"),
-                                  ("github-actions[bot]", ""),
-                                  ("github-actions[bot]", "one-shot:other")):
-            env = valid_env()
-            env["GITHUB_ACTOR"] = actor
-            env["INVENTORY_DISPATCH_PROVENANCE"] = provenance
-            with self.assertRaises(inventory.InventoryBlocked):
-                result(env=env)
 
     def test_other_runner_rejected(self):
         env = valid_env()

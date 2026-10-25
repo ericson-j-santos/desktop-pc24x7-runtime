@@ -68,8 +68,7 @@ def fixture():
         "context": {"eventName": "workflow_dispatch", "actor": "ericson-j-santos",
                     "repo": {"owner": "ericson-j-santos", "repo": "desktop-pc24x7-runtime"},
                     "ref": "refs/heads/main", "sha": sha},
-        "env": {"INVENTORY_SOURCE_SHA": sha, "INVENTORY_DISPATCH_PROVENANCE": "",
-                "GITHUB_RUN_ATTEMPT": "1",
+        "env": {"INVENTORY_SOURCE_SHA": sha, "GITHUB_RUN_ATTEMPT": "1",
                 "RUNNER_NAME": "DESKTOP-PDQK954-runtime"},
         "host": "DESKTOP-PDQK954", "main_sha": sha,
         "runs": [{"id": 1, "head_sha": sha, "head_branch": "main", "event": "push",
@@ -123,19 +122,6 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
                            ("repo", {"owner": "other", "repo": "desktop-pc24x7-runtime"})):
             data = fixture()
             data["context"][key] = value
-            self.assertFalse(execute(data)["ok"])
-
-    def test_exact_one_shot_bot_provenance_admitted(self):
-        data = fixture()
-        data["context"]["actor"] = "github-actions[bot]"
-        data["env"]["INVENTORY_DISPATCH_PROVENANCE"] = "one-shot:20261024-pdqk954"
-        self.assertTrue(execute(data)["ok"])
-
-    def test_one_shot_bot_without_exact_provenance_rejected(self):
-        for value in ("", "one-shot:other", "one-shot:20261024-pdqk954 "):
-            data = fixture()
-            data["context"]["actor"] = "github-actions[bot]"
-            data["env"]["INVENTORY_DISPATCH_PROVENANCE"] = value
             self.assertFalse(execute(data)["ok"])
 
     def test_bad_source_sha_rejected(self):
