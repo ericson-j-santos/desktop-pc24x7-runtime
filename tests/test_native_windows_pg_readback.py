@@ -20,6 +20,7 @@ def valid_env():
         m.base.EXPECTED_RUNNER, "Windows", "X64", "123", "1",
         "ericson-j-santos", "workflow_dispatch", "2.338.0", "true", "true", "true",
         m.base.datetime.now(m.base.timezone.utc).isoformat(),
+        "",
     )))
 
 
@@ -150,7 +151,8 @@ class ReadbackTests(unittest.TestCase):
             factory.assert_not_called()
 
     def test_every_provenance_field_remains_required(self):
-        for key in m.base.CI_KEYS:
+        for key in (name for name in m.base.CI_KEYS
+                    if name != "INVENTORY_DISPATCH_PROVENANCE"):
             env = valid_env()
             env[key] = ""
             with self.subTest(key=key), self.assertRaises(m.base.InventoryBlocked):
