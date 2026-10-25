@@ -16,11 +16,11 @@ def test_one_shot_owner_draft_admission_and_sha_gate():
     assert "github.event.pull_request.draft == true" in text
     assert "github.event.pull_request.head.repo.full_name == github.repository" in text
     assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE_CAS_20261025_ONCE')" in text
-    assert "workerMain" not in text or "workerMain" in text
+    assert "wp.data.head.sha !== worker" in text
     assert "wmain.data.commit.sha !== base" in text
     assert "ISSUE_CAS_REQUIRED_CI" in text
     assert "ISSUE_CAS_OWNER_OR_WORKER_DRIFT" in text
-    assert "worker_pool_sha" not in text.lower() or "WORKER_POOL_SHA" in text
+    assert "WORKER_POOL_SHA: 00292e42c497c03bcda0dcb80750841a962c02c8" in text
     assert "OWNER_ISSUE_CAS_20261025_ONCE" in text
 
 
