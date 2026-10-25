@@ -37,7 +37,7 @@ def run():
             if current["enabled"] is not False:
                 raise RuntimeError("unexpected_pool_state")
             with pool._db() as conn:
-                if conn.execute("SELECT 1").fetchone() != (1,):
+                if conn.execute("SELECT 1").fetchone()[0] != 1:
                     raise RuntimeError("read_failure")
             try:
                 conn.execute("SELECT 1")
