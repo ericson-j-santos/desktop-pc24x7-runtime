@@ -316,9 +316,9 @@ def _publish_github_step_outputs(report: dict[str, Any]) -> None:
         summary, sort_keys=True, separators=(",", ":"),
         ensure_ascii=True,
     ).encode("ascii")).decode("ascii")
-    with dest.open("a", encoding="ascii", newline="\\n") as stream:
-        stream.write("bundle_b64=" + report["bundle_b64"] + "\\n")
-        stream.write("receipt_b64=" + encoded + "\\n")
+    with dest.open("a", encoding="ascii", newline="\n") as stream:
+        stream.write("bundle_b64=" + report["bundle_b64"] + "\n")
+        stream.write("receipt_b64=" + encoded + "\n")
 
 
 def main() -> int:
