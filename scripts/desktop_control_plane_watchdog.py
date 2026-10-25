@@ -44,6 +44,7 @@ CONFIRM = "INSTALL-DESKTOP-PC24X7-RUNTIME-WATCHDOG"
 RDC_RECOVERY_CONFIRM = "RECOVER-GOVERNED-RDC"
 RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
 UAC_LAUNCHER_SCRIPT = "desktop_control_plane_watchdog_uac_launcher.py"
+HOST_POLICY_SCRIPT = "pc24x7_host_policy.py"
 RDC_HEADLESS_CLAIM = Path(r"C:\ProgramData\ReqSys\RdcSvc\rdc-headless-owner.json")
 RDC_CLAIM_MAX_AGE_SECONDS = 20.0
 
@@ -622,7 +623,7 @@ def _copy_release(source_root: Path, release_root: Path) -> None:
     scripts = release_root / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(__file__).resolve(), scripts / Path(__file__).name)
-    for required_name in (RDC_RECOVERY_SCRIPT, UAC_LAUNCHER_SCRIPT):
+    for required_name in (RDC_RECOVERY_SCRIPT, UAC_LAUNCHER_SCRIPT, HOST_POLICY_SCRIPT):
         required = source_root / "scripts" / required_name
         if not required.is_file():
             raise WatchdogError(f"script obrigatório ausente: {required}")

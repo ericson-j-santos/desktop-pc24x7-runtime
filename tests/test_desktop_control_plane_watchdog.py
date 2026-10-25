@@ -419,6 +419,7 @@ def test_install_stages_release_when_uac_activation_is_required(monkeypatch, tmp
     (source / "scripts").mkdir(parents=True)
     (source / "scripts" / m.RDC_RECOVERY_SCRIPT).write_text("# recovery", encoding="utf-8")
     (source / "scripts" / m.UAC_LAUNCHER_SCRIPT).write_text("# uac", encoding="utf-8")
+    (source / "scripts" / m.HOST_POLICY_SCRIPT).write_text("# host policy", encoding="utf-8")
     runner = make_runner_home(tmp_path)
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
@@ -455,6 +456,7 @@ def test_install_stages_release_when_uac_activation_is_required(monkeypatch, tmp
     assert result["start"]["reason"] == "uac_activation_required"
     assert (runtime / "metadata.json").is_file()
     assert (runtime / "releases" / ("b" * 40) / "scripts" / m.UAC_LAUNCHER_SCRIPT).is_file()
+    assert (runtime / "releases" / ("b" * 40) / "scripts" / m.HOST_POLICY_SCRIPT).is_file()
 
 
 def test_source_contract_is_independent_of_rdc_and_github_runner(tmp_path: Path) -> None:
