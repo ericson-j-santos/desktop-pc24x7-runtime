@@ -154,7 +154,7 @@ def test_model_entry_has_real_issue_fenced_pool_and_uses_no_github_write():
         "verified_final_checkouts",
         "source_raw_bytes_changed",
         "source_index_changed",
-        "validator_checkout_dirty",
+        'prefix + "_checkout_dirty"',
     ):
         assert required in source
     for forbidden in ("docker run", "docker compose", "git push",
