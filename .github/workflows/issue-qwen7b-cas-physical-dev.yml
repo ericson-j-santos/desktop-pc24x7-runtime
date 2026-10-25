@@ -1,0 +1,209 @@
+name: Issue Qwen7B CAS Physical DEV (no Docker)
+
+on:
+  pull_request:
+    types: [edited]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue-qwen-cas-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+
+jobs:
+  admission:
+    name: Owner issue and current SHA admission
+    if: >-
+      github.event.action == 'edited' &&
+      github.actor == 'ericson-j-santos' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/issue-qwen7b-cas-readback-20261025' &&
+      github.event.pull_request.draft == true &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE_CAS_WINDOWS_SHELL_20261025_ONCE') &&
+      github.event.changes.body.from != null &&
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE_CAS_WINDOWS_SHELL_20261025_ONCE')
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      checks: read
+      pull-requests: read
+      issues: read
+    env:
+      WORKER_SHA: 00292e42c497c03bcda0dcb80750841a962c02c8
+      BASE_SHA: 2eebbc18d115cada66ccf13c00dc4687cc77abba
+    steps:
+      - name: Verify issue owner, branches and executed checks
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const worker = process.env.WORKER_SHA, base = process.env.BASE_SHA;
+            const pr = (await github.rest.pulls.get({
+              owner:context.repo.owner,repo:context.repo.repo,
+              pull_number:context.payload.pull_request.number
+            })).data;
+            const runSHA = context.payload.pull_request.head.sha;
+            const main = (await github.rest.repos.getBranch({
+              owner:context.repo.owner,repo:context.repo.repo,branch:'main'
+            })).data;
+            if (pr.state !== 'open' || !pr.draft || pr.head.sha !== runSHA ||
+                pr.base.sha !== main.commit.sha || !pr.body?.includes('OWNER_ISSUE_CAS_WINDOWS_SHELL_20261025_ONCE') ||
+                pr.head.ref !== 'feat/issue-qwen7b-cas-readback-20261025') {
+              core.setFailed('ISSUE_CAS_RUNTIME_SHA_DRIFT'); return;
+            }
+            const [wp,wmain,issue,comment] = await Promise.all([
+              github.rest.pulls.get({owner:'ericson-j-santos',repo:'engineering-worker-pool',pull_number:46}),
+              github.rest.repos.getBranch({owner:'ericson-j-santos',repo:'engineering-worker-pool',branch:'main'}),
+              github.rest.issues.get({owner:'ericson-j-santos',repo:'engineering-worker-pool',issue_number:8}),
+              github.rest.issues.getComment({owner:'ericson-j-santos',repo:'engineering-worker-pool',comment_id:6393288083})
+            ]);
+            if (wp.data.state !== 'open' || !wp.data.draft ||
+                wp.data.head.sha !== worker || wp.data.base.sha !== base ||
+                wmain.data.commit.sha !== base || issue.data.state !== 'open' ||
+                !!issue.data.pull_request || comment.data.user?.login !== 'ericson-j-santos' ||
+                comment.data.author_association !== 'OWNER' ||
+                comment.data.body !== '/local-agent authorize bridge.property.v1 sha:' + base ||
+                comment.data.issue_url !== 'https://api.github.com/repos/ericson-j-santos/engineering-worker-pool/issues/8') {
+              core.setFailed('ISSUE_CAS_OWNER_OR_WORKER_DRIFT'); return;
+            }
+            const [a,b] = await Promise.all([
+              github.rest.checks.listForRef({owner:'ericson-j-santos',repo:'engineering-worker-pool',ref:worker,per_page:100}),
+              github.rest.checks.listForRef({owner:context.repo.owner,repo:context.repo.repo,ref:runSHA,per_page:100})
+            ]);
+            const passed = (set,name,sha) => set.data.check_runs.some(x =>
+              x.name===name && x.head_sha===sha && x.status==='completed' &&
+              x.conclusion==='success' && x.started_at && x.completed_at);
+            if (!['test','native-contract'].every(n=>passed(a,n,worker)) ||
+                !['Python compile and tests','Portable Linux compile and tests'].every(n=>passed(b,n,runSHA))) {
+              core.setFailed('ISSUE_CAS_REQUIRED_CI_NOT_EXECUTED'); return;
+            }
+            core.info('ISSUE_CAS_ADMITTED_SHA=' + worker);
+
+  physical:
+    name: CAS live append/readback on DESKTOP-PDQK954
+    needs: admission
+    if: needs.admission.result == 'success'
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
+    timeout-minutes: 8
+    env:
+      WORKER_POOL_SHA: 00292e42c497c03bcda0dcb80750841a962c02c8
+      RULES_SHA: 628fdb256d03670979cfb5d5b5caa3a1f5b12600
+      EXPECTED_WORKER_SHA: 00292e42c497c03bcda0dcb80750841a962c02c8
+      EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+      NATIVE_OLLAMA_DEV: "1"
+      NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e
+      CORRELATION_ID: issue-cas-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Admit exact Dell host
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne 'DESKTOP-PDQK954' -or $env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'WRONG_ISSUE_CAS_HOST' }
+
+      - name: Checkout pinned runtime
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.EXPECTED_RUNTIME_SHA }}
+          persist-credentials: false
+      - name: Checkout pinned Worker Pool
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_POOL_SHA }}
+          path: external/engineering-worker-pool
+          persist-credentials: false
+      - name: Checkout canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+      - name: Governed Session Launcher
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args = @('--policy',$policy,'--repo',$env:GITHUB_WORKSPACE,
+            '--session-prefix','issue-cas-native','--correlation-id',$env:CORRELATION_ID,
+            '--expected-head',$env:EXPECTED_RUNTIME_SHA,
+            '--sync-ref','origin/feat/issue-qwen7b-cas-readback-20261025',
+            '--require-runner-version-preflight')
+          $raw = & python $launcher @args
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $receipt = @($raw)[-1] | ConvertFrom-Json
+          if ($receipt.result -ne 'SESSION_LAUNCH_OK' -or $receipt.state_validated -ne $true -or $receipt.head -ne $env:EXPECTED_RUNTIME_SHA) { throw 'ISSUE_CAS_SESSION_BLOCKED' }
+          "target=$($receipt.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Venv and dependencies through Command Gateway
+        shell: powershell
+        env:
+          TARGET: ${{ steps.session.outputs.target }}
+          SESSION: ${{ steps.session.outputs.session }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $python = Join-Path $env:TARGET '.venv\Scripts\python.exe'
+          $venv = Join-Path $env:TARGET '.venv'
+          $req = Join-Path $env:GITHUB_WORKSPACE 'external\engineering-worker-pool\requirements.txt'
+          $base = @('--policy',$policy,'--correlation-id',$env:CORRELATION_ID,'run',
+            '--cwd',$env:TARGET,'--session-id',$env:SESSION,
+            '--risk','2','--timeout','200','--expected-head',$env:EXPECTED_RUNTIME_SHA,
+            '--')
+          & python $gateway @base 'python' '-m' 'venv' $venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & python $gateway @base $python '-m' 'pip' 'install' '--isolated' '--disable-pip-version-check' '--no-input' '--no-cache-dir' '-r' $req
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Persist and verify immutable CAS probe through Gateway
+        shell: powershell
+        env:
+          TARGET: ${{ steps.session.outputs.target }}
+          SESSION: ${{ steps.session.outputs.session }}
+          SESSION_TARGET_PATH: ${{ steps.session.outputs.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $script = Join-Path $env:GITHUB_WORKSPACE 'scripts\issue_qwen7b_cas_physical_preflight.py'
+          $python = Join-Path $env:TARGET '.venv\Scripts\python.exe'
+          $args = @('--policy',$policy,'--correlation-id',$env:CORRELATION_ID,
+            'run','--cwd',$env:TARGET,'--session-id',$env:SESSION,'--risk','2',
+            '--timeout','160','--expected-head',$env:EXPECTED_RUNTIME_SHA,
+            '--',$python,'-B',$script)
+          & python $gateway @args
+          exit $LASTEXITCODE
+
+  watchdog:
+    name: Fail-closed Dell pickup watchdog
+    needs: admission
+    if: needs.admission.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Cancel if physical job never starts
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const start = Date.now(), expected = 'CAS live append/readback on DESKTOP-PDQK954';
+            while (Date.now()-start < 300000) {
+              const {data} = await github.rest.actions.listJobsForWorkflowRun({
+                owner:context.repo.owner,repo:context.repo.repo,run_id:context.runId,per_page:100
+              });
+              const job = data.jobs.find(x=>x.name===expected);
+              if (job && job.runner_name==='DESKTOP-PDQK954-runtime' &&
+                  Number(job.runner_id)>0 && job.status!=='queued') {
+                core.info('ISSUE_CAS_PHYSICAL_PICKUP_PASSED'); return;
+              }
+              await new Promise(resolve=>setTimeout(resolve,15000));
+            }
+            core.setFailed('ISSUE_CAS_RUNNER_NO_PICKUP_300S');
+            await github.rest.actions.cancelWorkflowRun({
+              owner:context.repo.owner,repo:context.repo.repo,run_id:context.runId
+            });
