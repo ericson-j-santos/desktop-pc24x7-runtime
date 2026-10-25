@@ -89,23 +89,42 @@ jobs:
               core.setFailed('RAG_RUNTIME_CI_NOT_PROVED'); return;
             }
             const wOwner = 'ericson-j-santos', wRepo = 'engineering-worker-pool';
-            const [workerPR, workerRun, agentBranch] = await Promise.all([
+            const [workerPR, workerRun, agentBranch, workerMain] = await Promise.all([
               github.rest.pulls.get({owner:wOwner, repo:wRepo, pull_number:49}),
               github.rest.actions.getWorkflowRun({
                 owner:wOwner, repo:wRepo, run_id:Number(process.env.WORKER_CI_RUN)
               }),
               github.rest.repos.getBranch({
                 owner:wOwner, repo:'agent-core', branch:'main'
+              }),
+              github.rest.repos.getBranch({
+                owner:wOwner, repo:wRepo, branch:'main'
               })
             ]);
-            if (workerPR.data.state !== 'open' ||
-                workerPR.data.draft !== true ||
+            const mergedSha = '743eb08cc73d0fcfa4a5886d1641755a2ea98e7b';
+            if (workerPR.data.state !== 'closed' ||
+                workerPR.data.merged !== true ||
                 workerPR.data.head.sha !== process.env.WORKER_SHA ||
+                workerPR.data.merge_commit_sha !== mergedSha ||
+                workerMain.data.commit.sha !== mergedSha ||
                 workerRun.data.head_sha !== process.env.WORKER_SHA ||
                 workerRun.data.status !== 'completed' ||
                 workerRun.data.conclusion !== 'success' ||
                 agentBranch.data.commit.sha !== process.env.AGENT_SHA) {
               core.setFailed('RAG_UPSTREAM_SHA_OR_CI_DRIFT'); return;
+            }
+            const [sourceCommit, mergedCommit] = await Promise.all([
+              github.rest.git.getCommit({
+                owner:wOwner,repo:wRepo,commit_sha:process.env.WORKER_SHA
+              }),
+              github.rest.git.getCommit({
+                owner:wOwner,repo:wRepo,commit_sha:mergedSha
+              })
+            ]);
+            if (sourceCommit.data.tree.sha !== mergedCommit.data.tree.sha ||
+                mergedCommit.data.parents.length !== 2 ||
+                mergedCommit.data.parents[1].sha !== process.env.WORKER_SHA) {
+              core.setFailed('RAG_UPSTREAM_MERGED_TREE_DRIFT'); return;
             }
             const { data: workerJobs } = await github.rest.actions.listJobsForWorkflowRun({
               owner:wOwner, repo:wRepo, run_id:Number(process.env.WORKER_CI_RUN),

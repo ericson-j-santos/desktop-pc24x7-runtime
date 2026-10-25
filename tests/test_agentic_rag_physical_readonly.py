@@ -280,6 +280,9 @@ def assert_workflow_is_governed(text):
     assert text.count("OWNER_RAG_DELL_READONLY_20261025_ONCE") >= 3
     assert "RAG_RUNTIME_CI_NOT_PROVED" in text
     assert "RAG_UPSTREAM_MODEL_E2E_NOT_EXECUTED" in text
+    assert "RAG_UPSTREAM_MERGED_TREE_DRIFT" in text
+    assert "743eb08cc73d0fcfa4a5886d1641755a2ea98e7b" in text
+    assert "sourceCommit.data.tree.sha !== mergedCommit.data.tree.sha" in text
     assert "cb42568c4b70faa0e3e05bb49d5a6e41b884281f" in text
     assert "1fc032d4c412bdb4ed202cf1193caf0cb49490ce" in text
     assert "4e6091a133f8d7d157abe6f83c31ca597812e0a4" in text
@@ -321,6 +324,7 @@ def test_workflow_static_security_and_one_shot_controls():
     ("limitMs = 300000", "limitMs = 9999999"),
     ("OWNER_RAG_DELL_READONLY_20261025_ONCE", "MARKER_DISABLED"),
     ("RAG_UPSTREAM_MODEL_E2E_NOT_EXECUTED", "IGNORE_UPSTREAM"),
+    ("RAG_UPSTREAM_MERGED_TREE_DRIFT", "TREE_IGNORED"),
     ("httpx==0.28.1", "httpx"),
 ])
 def test_security_control_removed_is_detected(old,new):
