@@ -19,14 +19,18 @@ m = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 
 
-def test_launcher_preconditions_are_fail_closed() -> None:
-    m.validate_launcher(
-        host="DESKTOP-PDQK954",
-        platform="nt",
-        confirm=m.LAUNCH_CONFIRM,
-    )
+@pytest.mark.parametrize("host", ["DESKTOP-PDQK954", "DESKTOP-RP23OGS"])
+def test_launcher_accepts_authorized_desktops(host: str) -> None:
+    m.validate_launcher(host=host, platform="nt", confirm=m.LAUNCH_CONFIRM)
+
+
+@pytest.mark.parametrize("host", ["Noteri", "UNKNOWN-HOST"])
+def test_launcher_rejects_non_desktop_or_unknown_host(host: str) -> None:
     with pytest.raises(RuntimeError, match="host"):
-        m.validate_launcher(host="Noteri", platform="nt", confirm=m.LAUNCH_CONFIRM)
+        m.validate_launcher(host=host, platform="nt", confirm=m.LAUNCH_CONFIRM)
+
+
+def test_launcher_preconditions_are_fail_closed() -> None:
     with pytest.raises(RuntimeError, match="Windows"):
         m.validate_launcher(
             host="DESKTOP-PDQK954",

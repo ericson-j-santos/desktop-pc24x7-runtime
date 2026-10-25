@@ -49,7 +49,7 @@ def default_runner_home() -> Path:
     local = os.environ.get("LOCALAPPDATA")
     if not local:
         raise BootstrapError("localappdata_missing", "LOCALAPPDATA não definido")
-    return Path(local) / "DesktopPC24x7Runtime" / "GitHubRunner"
+    return Path(local) / "DesktopPC24x7" / "GitHubRunner"
 
 
 def validate_host() -> str:
@@ -57,9 +57,11 @@ def validate_host() -> str:
         raise BootstrapError("windows_required", "Windows obrigatório")
     host = socket.gethostname()
     try:
-        authorized_host(host)
+        profile = authorized_host(host)
     except ValueError as exc:
         raise BootstrapError("host_not_authorized", str(exc)) from None
+    if profile.role not in {"desktop-primary", "desktop-secondary"}:
+        raise BootstrapError("host_not_authorized", "runner desktop exige host desktop autorizado")
     if platform.machine().casefold() not in {"amd64", "x86_64"}:
         raise BootstrapError("x64_required", "arquitetura x64 obrigatória")
     return host
