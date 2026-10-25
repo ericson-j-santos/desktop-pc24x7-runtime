@@ -26,12 +26,12 @@ def test_native_worker_runs_only_on_approved_dispatch_or_exact_pr_transition():
     assert t.count("github.ref == 'refs/heads/main'") == 1
     assert "github.event.changes.body.from != null" in t
     assert "!contains(github.event.changes.body.from" in t
-    assert "NATIVE_QWEN_REGRESSION_20261024_7B_ONCE" in t
+    assert "NATIVE_QWEN_PREFLIGHT_20261024_7B_ONCE" in t
 
 
 def test_exact_source_rules_host_and_governed_gateway():
     t = workflow()
-    assert "WORKER_POOL_SHA: 4836ed0b767649b54ec110ba8e24face4c3717c4" in t
+    assert "WORKER_POOL_SHA: 09226a4d16fac7ca0d126f42cc7d20c4cecc7c4a" in t
     assert "RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661" in t
     assert "NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e" in t
     assert 'NATIVE_OLLAMA_DEV: "1"' in t
