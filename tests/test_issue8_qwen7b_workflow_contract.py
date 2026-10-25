@@ -93,7 +93,7 @@ def test_privileged_job_separate_from_model_and_validator():
     assert "contents: write" in writer
     assert "actions/checkout" not in writer
     assert "github.rest.repos.createOrUpdateFileContents" in writer
-    assert "requires" not in writer or True  # no contract effect implied
+    assert "contents: write" in writer and "contents: write" not in model
     assert "contents: read" in model
     assert "contents: write" not in model
     assert "OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE" in writer
