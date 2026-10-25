@@ -39,6 +39,7 @@ CI_KEYS = ("GITHUB_ACTIONS", "GITHUB_REPOSITORY", "GITHUB_SHA", "RULES_SHA",
            "GITHUB_RUN_ATTEMPT", "GITHUB_ACTOR", "GITHUB_EVENT_NAME",
            "RUNNER_VERSION_OBSERVED", "RUNNER_RUNTIME_SUPPORTED",
            "RUNNER_REGISTRATION_SUPPORTED", "INVENTORY_SESSION_VALIDATED", "INVENTORY_ADMITTED_AT")
+CI_KEYS = CI_KEYS + ("INVENTORY_DISPATCH_PROVENANCE",)
 
 
 class InventoryBlocked(Exception):
@@ -51,6 +52,10 @@ def provenance(env: dict, host: str, platform: str) -> dict:
         age = (datetime.now(timezone.utc) - admitted).total_seconds()
     except (ValueError, TypeError):
         raise InventoryBlocked("ADMISSION_EXPIRED") from None
+    owner_dispatch = env.get("GITHUB_ACTOR") == "ericson-j-santos" and not env.get(
+        "INVENTORY_DISPATCH_PROVENANCE")
+    authorized_one_shot = env.get("GITHUB_ACTOR") == "github-actions[bot]" and env.get(
+        "INVENTORY_DISPATCH_PROVENANCE") == "one-shot:20261024-pdqk954"
     valid = (
         0 <= age <= 300
         and platform == "win32"
@@ -59,7 +64,7 @@ def provenance(env: dict, host: str, platform: str) -> dict:
         and env.get("GITHUB_REPOSITORY") == EXPECTED_REPOSITORY
         and env.get("RUNNER_NAME") == EXPECTED_RUNNER
         and env.get("RUNNER_OS") == "Windows" and env.get("RUNNER_ARCH") == "X64"
-        and env.get("GITHUB_ACTOR") == "ericson-j-santos"
+        and (owner_dispatch or authorized_one_shot)
         and env.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
         and env.get("GITHUB_RUN_ATTEMPT") == "1"
         and re.fullmatch(r"[1-9][0-9]{0,19}", env.get("GITHUB_RUN_ID", "")) is not None

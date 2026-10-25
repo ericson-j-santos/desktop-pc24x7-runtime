@@ -163,6 +163,7 @@ jobs:
       CORRELATION_ID: dedicated-runner-${{ github.run_id }}-${{ github.run_attempt }}
       EVIDENCE_REL: ${{ (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback') && 'artifacts/native-pg-inventory/evidence.json' || 'artifacts/dedicated-runner-e2e/evidence.json' }}
       INVENTORY_ADMITTED_AT: ${{ needs.resolve_rules.outputs.inventory_admitted_at }}
+      INVENTORY_DISPATCH_PROVENANCE: ${{ inputs.inventory_dispatch_provenance }}
     steps:
       - name: Reject stale native pickup before checkout or bootstrap
         if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback')
