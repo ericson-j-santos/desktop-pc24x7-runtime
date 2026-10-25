@@ -464,3 +464,14 @@ def test_scoped_db_direct_transaction_path_remains_available(tmp_path):
     db.close()
     with pytest.raises(sqlite3.ProgrammingError):
         db.execute("SELECT 1")
+
+
+def test_bundle_checkpoint_precedes_destructive_sandbox_cleanup():
+    source = (Path(__file__).resolve().parents[1] /
+              "scripts/issue8_qwen7b_fenced_bundle_stage.py").read_text("utf-8")
+    point = source.index("verified_bundle_receipt(staged)")
+    buffered = source.index("_publish_github_step_outputs(staged)", point)
+    cleanup = source.index('mark_phase("sandbox_teardown")', buffered)
+    assert point < buffered < cleanup
+    assert source.count("_publish_github_step_outputs(staged)") == 1
+    assert "_publish_github_step_outputs(result)" not in source

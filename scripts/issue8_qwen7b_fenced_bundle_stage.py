@@ -483,6 +483,11 @@ def execute() -> dict[str, Any]:
                 and current["fencing_required"] == 1
                 and current["produced_sha"] is None,
                 "local_pool_staged_state_invalid")
+        # Transport the already verified Git bundle before Windows teardown.
+        # Failure of teardown still blocks the approved CAS/Validator/PR path;
+        # only a separate hosted quarantine may retain this evidence.
+        mark_phase("runner_output")
+        _publish_github_step_outputs(staged)
         mark_phase("sandbox_teardown")
         return staged
 
@@ -514,8 +519,7 @@ def main() -> int:
     mark_phase("entry")
     try:
         result = execute()
-        mark_phase("runner_output")
-        _publish_github_step_outputs(result)
+        # Runner output was emitted only after validation, before sandbox cleanup.
         # Never write binary/base64 model artifacts or credentials to logs.
         summary = {k: v for k, v in result.items() if k != "bundle_b64"}
         print(json.dumps(summary, ensure_ascii=True, separators=(",", ":")))

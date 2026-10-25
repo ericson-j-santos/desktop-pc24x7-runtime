@@ -38,7 +38,7 @@ def scripts():
 
 def test_all_embedded_github_scripts_parse_under_node_js():
     snippets = scripts()
-    assert len(snippets) == 4
+    assert len(snippets) == 6
     for snippet in snippets:
         with tempfile.TemporaryDirectory(prefix="issue8-js-check-") as d:
             path = Path(d) / "source.cjs"
@@ -115,3 +115,19 @@ def test_only_one_file_and_sha_bound_output():
     assert "gitBlob" in text
     assert "bundle_sha256" in text
     assert "produced_sha" in text
+
+
+def test_quarantine_is_durable_but_cannot_promote_failed_physical_job():
+    text = workflow()
+    assert "\n  quarantine-cas:\n" in text
+    assert "\n  quarantine-readback:\n" in text
+    assert "always() && needs.physical.result == 'failure'" in text
+    assert "needs.physical.outputs.bundle_b64 != ''" in text
+    assert "ISSUE8_QUARANTINE_ATTESTATION_INVALID" in text
+    assert "ISSUE8_QUARANTINE_READBACK_FAILED" in text
+    assert "agent/issue8-qwen-quarantine-" in text
+    assert "contents: write" in text.split("\n  quarantine-cas:\n")[1].split("\n  quarantine-readback:\n")[0]
+    assert "contents: write" not in text.split("\n  quarantine-readback:\n")[1]
+    assert "if: needs.publish-cas.result == 'success'" in text
+    assert "if: needs.physical.result == 'success'" in text
+    assert "ready_for_pr" not in text.split("\n  quarantine-cas:\n")[1].split("\n  quarantine-readback:\n")[0].lower()

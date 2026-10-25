@@ -405,6 +405,182 @@ jobs:
         shell: bash
         run: python scripts/issue8_qwen7b_independent_bundle_validator.py
 
+  quarantine-cas:
+    name: Preserve verified Git bundle in non-promotable CAS quarantine
+    needs: physical
+    if: >-
+      always() && needs.physical.result == 'failure' &&
+      needs.physical.outputs.bundle_b64 != '' &&
+      needs.physical.outputs.receipt_b64 != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: write
+      actions: read
+      pull-requests: read
+    outputs:
+      quarantine_sha256: ${{ steps.quarantine.outputs.quarantine_sha256 }}
+      quarantine_branch_sha: ${{ steps.quarantine.outputs.quarantine_branch_sha }}
+    steps:
+      - name: Quarantine verified bytes with SHA readback, never mark ready
+        id: quarantine
+        uses: actions/github-script@v7
+        env:
+          BUNDLE_B64: ${{ needs.physical.outputs.bundle_b64 }}
+          RECEIPT_B64: ${{ needs.physical.outputs.receipt_b64 }}
+        with:
+          script: |
+            const {createHash}=require('crypto');
+            const owner='ericson-j-santos',repo='desktop-pc24x7-runtime';
+            const base='a0437b0deb7db42fb91866fe8e77359844579cf6';
+            const worker='21fd68dec6f0da92b3e7da201463401ac5429d64';
+            const branch='agent/issue8-qwen-quarantine-'+worker.slice(0,12);
+            const raw64=String(process.env.BUNDLE_B64||'');
+            const receipt64=String(process.env.RECEIPT_B64||'');
+            if (!raw64 || raw64.length>131072 || !receipt64 || receipt64.length>8192 ||
+                !/^[A-Za-z0-9+/]*={0,2}$/.test(raw64) ||
+                !/^[A-Za-z0-9+/]*={0,2}$/.test(receipt64)) {
+              core.setFailed('ISSUE8_QUARANTINE_TRANSPORT_MISSING');return;
+            }
+            const bytes=Buffer.from(raw64,'base64');
+            let r;
+            try {r=JSON.parse(Buffer.from(receipt64,'base64').toString('utf8'));}
+            catch(e){core.setFailed('ISSUE8_QUARANTINE_RECEIPT_UNREADABLE');return;}
+            const digest=createHash('sha256').update(bytes).digest('hex');
+            if (bytes.length<=200 || bytes.length>96000 ||
+                bytes.toString('base64')!==raw64 ||
+                r.result!=='ISSUE8_BUNDLE_STAGED_UNPUBLISHED' ||
+                r.base_sha!==worker ||
+                r.source_repository!=='ericson-j-santos/engineering-worker-pool' ||
+                r.issue!==8 || r.owner_comment_id!==6399359287 ||
+                !/^[0-9a-f]{40}$/.test(r.produced_sha||'') ||
+                r.produced_sha===worker || !/^dae161e27b0e[0-9a-f]{52}$/.test(r.model_digest||'') ||
+                r.model!=='qwen2.5-coder:7b' ||
+                ![1,2].includes(r.model_calls) || r.replay_model_calls!==0 ||
+                r.accepted_cases!==42 || r.regressions_passed<52 ||
+                r.fencing_required!==true || r.independent_checkout!==true ||
+                r.local_authority_only!==true ||
+                r.cas_persisted!==false || r.pr_created!==false ||
+                r.bundle_sha256!==digest) {
+              core.setFailed('ISSUE8_QUARANTINE_ATTESTATION_INVALID');return;
+            }
+            const [pr,jobs]=await Promise.all([
+              github.rest.pulls.get({owner,repo,pull_number:context.payload.pull_request.number}),
+              github.rest.actions.listJobsForWorkflowRun({
+                owner,repo,run_id:context.runId,per_page:100
+              }),
+            ]);
+            const physical=jobs.data.jobs.find(j=>j.name===
+              'Dell Qwen7B issue8 fenced Builder and independent checkout');
+            if (pr.data.state!=='open' || !pr.data.draft ||
+                pr.data.head.sha!==context.payload.pull_request.head.sha ||
+                pr.data.head.repo?.full_name!==owner+'/'+repo ||
+                pr.data.base.sha!==base ||
+                !pr.data.body?.includes('OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE') ||
+                physical?.conclusion!=='failure') {
+              core.setFailed('ISSUE8_QUARANTINE_PHYSICAL_OR_PR_DRIFT');return;
+            }
+            const path='evidence/issue8/quarantine/sha256/'+digest.slice(0,2)+
+              '/'+digest+'.bundle';
+            let existing=null;
+            try {existing=(await github.rest.repos.getBranch({owner,repo,branch})).data;}
+            catch(e){if(e.status!==404){core.setFailed('ISSUE8_QUARANTINE_BRANCH_UNKNOWN');return;}}
+            if (!existing) {
+              try {await github.rest.git.createRef({
+                owner,repo,ref:'refs/heads/'+branch,sha:base
+              });}
+              catch(e){core.setFailed('ISSUE8_QUARANTINE_CREATE_UNKNOWN');return;}
+              existing=(await github.rest.repos.getBranch({owner,repo,branch})).data;
+            }
+            let file=null;
+            try {file=(await github.rest.repos.getContent({owner,repo,path,ref:branch})).data;}
+            catch(e){if(e.status!==404){core.setFailed('ISSUE8_QUARANTINE_READ_UNKNOWN');return;}}
+            if (!file) {
+              if (existing.commit.sha!==base) {
+                core.setFailed('ISSUE8_QUARANTINE_CONFLICT');return;
+              }
+              try {await github.rest.repos.createOrUpdateFileContents({
+                owner,repo,branch,path,content:raw64,
+                message:'evidence: quarantine real Qwen bundle after Windows cleanup failure'
+              });}
+              catch(e){core.setFailed('ISSUE8_QUARANTINE_WRITE_UNKNOWN');return;}
+            }
+            const value=(await github.rest.repos.getContent({owner,repo,path,ref:branch})).data;
+            const copy=Buffer.from((value.content||'').replace(/\s+/g,''),'base64');
+            const gitBlob=createHash('sha1').update(
+              Buffer.concat([Buffer.from('blob '+copy.length+'\0'),copy])
+            ).digest('hex');
+            const head=(await github.rest.repos.getBranch({owner,repo,branch})).data.commit.sha;
+            const diff=(await github.rest.repos.compareCommitsWithBasehead({
+              owner,repo,basehead:base+'...'+head
+            })).data;
+            if (value.type!=='file' || value.path!==path ||
+                value.size!==bytes.length || value.sha!==gitBlob ||
+                !copy.equals(bytes) || diff.status!=='ahead' ||
+                diff.ahead_by!==1 || diff.behind_by!==0 ||
+                diff.total_commits!==1 || diff.files?.length!==1 ||
+                diff.files[0].filename!==path || diff.files[0].status!=='added') {
+              core.setFailed('ISSUE8_QUARANTINE_READBACK_FAILED');return;
+            }
+            core.setOutput('quarantine_sha256',digest);
+            core.setOutput('quarantine_branch_sha',head);
+            core.info('ISSUE8_QUARANTINE_ONLY sha='+head+' digest='+digest+
+                      ' cleanup_verified=false ready_for_pr=false');
+
+  quarantine-readback:
+    name: Independent readback of non-promotable Qwen quarantine
+    needs: [physical, quarantine-cas]
+    if: >-
+      always() && needs.physical.result == 'failure' &&
+      needs.quarantine-cas.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+    env:
+      QUARANTINE_DIGEST: ${{ needs.quarantine-cas.outputs.quarantine_sha256 }}
+      QUARANTINE_HEAD: ${{ needs.quarantine-cas.outputs.quarantine_branch_sha }}
+    steps:
+      - name: Verify Git object identity and exact single-file scope
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {createHash}=require('crypto');
+            const owner='ericson-j-santos',repo='desktop-pc24x7-runtime';
+            const base='a0437b0deb7db42fb91866fe8e77359844579cf6';
+            const branch='agent/issue8-qwen-quarantine-21fd68dec6f0';
+            const digest=String(process.env.QUARANTINE_DIGEST||'');
+            const expectedHead=String(process.env.QUARANTINE_HEAD||'');
+            if (!/^[0-9a-f]{64}$/.test(digest) ||
+                !/^[0-9a-f]{40}$/.test(expectedHead)) {
+              core.setFailed('ISSUE8_QUARANTINE_READBACK_FIELDS_INVALID');return;
+            }
+            const path='evidence/issue8/quarantine/sha256/'+digest.slice(0,2)+
+              '/'+digest+'.bundle';
+            const [file,ref,diff]=await Promise.all([
+              github.rest.repos.getContent({owner,repo,path,ref:branch}),
+              github.rest.repos.getBranch({owner,repo,branch}),
+              github.rest.repos.compareCommitsWithBasehead({
+                owner,repo,basehead:base+'...'+expectedHead
+              }),
+            ]);
+            const bytes=Buffer.from((file.data.content||'').replace(/\s+/g,''),'base64');
+            const got=createHash('sha256').update(bytes).digest('hex');
+            const blob=createHash('sha1').update(
+              Buffer.concat([Buffer.from('blob '+bytes.length+'\0'),bytes])
+            ).digest('hex');
+            if (ref.data.commit.sha!==expectedHead || file.data.type!=='file' ||
+                file.data.path!==path || file.data.size!==bytes.length ||
+                file.data.sha!==blob || got!==digest ||
+                diff.data.ahead_by!==1 || diff.data.behind_by!==0 ||
+                diff.data.total_commits!==1 || diff.data.files?.length!==1 ||
+                diff.data.files[0].filename!==path ||
+                bytes.length<=200 || bytes.length>96000) {
+              core.setFailed('ISSUE8_QUARANTINE_INDEPENDENT_READBACK_FAILED');return;
+            }
+            core.info('ISSUE8_QUARANTINE_INDEPENDENTLY_READ digest='+digest+
+                      ' no_ready_for_pr=true no_draft=true');
+
   physical-watchdog:
     name: Physical Dell pickup and 300s material-progress watchdog
     needs: admission
