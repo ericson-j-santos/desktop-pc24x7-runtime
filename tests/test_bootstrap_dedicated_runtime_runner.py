@@ -20,11 +20,16 @@ def test_contract_is_fixed_and_separate_from_reqsys_runner(monkeypatch, tmp_path
     assert m.REPOSITORY == "ericson-j-santos/desktop-pc24x7-runtime"
     assert m.RUNNER_NAME == "DESKTOP-PDQK954-runtime"
     assert m.RUNNER_LABELS == "pc24x7,desktop-runtime,runtime-dev,desktop-pdqk954"
-    expected = tmp_path / "DesktopPC24x7Runtime" / "GitHubRunner"
+    expected = tmp_path / "DesktopPC24x7" / "GitHubRunner"
     assert m.default_runner_home() == expected
     assert m.default_runner_home() == expected
     assert "Pc24x7GitHubRunner" not in str(expected)
     assert not expected.exists()
+
+
+def test_bootstrap_and_watchdog_share_runner_home(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    assert m.default_runner_home() == m.watchdog._candidate_runner_homes()[0]
 
 
 @pytest.mark.parametrize("localappdata", [None, ""])
