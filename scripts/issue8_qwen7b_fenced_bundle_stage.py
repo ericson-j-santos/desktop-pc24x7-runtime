@@ -19,7 +19,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
-from typing import Any
+from typing import Any, Callable
 
 HOST = "DESKTOP-PDQK954"
 RUNTIME = "ericson-j-santos/desktop-pc24x7-runtime"
@@ -109,6 +109,42 @@ def verified_bundle_receipt(report: dict[str, Any]) -> dict[str, Any]:
     return {**report, "bundle_bytes": len(blob)}
 
 
+def verified_final_checkouts(
+    worker: Path, builder: Path, independent: Path, *,
+    source_raw_sha256: str, produced_sha: str,
+    git_read: Callable[..., str], source_clean: Callable[[Path], str],
+) -> None:
+    """Verify immutable source bytes and clean Git trees, not Git status mode labels.
+
+    On Windows, Git can change the status classification between normalized
+    CRLF and exact clean without changing HEAD, index or physical bytes.
+    Never accept an actual byte, staged-index or untracked worktree change.
+    """
+    require(git_read(worker, "rev-parse", "HEAD") == WORKER_SHA,
+            "source_head_changed")
+    source_file = worker / PATH
+    require(source_file.is_file() and not source_file.is_symlink(),
+            "source_file_unavailable")
+    require(hashlib.sha256(source_file.read_bytes()).hexdigest() == source_raw_sha256,
+            "source_raw_bytes_changed")
+    require(git_read(worker, "diff", "--cached", "--name-only", "HEAD", "--") == "",
+            "source_index_changed")
+    try:
+        mode = source_clean(worker)
+    except Exception as exc:
+        code = str(exc)
+        if code in ("source_tree_dirty", "source_blob_mismatch"):
+            raise IssueStageBlocked(code) from None
+        raise IssueStageBlocked("source_checkout_unverified") from None
+    require(mode in ("exact_clean", "git_verified_crlf_normalization"),
+            "source_checkout_unverified")
+    for checkout, prefix in ((builder, "builder"), (independent, "validator")):
+        require(git_read(checkout, "rev-parse", "HEAD") == produced_sha,
+                prefix + "_head_changed")
+        require(git_read(checkout, "status", "--porcelain", "--untracked-files=all") == "",
+                prefix + "_checkout_dirty")
+
+
 def execute() -> dict[str, Any]:
     env = os.environ
     require(os.name == "nt"
@@ -147,7 +183,8 @@ def execute() -> dict[str, Any]:
     require(git(worker, "rev-parse", "HEAD") == WORKER_SHA
             and git(worker, "rev-parse", "HEAD:" + PATH) == SOURCE_BLOB,
             "worker_sha_or_blob_changed")
-    source_mode = verified_source_clean(worker)
+    verified_source_clean(worker)
+    source_raw_sha256 = sha256((worker / PATH).read_bytes())
     binding = IssueBinding(
         number=ISSUE, base_sha=WORKER_SHA, comment_id=OWNER_COMMENT,
         request_id="issue-" + hashlib.sha256(
@@ -261,11 +298,12 @@ def execute() -> dict[str, Any]:
                 and regressions.get("failed_count") == 0
                 and regressions.get("error_count") == 0,
                 "independent_regressions_failed")
-        require(git(worker, "rev-parse", "HEAD") == WORKER_SHA
-                and verified_source_clean(worker) == source_mode
-                and git(builder, "status", "--porcelain") == ""
-                and git(independent, "status", "--porcelain") == "",
-                "source_integrity_lost")
+        verified_final_checkouts(
+            worker, builder, independent,
+            source_raw_sha256=source_raw_sha256,
+            produced_sha=result["produced_sha"],
+            git_read=git, source_clean=verified_source_clean,
+        )
         bundle = sandbox / "change.bundle"
         git(builder, "bundle", "create", str(bundle), "HEAD",
             "^" + WORKER_SHA)

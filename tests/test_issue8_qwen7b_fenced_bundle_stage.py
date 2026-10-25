@@ -151,10 +151,127 @@ def test_model_entry_has_real_issue_fenced_pool_and_uses_no_github_write():
         "replay_model_calls", "run_bridge_regressions(independent, sandbox)",
         "git(builder, \"bundle\", \"create\"",
         "git(worker, \"bundle\", \"verify\"",
-        "source_integrity_lost",
+        "verified_final_checkouts",
+        "source_raw_bytes_changed",
+        "source_index_changed",
+        "validator_checkout_dirty",
     ):
         assert required in source
     for forbidden in ("docker run", "docker compose", "git push",
                       "force-with-lease", "gh pr merge", "ollama pull",
                       "repo.create_pull_request", "https://api.openai.com"):
         assert forbidden not in source.lower()
+
+
+def _isolated_final_integrity_fixture(tmp_path):
+    """Pure unit fixture: no physical inference, CAS, credential or GitHub write."""
+    worker = tmp_path / "source"
+    source_file = worker / stage.PATH
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"unmodified LF source\n")
+    builder = tmp_path / "builder"
+    independent = tmp_path / "validator"
+    builder.mkdir()
+    independent.mkdir()
+    produced = "e" * 40
+    state = {
+        "source_head": stage.WORKER_SHA,
+        "source_index": "",
+        "source_mode": "exact_clean",
+        "source_clean_error": "",
+        "builder_head": produced,
+        "builder_status": "",
+        "validator_head": produced,
+        "validator_status": "",
+    }
+    observed = []
+
+    def git_read(root, *arguments):
+        observed.append((root, arguments))
+        if root == worker and arguments == ("rev-parse", "HEAD"):
+            return state["source_head"]
+        if root == worker and arguments == (
+                "diff", "--cached", "--name-only", "HEAD", "--"):
+            return state["source_index"]
+        for name, checkout in (("builder", builder), ("validator", independent)):
+            if root == checkout and arguments == ("rev-parse", "HEAD"):
+                return state[name + "_head"]
+            if root == checkout and arguments == (
+                    "status", "--porcelain", "--untracked-files=all"):
+                return state[name + "_status"]
+        raise AssertionError("unexpected Git operation")
+
+    def source_clean(root):
+        assert root == worker
+        if state["source_clean_error"]:
+            raise RuntimeError(state["source_clean_error"])
+        return state["source_mode"]
+
+    values = {
+        "source_raw_sha256": hashlib.sha256(source_file.read_bytes()).hexdigest(),
+        "produced_sha": produced,
+        "git_read": git_read,
+        "source_clean": source_clean,
+    }
+    return worker, builder, independent, source_file, state, observed, values
+
+
+def test_final_integrity_accepts_git_mode_transition_and_idempotent_replay(tmp_path):
+    worker, builder, independent, source_file, state, commands, values = (
+        _isolated_final_integrity_fixture(tmp_path)
+    )
+    # Git's status label can change after stat refresh without byte changes.
+    state["source_mode"] = "git_verified_crlf_normalization"
+    assert values["source_clean"](worker) == "git_verified_crlf_normalization"
+    state["source_mode"] = "exact_clean"
+    for _ in range(2):
+        stage.verified_final_checkouts(worker, builder, independent, **values)
+    assert source_file.read_bytes() == b"unmodified LF source\n"
+    assert all(command[1][0] in {"rev-parse", "diff", "status"}
+               for command in commands)
+
+
+@pytest.mark.parametrize(("fault", "reason"), [
+    ("source_head", "source_head_changed"),
+    ("source_bytes", "source_raw_bytes_changed"),
+    ("source_crlf", "source_raw_bytes_changed"),
+    ("source_index", "source_index_changed"),
+    ("source_tree", "source_tree_dirty"),
+    ("source_blob", "source_blob_mismatch"),
+    ("source_unverified", "source_checkout_unverified"),
+    ("source_mode_unknown", "source_checkout_unverified"),
+    ("builder_head", "builder_head_changed"),
+    ("builder_status", "builder_checkout_dirty"),
+    ("validator_head", "validator_head_changed"),
+    ("validator_status", "validator_checkout_dirty"),
+])
+def test_final_integrity_rejects_real_drift_and_identifies_gate(tmp_path, fault, reason):
+    worker, builder, independent, source_file, state, _, values = (
+        _isolated_final_integrity_fixture(tmp_path)
+    )
+    if fault == "source_head":
+        state["source_head"] = "f" * 40
+    elif fault == "source_bytes":
+        source_file.write_bytes(b"changed content\n")
+    elif fault == "source_crlf":
+        source_file.write_bytes(b"unmodified LF source\r\n")
+    elif fault == "source_index":
+        state["source_index"] = stage.PATH
+    elif fault == "source_tree":
+        state["source_clean_error"] = "source_tree_dirty"
+    elif fault == "source_blob":
+        state["source_clean_error"] = "source_blob_mismatch"
+    elif fault == "source_unverified":
+        state["source_clean_error"] = "unexpected failure"
+    elif fault == "source_mode_unknown":
+        state["source_mode"] = "unchecked"
+    elif fault == "builder_head":
+        state["builder_head"] = "f" * 40
+    elif fault == "builder_status":
+        state["builder_status"] = "?? unexpected.tmp"
+    elif fault == "validator_head":
+        state["validator_head"] = "f" * 40
+    elif fault == "validator_status":
+        state["validator_status"] = " M app/portfolio_bridge.py"
+    with pytest.raises(stage.IssueStageBlocked, match="^" + reason + "$"):
+        stage.verified_final_checkouts(worker, builder, independent, **values)
