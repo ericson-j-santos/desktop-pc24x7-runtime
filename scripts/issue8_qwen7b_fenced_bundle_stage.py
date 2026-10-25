@@ -299,10 +299,36 @@ def execute() -> dict[str, Any]:
         return staged
 
 
+def _publish_github_step_outputs(report: dict[str, Any]) -> None:
+    """Runner-owned IPC only; bytes are public Git objects, never credentials."""
+    verified_bundle_receipt(report)
+    output = os.environ.get("GITHUB_OUTPUT", "")
+    runner_temp = os.environ.get("RUNNER_TEMP", "")
+    require(bool(output and runner_temp), "github_output_ipc_missing")
+    dest = Path(output).resolve()
+    temp = Path(runner_temp).resolve()
+    require(dest.is_file() and not dest.is_symlink()
+            and dest.name.startswith("set_output_")
+            and dest.is_relative_to(temp) and temp.is_dir(),
+            "github_output_destination_untrusted")
+    summary = {k: v for k, v in report.items() if k != "bundle_b64"}
+    encoded = base64.b64encode(json.dumps(
+        summary, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("ascii")).decode("ascii")
+    with dest.open("a", encoding="ascii", newline="\\n") as stream:
+        stream.write("bundle_b64=" + report["bundle_b64"] + "\\n")
+        stream.write("receipt_b64=" + encoded + "\\n")
+
+
 def main() -> int:
     sys.dont_write_bytecode = True
     try:
-        print(json.dumps(execute(), ensure_ascii=True, separators=(",", ":")))
+        result = execute()
+        _publish_github_step_outputs(result)
+        # Never write binary/base64 model artifacts or credentials to logs.
+        summary = {k: v for k, v in result.items() if k != "bundle_b64"}
+        print(json.dumps(summary, ensure_ascii=True, separators=(",", ":")))
         return 0
     except Exception as exc:
         raw = str(exc)
