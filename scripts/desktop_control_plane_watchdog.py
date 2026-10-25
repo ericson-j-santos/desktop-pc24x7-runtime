@@ -64,14 +64,21 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def authorized_desktop_profile(host: str):
+    try:
+        profile = authorized_host(host)
+    except ValueError as exc:
+        raise WatchdogError(str(exc)) from None
+    if profile.role not in {"desktop-primary", "desktop-secondary"}:
+        raise WatchdogError(f"host não autorizado para watchdog desktop: {host}")
+    return profile
+
+
 def require_windows_desktop() -> str:
     if os.name != "nt":
         raise WatchdogError("Windows obrigatório")
     host = socket.gethostname()
-    try:
-        authorized_host(host)
-    except ValueError as exc:
-        raise WatchdogError(str(exc)) from None
+    authorized_desktop_profile(host)
     return host
 
 
@@ -657,8 +664,10 @@ def load_installed_metadata(
     expected_release = runtime_root / "releases" / source_sha.lower()
     if release_root != expected_release:
         raise WatchdogError("release_root não corresponde ao source_sha governado")
-    if str(metadata.get("host") or "").casefold() != EXPECTED_HOST.casefold():
-        raise WatchdogError("metadata pertence a host não autorizado")
+    metadata_host = str(metadata.get("host") or "").strip()
+    authorized_desktop_profile(metadata_host)
+    if os.name == "nt" and metadata_host.casefold() != socket.gethostname().casefold():
+        raise WatchdogError("metadata pertence a outro host autorizado")
     if os.name == "nt" and runtime_root != default_runtime_root().resolve():
         raise WatchdogError("runtime_root fora do caminho governado do Desktop")
     release_watchdog = release_root / "scripts" / "desktop_control_plane_watchdog.py"
