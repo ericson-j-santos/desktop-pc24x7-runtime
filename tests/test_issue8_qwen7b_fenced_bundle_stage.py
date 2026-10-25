@@ -146,6 +146,7 @@ def test_model_entry_has_real_issue_fenced_pool_and_uses_no_github_write():
               "scripts/issue8_qwen7b_fenced_bundle_stage.py").read_text("utf8")
     for required in (
         "WorkerPoolStore(", "fencing_required=True",
+        'git(sandbox, "-c", "core.autocrlf=false", "clone"',
         "pool.claim_task(", "pool.start_task(", "NativeStructuredOllama()",
         "replay_model_calls", "run_bridge_regressions(independent, sandbox)",
         "git(builder, \"bundle\", \"create\"",
