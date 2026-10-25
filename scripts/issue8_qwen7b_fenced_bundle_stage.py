@@ -163,7 +163,9 @@ def execute() -> dict[str, Any]:
         state = sandbox / "repair-state"
         # Force canonical Git LF materialization on Windows. Hashes in
         # cross-host CAS receipts must match the blob bytes on hosted Linux.
-        git(sandbox, "clone", "-c", "core.autocrlf=false",
+        # A process-scoped -c affects checkout LF without persisting the
+        # setting in .git/config (the structured worker forbids that key).
+        git(sandbox, "-c", "core.autocrlf=false", "clone",
             "--no-hardlinks", str(worker), str(builder))
         git(builder, "remote", "remove", "origin")
         git(builder, "switch", "-c", "worker/issue8-qwen")
@@ -238,7 +240,7 @@ def execute() -> dict[str, Any]:
                 and replay.get("model_calls") == 0
                 and replay.get("produced_sha") == result["produced_sha"],
                 "no_inference_replay_not_proved")
-        git(sandbox, "clone", "-c", "core.autocrlf=false",
+        git(sandbox, "-c", "core.autocrlf=false", "clone",
             "--no-hardlinks", str(builder), str(independent))
         git(independent, "remote", "remove", "origin")
         git(independent, "checkout", "--detach", result["produced_sha"])
