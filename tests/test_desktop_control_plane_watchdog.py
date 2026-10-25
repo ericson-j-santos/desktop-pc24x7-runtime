@@ -32,6 +32,20 @@ def test_rejects_other_host(monkeypatch) -> None:
         m.require_windows_desktop()
 
 
+@pytest.mark.parametrize("host", ["DESKTOP-PDQK954", "DESKTOP-RP23OGS"])
+def test_accepts_authorized_desktop_profiles(monkeypatch, host: str) -> None:
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: host)
+    assert m.require_windows_desktop() == host
+
+
+def test_rejects_authorized_non_desktop_profile(monkeypatch) -> None:
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: "NOTERI")
+    with pytest.raises(m.WatchdogError, match="watchdog desktop"):
+        m.require_windows_desktop()
+
+
 def test_runner_home_requires_local_runner_contract(tmp_path: Path) -> None:
     root = tmp_path / "actions-runner"
     root.mkdir()
@@ -327,6 +341,25 @@ def test_cycle_recovers_rdc_and_runner_and_writes_sanitized_state(monkeypatch, t
     assert persisted["ok"] is True
 
 
+def test_lenovo_cycle_never_runs_dell_rdc(monkeypatch, tmp_path: Path) -> None:
+    runner_home = make_runner_home(tmp_path)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: "DESKTOP-RP23OGS")
+    monkeypatch.setattr(m, "validate_runner_home", lambda path: runner_home)
+    monkeypatch.setattr(m, "recover_rdc", lambda **kwargs: pytest.fail("Dell RDC invoked on Lenovo"))
+    monkeypatch.setattr(m, "start_runner", lambda *args, **kwargs: {"status": "process_running"})
+    metadata = {
+        "runtime_root": str(runtime), "release_root": str(tmp_path / "release"),
+        "runner_home": str(runner_home), "python_executable": "python",
+        "source_sha": "a" * 40,
+    }
+    result = m.cycle(metadata)
+    assert result["ok"] is True
+    assert result["rdc_required"] is False
+    assert result["rdc"]["status"] == "not_applicable"
+    assert result["github_pickup_required"] is True
+
+
 def test_install_requires_exact_confirmation(tmp_path: Path) -> None:
     with pytest.raises(m.WatchdogError, match="confirmação inválida"):
         m.install(
@@ -345,6 +378,7 @@ def test_load_installed_metadata_binds_release_and_metadata(
 ) -> None:
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(m, "default_runtime_root", lambda: runtime)
+    monkeypatch.setattr(m.socket, "gethostname", lambda: m.EXPECTED_HOST)
     release = runtime / "releases" / ("a" * 40)
     scripts = release / "scripts"
     scripts.mkdir(parents=True)
@@ -404,6 +438,7 @@ def test_install_stages_release_when_uac_activation_is_required(monkeypatch, tmp
     (source / "scripts").mkdir(parents=True)
     (source / "scripts" / m.RDC_RECOVERY_SCRIPT).write_text("# recovery", encoding="utf-8")
     (source / "scripts" / m.UAC_LAUNCHER_SCRIPT).write_text("# uac", encoding="utf-8")
+    (source / "scripts" / m.HOST_POLICY_SCRIPT).write_text("# host policy", encoding="utf-8")
     runner = make_runner_home(tmp_path)
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
@@ -440,6 +475,7 @@ def test_install_stages_release_when_uac_activation_is_required(monkeypatch, tmp
     assert result["start"]["reason"] == "uac_activation_required"
     assert (runtime / "metadata.json").is_file()
     assert (runtime / "releases" / ("b" * 40) / "scripts" / m.UAC_LAUNCHER_SCRIPT).is_file()
+    assert (runtime / "releases" / ("b" * 40) / "scripts" / m.HOST_POLICY_SCRIPT).is_file()
 
 
 def test_source_contract_is_independent_of_rdc_and_github_runner(tmp_path: Path) -> None:

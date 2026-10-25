@@ -23,7 +23,7 @@ nova identidade, sem API de inferência externa e sem edição de código.
 A PR de preparação é inicialmente criada em **draft sem marcador de execução**.
 Somente após CI Windows e Linux com testes realmente executados no SHA atual,
 uma mudança explícita de corpo de PR pelo proprietário acrescenta o marcador
-OWNER_RAG_DELL_READONLY_20261025_ONCE. O workflow detecta a transição
+OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE. O workflow detecta a transição
 PR.body.before sem marcador -> PR.body.after com marcador. Eventos push,
 schedule, synchronize, workflow_dispatch, reabertura ou edição posterior
 sem essa transição não disparam o canário.
@@ -80,3 +80,21 @@ de permissão. A falha prévia sandbox_cleanup_permission_denied do run
 
 Não declarar Agentic RAG operacional no Dell até o E2E físico real, bem-sucedido
 e relido independentemente. Enquanto houver gate pendente, usar PARCIAL/BLOQUEADO.
+
+## Revalidação do transporte após o primeiro bloqueio
+
+O run físico #40218210768 comprovou pickup no Dell e falhou no Session Launcher,
+na etapa `synchronize_base`, durante o segundo `git fetch` da cópia isolada
+(`getsockname() failed with errno 10022`). Nenhum comando de inferência ocorreu.
+Posteriormente, o mesmo Dell executou `git fetch`, Session Launcher e Gateway
+com sucesso no canário #40220795820; isto demonstra nova condição de rede,
+mas **não** garante que o segundo fetch esteja resolvido.
+
+A primeira autorização `OWNER_RAG_DELL_READONLY_20261025_ONCE` foi consumida e
+não pode disparar novamente. Apenas a transição explícita ao novo marcador
+`OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE` após CI em SHA corrente autoriza uma segunda
+sonda física, com a mesma admissão e proibição de contornos. Nenhuma repetição
+automática se o erro de socket voltar a ocorrer.
+
+O branch da PR foi sincronizado com a `main` após as PRs #96/#97,
+com merge não destrutivo e preservação dos quatro arquivos do canário.

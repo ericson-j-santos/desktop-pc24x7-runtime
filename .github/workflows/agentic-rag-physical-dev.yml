@@ -21,9 +21,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/agentic-rag-physical-readonly-20261025' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_RAG_DELL_READONLY_20261025_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_RAG_DELL_READONLY_20261025_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -59,7 +59,7 @@ jobs:
                 pr.head.sha !== eventPr.head.sha ||
                 pr.base.ref !== 'main' ||
                 pr.base.sha !== main.commit.sha ||
-                !pr.body?.includes('OWNER_RAG_DELL_READONLY_20261025_ONCE')) {
+                !pr.body?.includes('OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE')) {
               core.setFailed('RAG_PR_OR_BASE_CHANGED'); return;
             }
             const { data: changes } = await github.rest.pulls.listFiles({

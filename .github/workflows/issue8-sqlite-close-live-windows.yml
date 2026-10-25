@@ -1,0 +1,43 @@
+name: Issue8 isolated SQLite handle closure Windows E2E
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-close:
+    name: Issue8 real Windows SQLite file release
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/issue8-fenced-qwen-bundle-20261025'
+    runs-on: windows-latest
+    timeout-minutes: 6
+    steps:
+      - name: Checkout runtime at PR HEAD
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - name: Checkout pinned Worker Pool
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: 21fd68dec6f0da92b3e7da201463401ac5429d64
+          path: external/engineering-worker-pool
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Check real SQLite lifecycle, unlink and idempotent replay
+        shell: powershell
+        env:
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: |
+          $ErrorActionPreference='Stop'
+          python -B scripts\issue8_sqlite_close_live_windows.py
+          exit $LASTEXITCODE

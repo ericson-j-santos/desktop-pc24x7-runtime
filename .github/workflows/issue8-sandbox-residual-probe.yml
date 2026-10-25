@@ -1,0 +1,185 @@
+name: Issue8 Windows residual read-only diagnosis DEV
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue8-residual-diagnosis-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Issue8 read-only residue probe contract
+    if: >-
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/issue8-fenced-qwen-bundle-20261025'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Read-only probe contract and negative controls
+        shell: bash
+        run: |
+          python -m pip install --disable-pip-version-check pytest==8.4.2
+          python -m compileall -q scripts/issue8_sandbox_residual_probe.py tests/test_issue8_sandbox_residual_probe.py
+          python -m pytest -q tests/test_issue8_sandbox_residual_probe.py
+
+  admission:
+    name: Exact owner and SHA admission for read-only probe
+    needs: contract
+    if: >-
+      needs.contract.result == 'success' &&
+      github.event.action == 'edited' &&
+      github.actor == 'ericson-j-santos' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/issue8-fenced-qwen-bundle-20261025' &&
+      github.event.pull_request.draft == true &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_READONLY_PROBE_20261025_ONCE') &&
+      github.event.changes.body.from != null &&
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_READONLY_PROBE_20261025_ONCE')
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+      actions: read
+    steps:
+      - name: Attest source, error run, current checks and no running physical model
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner='ericson-j-santos',repo='desktop-pc24x7-runtime';
+            const sha=context.payload.pull_request.head.sha;
+            const pr=(await github.rest.pulls.get({
+              owner,repo,pull_number:context.payload.pull_request.number
+            })).data;
+            const [main,worker,failed,checks,allRuns]=await Promise.all([
+              github.rest.repos.getBranch({owner,repo,branch:'main'}),
+              github.rest.repos.getBranch({owner,repo:'engineering-worker-pool',branch:'main'}),
+              github.rest.actions.getWorkflowRun({owner,repo,run_id:40214413825}),
+              github.rest.checks.listForRef({owner,repo,ref:sha,per_page:100}),
+              github.rest.actions.listWorkflowRunsForRepo({owner,repo,branch:pr.head.ref,per_page:100}),
+            ]);
+            const passed=name=>checks.data.check_runs.some(c=>
+              c.name===name && c.head_sha===sha && c.status==='completed' &&
+              c.conclusion==='success' && c.started_at && c.completed_at);
+            const activePhysical=allRuns.data.workflow_runs.some(x=>
+              x.id!==context.runId && x.status!=='completed' &&
+              x.name==='Issue 8 Qwen7B fenced Git bundle and hosted CAS DEV');
+            const sourceBase='21fd68dec6f0da92b3e7da201463401ac5429d64';
+            // This is a historical, read-only probe: the Worker main may
+            // advance as long as the reviewed source commit remains ancestral.
+            // The Qwen Builder's separate SHA-current gate is NOT changed.
+            const [lineage,reviewedFile]=await Promise.all([
+              github.rest.repos.compareCommitsWithBasehead({
+                owner,repo:'engineering-worker-pool',
+                basehead:sourceBase+'...'+worker.data.commit.sha
+              }),
+              github.rest.repos.getContent({
+                owner,repo:'engineering-worker-pool',
+                path:'app/portfolio_bridge.py',ref:sourceBase
+              }),
+            ]);
+            const oldCommitStillCanonical=
+              (lineage.data.status==='ahead'||lineage.data.status==='identical') &&
+              lineage.data.behind_by===0 && reviewedFile.data.type==='file' &&
+              reviewedFile.data.sha==='d9a25c574163c49f695e774609949160d94f4490';
+            if (pr.state!=='open' || !pr.draft || pr.head.sha!==sha ||
+                pr.head.ref!=='feat/issue8-fenced-qwen-bundle-20261025' ||
+                pr.head.repo?.full_name!==owner+'/'+repo ||
+                pr.base.sha!=='a0437b0deb7db42fb91866fe8e77359844579cf6' ||
+                main.data.commit.sha!=='a0437b0deb7db42fb91866fe8e77359844579cf6' ||
+                !oldCommitStillCanonical ||
+                !pr.body?.includes('OWNER_ISSUE8_READONLY_PROBE_20261025_ONCE') ||
+                failed.data.head_sha!=='50d35e3126d68872c9b3c9d7edde34878d39508e' ||
+                failed.data.status!=='completed' || failed.data.conclusion!=='failure' ||
+                !passed('Issue8 read-only residue probe contract') ||
+                !passed('Python compile and tests') ||
+                !passed('Portable Linux compile and tests') || activePhysical) {
+              core.setFailed('ISSUE8_READONLY_PROBE_ADMISSION_BLOCKED');return;
+            }
+            core.info('ISSUE8_READONLY_PROBE_ADMITTED sha='+sha+' failed_run=40214413825');
+
+  inspect:
+    name: Dell original issue8 residue read-only via Command Gateway
+    needs: admission
+    if: needs.admission.result == 'success'
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
+    timeout-minutes: 7
+    permissions:
+      contents: read
+    env:
+      EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+      RULES_SHA: 4e6091a133f8d7d157abe6f83c31ca597812e0a4
+      CORRELATION_ID: issue8-residue-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Verify exact Dell host
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne 'DESKTOP-PDQK954' -or $env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'ISSUE8_PROBE_WRONG_HOST' }
+      - name: Checkout exact code without stored credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.EXPECTED_RUNTIME_SHA }}
+          persist-credentials: false
+      - name: Checkout canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+      - name: Session Launcher read-only preflight
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $launcher=Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy=Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args=@('--policy',$policy,'--repo',$env:GITHUB_WORKSPACE,
+            '--session-prefix','issue8-residue-probe',
+            '--correlation-id',$env:CORRELATION_ID,
+            '--expected-head',$env:EXPECTED_RUNTIME_SHA,
+            '--sync-ref','origin/feat/issue8-fenced-qwen-bundle-20261025',
+            '--require-runner-version-preflight')
+          $raw=& python $launcher @args
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $receipt=@($raw)[-1] | ConvertFrom-Json
+          if ($receipt.result -ne 'SESSION_LAUNCH_OK' -or
+              $receipt.state_validated -ne $true -or
+              $receipt.head -ne $env:EXPECTED_RUNTIME_SHA) { throw 'ISSUE8_PROBE_SESSION_BLOCKED' }
+          "target=$($receipt.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Inspect only failed sandbox, without inference or deletions
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          SESSION_TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_LAUNCH_RESULT: SESSION_LAUNCH_OK
+          SESSION_STATE_VALIDATED: "true"
+          GH_TOKEN: ""
+          GITHUB_TOKEN: ""
+        run: |
+          $ErrorActionPreference='Stop'
+          $gateway=Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy=Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $script=Join-Path $env:GITHUB_WORKSPACE 'scripts\issue8_sandbox_residual_probe.py'
+          $args=@('--policy',$policy,'--correlation-id',$env:CORRELATION_ID,
+            'run','--cwd',$env:TARGET_PATH,'--session-id',$env:SESSION_ID,
+            '--risk','1','--timeout','90','--expected-head',$env:EXPECTED_RUNTIME_SHA,
+            '--','python','-B',$script)
+          & python $gateway @args
+          exit $LASTEXITCODE

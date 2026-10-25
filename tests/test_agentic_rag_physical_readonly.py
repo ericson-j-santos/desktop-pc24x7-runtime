@@ -277,7 +277,7 @@ def assert_workflow_is_governed(text):
     assert "draft == true" in text
     assert "github.event.changes.body.from != null" in text
     assert "!contains(github.event.changes.body.from" in text
-    assert text.count("OWNER_RAG_DELL_READONLY_20261025_ONCE") >= 3
+    assert text.count("OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE") >= 3
     assert "RAG_RUNTIME_CI_NOT_PROVED" in text
     assert "RAG_UPSTREAM_MODEL_E2E_NOT_EXECUTED" in text
     assert "RAG_UPSTREAM_MERGED_TREE_DRIFT" in text
@@ -322,7 +322,7 @@ def test_workflow_static_security_and_one_shot_controls():
     ("--require-runner-version-preflight", "--without-runner-version-preflight"),
     ("'--risk','1'", "'--risk','3'"),
     ("limitMs = 300000", "limitMs = 9999999"),
-    ("OWNER_RAG_DELL_READONLY_20261025_ONCE", "MARKER_DISABLED"),
+    ("OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE", "MARKER_DISABLED"),
     ("RAG_UPSTREAM_MODEL_E2E_NOT_EXECUTED", "IGNORE_UPSTREAM"),
     ("RAG_UPSTREAM_MERGED_TREE_DRIFT", "TREE_IGNORED"),
     ("httpx==0.28.1", "httpx"),

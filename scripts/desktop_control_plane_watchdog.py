@@ -44,6 +44,7 @@ CONFIRM = "INSTALL-DESKTOP-PC24X7-RUNTIME-WATCHDOG"
 RDC_RECOVERY_CONFIRM = "RECOVER-GOVERNED-RDC"
 RDC_RECOVERY_SCRIPT = "pc24x7_rdc_recovery.py"
 UAC_LAUNCHER_SCRIPT = "desktop_control_plane_watchdog_uac_launcher.py"
+HOST_POLICY_SCRIPT = "pc24x7_host_policy.py"
 RDC_HEADLESS_CLAIM = Path(r"C:\ProgramData\ReqSys\RdcSvc\rdc-headless-owner.json")
 RDC_CLAIM_MAX_AGE_SECONDS = 20.0
 
@@ -64,14 +65,21 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def authorized_desktop_profile(host: str):
+    try:
+        profile = authorized_host(host)
+    except ValueError as exc:
+        raise WatchdogError(str(exc)) from None
+    if profile.role not in {"desktop-primary", "desktop-secondary"}:
+        raise WatchdogError(f"host não autorizado para watchdog desktop: {host}")
+    return profile
+
+
 def require_windows_desktop() -> str:
     if os.name != "nt":
         raise WatchdogError("Windows obrigatório")
     host = socket.gethostname()
-    try:
-        authorized_host(host)
-    except ValueError as exc:
-        raise WatchdogError(str(exc)) from None
+    authorized_desktop_profile(host)
     return host
 
 
@@ -522,7 +530,10 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         runner = _component_failure("github_runner", exc)
 
-    if recovery_script.is_file():
+    rdc_required = authorized_desktop_profile(host).role == "desktop-primary"
+    if not rdc_required:
+        rdc = {"status": "not_applicable", "reason": "legacy_rdc_primary_only"}
+    elif recovery_script.is_file():
         try:
             rdc = recover_rdc(
                 python_executable=python_executable,
@@ -540,7 +551,7 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
         }
 
     runner_ok = runner.get("status") in {"recovered", "process_running"}
-    rdc_ok = rdc.get("status") in {"healthy", "recovered"}
+    rdc_ok = not rdc_required or rdc.get("status") in {"healthy", "recovered"}
     payload = {
         "schema_version": "2",
         "service": SERVICE_NAME,
@@ -551,6 +562,7 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
         "github_runner": runner,
         "runner_recovery_ok": runner_ok,
         "rdc_recovery_ok": rdc_ok,
+        "rdc_required": rdc_required,
         "ok": runner_ok and rdc_ok,
         "partial": runner_ok != rdc_ok,
         "github_pickup_required": runner_ok,
@@ -615,7 +627,7 @@ def _copy_release(source_root: Path, release_root: Path) -> None:
     scripts = release_root / "scripts"
     scripts.mkdir(parents=True, exist_ok=True)
     shutil.copy2(Path(__file__).resolve(), scripts / Path(__file__).name)
-    for required_name in (RDC_RECOVERY_SCRIPT, UAC_LAUNCHER_SCRIPT):
+    for required_name in (RDC_RECOVERY_SCRIPT, UAC_LAUNCHER_SCRIPT, HOST_POLICY_SCRIPT):
         required = source_root / "scripts" / required_name
         if not required.is_file():
             raise WatchdogError(f"script obrigatório ausente: {required}")
@@ -657,8 +669,10 @@ def load_installed_metadata(
     expected_release = runtime_root / "releases" / source_sha.lower()
     if release_root != expected_release:
         raise WatchdogError("release_root não corresponde ao source_sha governado")
-    if str(metadata.get("host") or "").casefold() != EXPECTED_HOST.casefold():
-        raise WatchdogError("metadata pertence a host não autorizado")
+    metadata_host = str(metadata.get("host") or "").strip()
+    authorized_desktop_profile(metadata_host)
+    if os.name == "nt" and metadata_host.casefold() != socket.gethostname().casefold():
+        raise WatchdogError("metadata pertence a outro host autorizado")
     if os.name == "nt" and runtime_root != default_runtime_root().resolve():
         raise WatchdogError("runtime_root fora do caminho governado do Desktop")
     release_watchdog = release_root / "scripts" / "desktop_control_plane_watchdog.py"
