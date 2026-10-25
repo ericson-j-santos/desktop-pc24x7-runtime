@@ -277,7 +277,7 @@ def assert_workflow_is_governed(text):
     assert "draft == true" in text
     assert "github.event.changes.body.from != null" in text
     assert "!contains(github.event.changes.body.from" in text
-    assert text.count("OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE") >= 3
+    assert text.count("OWNER_RAG_DELL_READONLY_20261025_GIT_CONFIG_REPAIR_ONCE") >= 3
     assert "RAG_RUNTIME_CI_NOT_PROVED" in text
     assert "RAG_UPSTREAM_MODEL_E2E_NOT_EXECUTED" in text
     assert "RAG_UPSTREAM_MERGED_TREE_DRIFT" in text
@@ -322,7 +322,7 @@ def test_workflow_static_security_and_one_shot_controls():
     ("--require-runner-version-preflight", "--without-runner-version-preflight"),
     ("'--risk','1'", "'--risk','3'"),
     ("limitMs = 300000", "limitMs = 9999999"),
-    ("OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE", "MARKER_DISABLED"),
+    ("OWNER_RAG_DELL_READONLY_20261025_GIT_CONFIG_REPAIR_ONCE", "MARKER_DISABLED"),
     ("RAG_UPSTREAM_MODEL_E2E_NOT_EXECUTED", "IGNORE_UPSTREAM"),
     ("RAG_UPSTREAM_MERGED_TREE_DRIFT", "TREE_IGNORED"),
     ("httpx==0.28.1", "httpx"),
@@ -332,3 +332,68 @@ def test_security_control_removed_is_detected(old,new):
     assert old in content
     with pytest.raises(AssertionError):
         assert_workflow_is_governed(content.replace(old,new,1))
+
+
+def test_git_readonly_keeps_protected_configuration_and_is_strict(monkeypatch, tmp_path):
+    """Regresses Windows safe.directory false negative; no wildcard or mutation."""
+    import os
+    import subprocess
+    mod = module()
+    approved_global = str(tmp_path / "gitconfig")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", approved_global)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "system-config"))
+    observations = []
+
+    def respond(args, **kwargs):
+        observations.append((args, kwargs))
+        assert args in (
+            ["git", "rev-parse", "HEAD"],
+            ["git", "remote", "get-url", "origin"],
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+        )
+        assert kwargs["env"]["GIT_CONFIG_GLOBAL"] == approved_global
+        assert kwargs["env"]["GIT_CONFIG_SYSTEM"].endswith("system-config")
+        assert kwargs["env"]["GIT_TERMINAL_PROMPT"] == "0"
+        assert kwargs["env"]["GIT_OPTIONAL_LOCKS"] == "0"
+        assert "safe.directory=*" not in str(args)
+        assert kwargs["check"] is False and kwargs["capture_output"] is True
+        return subprocess.CompletedProcess(args, 0, "safe-read\n", "")
+
+    monkeypatch.setattr(mod.subprocess, "run", respond)
+    for command in [("rev-parse", "HEAD"),
+                    ("remote", "get-url", "origin"),
+                    ("status", "--porcelain", "--untracked-files=no")]:
+        assert mod._git(tmp_path, *command) == "safe-read"
+    assert len(observations) == 3
+    with pytest.raises(mod.PhysicalRagBlocked, match="rag_git_action_not_allowlisted"):
+        mod._git(tmp_path, "fetch", "--all")
+    assert len(observations) == 3
+
+
+@pytest.mark.parametrize("command,reason", [
+    (("rev-parse", "HEAD"), "rag_git_sha_failed"),
+    (("remote", "get-url", "origin"), "rag_git_origin_failed"),
+    (("status", "--porcelain", "--untracked-files=no"), "rag_git_status_failed"),
+])
+def test_failed_git_reads_have_exact_sanitized_codes(monkeypatch, tmp_path, command, reason):
+    import subprocess
+    mod = module()
+    secret = "TOKEN_MUST_NEVER_APPEAR"
+
+    def fail(args, **kwargs):
+        return subprocess.CompletedProcess(args, 128, "", "fatal: " + secret)
+
+    monkeypatch.setattr(mod.subprocess, "run", fail)
+    with pytest.raises(mod.PhysicalRagBlocked, match="^" + reason + "$") as error:
+        mod._git(tmp_path, *command)
+    assert secret not in str(error.value)
+
+
+def test_git_error_with_zero_exit_but_stderr_or_oversize_is_rejected(monkeypatch, tmp_path):
+    import subprocess
+    mod = module()
+    for stdout, stderr in (("abc", "silent warning"), ("x" * 4097, "")):
+        monkeypatch.setattr(mod.subprocess, "run", lambda args, **kwargs:
+                            subprocess.CompletedProcess(args, 0, stdout, stderr))
+        with pytest.raises(mod.PhysicalRagBlocked, match="rag_git_sha_output_invalid"):
+            mod._git(tmp_path, "rev-parse", "HEAD")

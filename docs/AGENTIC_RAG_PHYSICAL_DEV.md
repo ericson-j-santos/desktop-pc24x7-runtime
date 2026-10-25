@@ -23,7 +23,7 @@ nova identidade, sem API de inferência externa e sem edição de código.
 A PR de preparação é inicialmente criada em **draft sem marcador de execução**.
 Somente após CI Windows e Linux com testes realmente executados no SHA atual,
 uma mudança explícita de corpo de PR pelo proprietário acrescenta o marcador
-OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE. O workflow detecta a transição
+OWNER_RAG_DELL_READONLY_20261025_GIT_CONFIG_REPAIR_ONCE. O workflow detecta a transição
 PR.body.before sem marcador -> PR.body.after com marcador. Eventos push,
 schedule, synchronize, workflow_dispatch, reabertura ou edição posterior
 sem essa transição não disparam o canário.
@@ -92,9 +92,29 @@ mas **não** garante que o segundo fetch esteja resolvido.
 
 A primeira autorização `OWNER_RAG_DELL_READONLY_20261025_ONCE` foi consumida e
 não pode disparar novamente. Apenas a transição explícita ao novo marcador
-`OWNER_RAG_DELL_READONLY_20261025_NETWORK_RECOVERY_ONCE` após CI em SHA corrente autoriza uma segunda
+`OWNER_RAG_DELL_READONLY_20261025_GIT_CONFIG_REPAIR_ONCE` após CI em SHA corrente autoriza uma segunda
 sonda física, com a mesma admissão e proibição de contornos. Nenhuma repetição
 automática se o erro de socket voltar a ocorrer.
 
 O branch da PR foi sincronizado com a `main` após as PRs #96/#97,
 com merge não destrutivo e preservação dos quatro arquivos do canário.
+
+## Verificador Git da sessão — correção proposta
+
+O canário físico #40221384710 superou `SESSION_LAUNCH_OK`, o Gateway e a
+instalação de dependências, mas o verificador do roteiro encerrou com o código
+sanitizado `rag_readonly_git_failed` antes da inferência. A implementação
+anterior explicitamente anulava as configurações `GIT_CONFIG_GLOBAL` e
+`GIT_CONFIG_SYSTEM` nas consultas de leitura. Isso difere do ambiente governado
+usado pelo Launcher/Gateway e pode ocultar as entradas protegidas
+`safe.directory` do Git for Windows.
+
+A correção preserva essas configurações (sem `safe.directory=*`), mantém apenas
+três operações de Git totalmente autorizadas, força `GIT_OPTIONAL_LOCKS=0`,
+bloqueia prompts e emite o nome fixo da operação que falhar. Testes negativos
+verificam stderr sanitizado, status não zero, saída excessiva e comandos não
+admitidos. A hipótese ainda necessita validação no mesmo Dell e SHA.
+
+A terceira sonda é permitida somente por transição ao marcador único
+`OWNER_RAG_DELL_READONLY_20261025_GIT_CONFIG_REPAIR_ONCE`, após CI real Windows/Linux no último SHA,
+sem reutilizar os tokens anteriores.

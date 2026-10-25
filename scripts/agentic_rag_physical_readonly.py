@@ -51,22 +51,34 @@ def _expected_origin(repository: str) -> str:
 
 
 def _git(root: Path, *arguments: str) -> str:
+    """Read pinned Git identity without disabling Git's protected configurations.
+
+    The Session Launcher/Gateway already attest the worktree. Git must retain
+    its normal system/global safe.directory policy; never use a wildcard.
+    """
     need(root.is_dir() and not root.is_symlink(), "rag_checkout_missing")
+    actions = {
+        ("rev-parse", "HEAD"): "sha",
+        ("remote", "get-url", "origin"): "origin",
+        ("status", "--porcelain", "--untracked-files=no"): "status",
+    }
+    stage = actions.get(tuple(arguments))
+    need(stage is not None, "rag_git_action_not_allowlisted")
+    inherited = dict(os.environ)
+    # Preserve normal system/global protected Git configuration (including
+    # exact safe.directory entries), like the canonical Gateway already does.
+    inherited["GIT_TERMINAL_PROMPT"] = "0"
+    inherited["GIT_OPTIONAL_LOCKS"] = "0"
     try:
         result = subprocess.run(
             ["git", *arguments], cwd=root, text=True, capture_output=True,
-            timeout=15, check=False, env={
-                "PATH": os.environ.get("PATH", os.defpath),
-                "GIT_CONFIG_GLOBAL": os.devnull,
-                "GIT_CONFIG_SYSTEM": os.devnull,
-                "GIT_TERMINAL_PROMPT": "0",
-                "GIT_OPTIONAL_LOCKS": "0",
-            },
+            timeout=15, check=False, env=inherited,
         )
     except (subprocess.TimeoutExpired, OSError):
-        raise PhysicalRagBlocked("rag_readonly_git_unavailable") from None
-    need(result.returncode == 0 and len(result.stdout) <= 4096,
-         "rag_readonly_git_failed")
+        raise PhysicalRagBlocked("rag_git_" + stage + "_unavailable") from None
+    need(result.returncode == 0, "rag_git_" + stage + "_failed")
+    need(not result.stderr.strip() and len(result.stdout) <= 4096,
+         "rag_git_" + stage + "_output_invalid")
     return result.stdout.strip()
 
 
