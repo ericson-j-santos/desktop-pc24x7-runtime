@@ -42,7 +42,7 @@ def test_all_embedded_github_scripts_parse_under_node_js():
     for snippet in snippets:
         with tempfile.TemporaryDirectory(prefix="issue8-js-check-") as d:
             path = Path(d) / "source.cjs"
-            path.write_text(snippet, encoding="utf8")
+            path.write_text("async function github_script_contract() {\n" + snippet + "\n}\n", encoding="utf8")
             result = subprocess.run(
                 ["node", "--check", str(path)],
                 capture_output=True, text=True, timeout=20,
