@@ -39,6 +39,10 @@ BACKUP_FILES = (
     "uac-result.json",
     "schtasks-result.txt",
 )
+ROLLBACK_FILES = (
+    "metadata.json",
+    "run.py",
+)
 
 
 class RepairBlocked(RuntimeError):
@@ -272,12 +276,38 @@ def create_backup(context: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
         if not manifest_path.is_file():
             raise RepairBlocked("backup_collision")
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if existing != manifest:
+        expected_identity = {
+            key: value for key, value in manifest.items() if key != "files"
+        }
+        existing_identity = {
+            key: value for key, value in existing.items() if key != "files"
+        }
+        if existing_identity != expected_identity:
             raise RepairBlocked("backup_collision")
-        for name, digest in expected_files.items():
-            if sha256_file(destination / name) != digest:
+        stored_files = existing.get("files")
+        if not isinstance(stored_files, dict):
+            raise RepairBlocked("backup_collision")
+        for name, digest in stored_files.items():
+            stored = destination / name
+            if (
+                name not in BACKUP_FILES
+                or not isinstance(digest, str)
+                or not stored.is_file()
+                or stored.is_symlink()
+                or sha256_file(stored) != digest
+            ):
                 raise RepairBlocked("backup_integrity_failed")
-        return destination, manifest
+        for name in ROLLBACK_FILES:
+            current = runtime_root / name
+            digest = stored_files.get(name)
+            if (
+                not isinstance(digest, str)
+                or not current.is_file()
+                or current.is_symlink()
+                or sha256_file(current) != digest
+            ):
+                raise RepairBlocked("backup_active_state_changed")
+        return destination, existing
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=backup_id + ".", dir=destination.parent))

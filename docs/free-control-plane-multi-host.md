@@ -69,6 +69,12 @@ local e o sucesso do repair continua `PICKUP_PENDING` até job físico independe
 no mesmo SHA. A capability não instala TODO Gateway, não cria credencial, não
 reinicia serviço existente e não reinicia o computador.
 
+Um replay explicitamente autorizado reutiliza o backup somente quando o manifesto
+e todos os arquivos preservados continuam íntegros e a metadata e o launcher ativos
+correspondem ao estado original. Recibos forenses produzidos por uma tentativa UAC
+posterior podem divergir sem substituir o backup original; qualquer drift nos
+arquivos necessários ao rollback continua falhando fechado.
+
 Executar primeiro com `--preflight-only` e com os quatro valores observados e
 fixados (`--source-sha`, `--expected-installed-sha`,
 `--expected-watchdog-sha256`, `--expected-uac-sha256`). A aplicação usa os

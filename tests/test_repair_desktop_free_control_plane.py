@@ -171,6 +171,55 @@ def test_backup_and_target_release_are_idempotent(monkeypatch, tmp_path: Path) -
     assert repeated_target_manifest == manifest
 
 
+def test_backup_replay_allows_only_forensic_receipt_drift(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _, runtime, _, context = inspect(monkeypatch, tmp_path)
+    (runtime / "uac-result.json").write_text(
+        json.dumps({"ok": False, "error": "original"}), encoding="utf-8"
+    )
+    (runtime / "schtasks-result.txt").write_text("original\n", encoding="utf-8")
+    backup, manifest = m.create_backup(context)
+
+    (runtime / "uac-result.json").write_text(
+        json.dumps({"state": "uac_pending", "invocation_id": "new"}),
+        encoding="utf-8",
+    )
+    (runtime / "schtasks-result.txt").write_text("later attempt\n", encoding="utf-8")
+
+    repeated_backup, repeated_manifest = m.create_backup(context)
+    assert repeated_backup == backup
+    assert repeated_manifest == manifest
+    assert json.loads((backup / "uac-result.json").read_text(encoding="utf-8")) == {
+        "ok": False,
+        "error": "original",
+    }
+    assert (backup / "schtasks-result.txt").read_text(encoding="utf-8") == "original\n"
+
+
+def test_backup_replay_rejects_active_rollback_drift(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _, runtime, _, context = inspect(monkeypatch, tmp_path)
+    m.create_backup(context)
+    (runtime / "metadata.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(m.RepairBlocked, match="backup_active_state_changed"):
+        m.create_backup(context)
+
+
+def test_backup_replay_rejects_corrupted_stored_receipt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _, runtime, _, context = inspect(monkeypatch, tmp_path)
+    (runtime / "uac-result.json").write_text("original\n", encoding="utf-8")
+    backup, _ = m.create_backup(context)
+    (backup / "uac-result.json").write_text("corrupt\n", encoding="utf-8")
+
+    with pytest.raises(m.RepairBlocked, match="backup_integrity_failed"):
+        m.create_backup(context)
+
+
 def test_activation_preserves_runner_identity_and_requires_pickup(
     monkeypatch, tmp_path: Path
 ) -> None:
