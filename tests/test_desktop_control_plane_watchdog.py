@@ -32,6 +32,20 @@ def test_rejects_other_host(monkeypatch) -> None:
         m.require_windows_desktop()
 
 
+@pytest.mark.parametrize("host", ["DESKTOP-PDQK954", "DESKTOP-RP23OGS"])
+def test_accepts_authorized_desktop_profiles(monkeypatch, host: str) -> None:
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: host)
+    assert m.require_windows_desktop() == host
+
+
+def test_rejects_authorized_non_desktop_profile(monkeypatch) -> None:
+    monkeypatch.setattr(m.os, "name", "nt")
+    monkeypatch.setattr(m.socket, "gethostname", lambda: "NOTERI")
+    with pytest.raises(m.WatchdogError, match="watchdog desktop"):
+        m.require_windows_desktop()
+
+
 def test_runner_home_requires_local_runner_contract(tmp_path: Path) -> None:
     root = tmp_path / "actions-runner"
     root.mkdir()
