@@ -72,9 +72,29 @@ jobs:
           if (-not $python) { throw "PYTHON_RUNTIME_NOT_FOUND: $($pythonCandidates -join '; ')" }
           $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
           $rulesSha = (& git -C $rulesRoot rev-parse HEAD | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0 -or $rulesSha -ne '${{ steps.physical_rules.outputs.sha }}') {
-            throw 'CANARY_RULES_SHA_MISMATCH'
+          if ($LASTEXITCODE -ne 0) { throw 'CANARY_RULES_SHA_UNAVAILABLE' }
+          function Assert-PinnedRulesSha {
+            param([string]$Observed, [string]$Expected)
+            if ($Observed -notmatch '^[0-9a-f]{40}$' -or
+                $Expected -notmatch '^[0-9a-f]{40}$' -or $Observed -ne $Expected) {
+              throw 'CANARY_RULES_SHA_MISMATCH'
+            }
           }
+          $expectedRulesSha = '${{ steps.physical_rules.outputs.sha }}'
+          $invalidRulesSha = if ($expectedRulesSha.StartsWith('0')) {
+            '1' + $expectedRulesSha.Substring(1)
+          } else {
+            '0' + $expectedRulesSha.Substring(1)
+          }
+          $negativeRejected = $false
+          try { Assert-PinnedRulesSha -Observed $rulesSha -Expected $invalidRulesSha }
+          catch {
+            if ($_.Exception.Message -ne 'CANARY_RULES_SHA_MISMATCH') { throw }
+            $negativeRejected = $true
+          }
+          if (-not $negativeRejected) { throw 'CANARY_RULES_NEGATIVE_ACCEPTED' }
+          Write-Output 'CANARY_RULES_NEGATIVE_REJECTED'
+          Assert-PinnedRulesSha -Observed $rulesSha -Expected $expectedRulesSha
           $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
           $launcher = Join-Path $rulesRoot 'scripts\session_launcher.py'
           $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
@@ -108,9 +128,29 @@ jobs:
           if (-not $python) { throw "PYTHON_RUNTIME_NOT_FOUND: $($pythonCandidates -join '; ')" }
           $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
           $rulesSha = (& git -C $rulesRoot rev-parse HEAD | Out-String).Trim()
-          if ($LASTEXITCODE -ne 0 -or $rulesSha -ne '${{ steps.physical_rules.outputs.sha }}') {
-            throw 'CANARY_RULES_SHA_MISMATCH'
+          if ($LASTEXITCODE -ne 0) { throw 'CANARY_RULES_SHA_UNAVAILABLE' }
+          function Assert-PinnedRulesSha {
+            param([string]$Observed, [string]$Expected)
+            if ($Observed -notmatch '^[0-9a-f]{40}$' -or
+                $Expected -notmatch '^[0-9a-f]{40}$' -or $Observed -ne $Expected) {
+              throw 'CANARY_RULES_SHA_MISMATCH'
+            }
           }
+          $expectedRulesSha = '${{ steps.physical_rules.outputs.sha }}'
+          $invalidRulesSha = if ($expectedRulesSha.StartsWith('0')) {
+            '1' + $expectedRulesSha.Substring(1)
+          } else {
+            '0' + $expectedRulesSha.Substring(1)
+          }
+          $negativeRejected = $false
+          try { Assert-PinnedRulesSha -Observed $rulesSha -Expected $invalidRulesSha }
+          catch {
+            if ($_.Exception.Message -ne 'CANARY_RULES_SHA_MISMATCH') { throw }
+            $negativeRejected = $true
+          }
+          if (-not $negativeRejected) { throw 'CANARY_RULES_NEGATIVE_ACCEPTED' }
+          Write-Output 'CANARY_RULES_NEGATIVE_REJECTED'
+          Assert-PinnedRulesSha -Observed $rulesSha -Expected $expectedRulesSha
           $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
           $launcher = Join-Path $rulesRoot 'scripts\session_launcher.py'
           $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
