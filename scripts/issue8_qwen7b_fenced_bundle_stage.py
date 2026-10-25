@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import traceback
 from typing import Any, Callable
 
 HOST = "DESKTOP-PDQK954"
@@ -109,6 +110,68 @@ def verified_bundle_receipt(report: dict[str, Any]) -> dict[str, Any]:
     return {**report, "bundle_bytes": len(blob)}
 
 
+
+# Code-owned labels only; never disclose paths, secrets, model text or tracebacks.
+CURRENT_PHASE = "entry"
+_ALLOWED_PHASES = frozenset({
+    "entry", "source_preflight", "builder_clone", "model_repair",
+    "model_replay", "independent_validation", "source_integrity",
+    "bundle_stage", "pool_state", "sandbox_teardown", "runner_output",
+})
+_ALLOWED_ERRORS = frozenset({
+    "IssueStageBlocked", "StructuredBlocked", "PermissionError",
+    "FileNotFoundError", "OSError", "RuntimeError", "ValueError",
+    "TypeError", "KeyError", "AssertionError", "TimeoutExpired",
+    "CalledProcessError", "NotADirectoryError",
+})
+_ALLOWED_SITES = frozenset({
+    "issue8_qwen7b_fenced_bundle_stage.py", "tempfile.py", "shutil.py",
+    "pathlib.py", "structured_code_worker.py", "native_structured_worker_e2e.py",
+    "store.py", "issue_draft_pr.py", "native_structured_ollama.py",
+})
+
+
+def mark_phase(phase: str) -> None:
+    global CURRENT_PHASE
+    require(phase in _ALLOWED_PHASES, "diagnostic_phase_invalid")
+    CURRENT_PHASE = phase
+
+
+def sanitized_failure(exc: Exception) -> dict[str, Any]:
+    """Retain evidence of the failure site, not its sensitive detail."""
+    def category(problem: BaseException | None) -> str:
+        candidate = type(problem).__name__ if problem is not None else "none"
+        return candidate if candidate in _ALLOWED_ERRORS else "other"
+    result: dict[str, Any] = {
+        "failure_phase": CURRENT_PHASE if CURRENT_PHASE in _ALLOWED_PHASES else "entry",
+        "exception_kind": category(exc),
+        "masked_exception_kind": category(exc.__context__),
+    }
+    prior = exc.__context__
+    if isinstance(prior, IssueStageBlocked):
+        masked = str(prior)
+        if re.fullmatch(r"[a-z][a-z0-9_]{2,80}", masked):
+            result["masked_reason_code"] = masked
+    try:
+        for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+            basename = Path(frame.filename).name
+            if basename in _ALLOWED_SITES and 0 < frame.lineno < 100000:
+                result["failure_site"] = basename + ":" + str(frame.lineno)
+                break
+        worktree = Path(os.environ.get("SESSION_TARGET_PATH") or "/missing").resolve()
+        if (worktree == Path.cwd().resolve()
+                and "chatgpt-workers" in str(worktree).lower()
+                and worktree.is_dir()):
+            result["residual_sandbox_count"] = min(100, sum(
+                1 for p in worktree.iterdir()
+                if p.name.startswith("issue8-qwen-") and p.is_dir()
+                and not p.is_symlink()
+            ))
+    except (OSError, ValueError, RuntimeError):
+        result["diagnostic_readback"] = "unavailable"
+    return result
+
+
 def verified_final_checkouts(
     worker: Path, builder: Path, independent: Path, *,
     source_raw_sha256: str, produced_sha: str,
@@ -146,6 +209,7 @@ def verified_final_checkouts(
 
 
 def execute() -> dict[str, Any]:
+    mark_phase("source_preflight")
     env = os.environ
     require(os.name == "nt"
             and env.get("COMPUTERNAME", "").upper() == HOST
@@ -202,6 +266,7 @@ def execute() -> dict[str, Any]:
         # cross-host CAS receipts must match the blob bytes on hosted Linux.
         # A process-scoped -c affects checkout LF without persisting the
         # setting in .git/config (the structured worker forbids that key).
+        mark_phase("builder_clone")
         git(sandbox, "-c", "core.autocrlf=false", "clone",
             "--no-hardlinks", str(worker), str(builder))
         git(builder, "remote", "remove", "origin")
@@ -265,6 +330,7 @@ def execute() -> dict[str, Any]:
         )
         # task_id is the real existing pool ID, not a new queue.
         task["task_id"] = queued["task_id"]
+        mark_phase("model_repair")
         provider = NativeStructuredOllama()
         result = repair(builder, state, task, provider)
         require(provider.process_verified is True
@@ -272,11 +338,13 @@ def execute() -> dict[str, Any]:
                 and result["model_calls"] in (1, 2)
                 and result["produced_sha"] != WORKER_SHA,
                 "native_model_inference_not_verified")
+        mark_phase("model_replay")
         replay = repair(builder, state, task, provider)
         require(replay.get("replayed") is True
                 and replay.get("model_calls") == 0
                 and replay.get("produced_sha") == result["produced_sha"],
                 "no_inference_replay_not_proved")
+        mark_phase("independent_validation")
         git(sandbox, "-c", "core.autocrlf=false", "clone",
             "--no-hardlinks", str(builder), str(independent))
         git(independent, "remote", "remove", "origin")
@@ -298,12 +366,14 @@ def execute() -> dict[str, Any]:
                 and regressions.get("failed_count") == 0
                 and regressions.get("error_count") == 0,
                 "independent_regressions_failed")
+        mark_phase("source_integrity")
         verified_final_checkouts(
             worker, builder, independent,
             source_raw_sha256=source_raw_sha256,
             produced_sha=result["produced_sha"],
             git_read=git, source_clean=verified_source_clean,
         )
+        mark_phase("bundle_stage")
         bundle = sandbox / "change.bundle"
         git(builder, "bundle", "create", str(bundle), "HEAD",
             "^" + WORKER_SHA)
@@ -334,6 +404,7 @@ def execute() -> dict[str, Any]:
             "cas_persisted": False, "pr_created": False,
         }
         verified_bundle_receipt(staged)
+        mark_phase("pool_state")
         current = pool.get_task(queued["task_id"])
         require(current["state"] == "running"
                 and current["task_id"] == queued["task_id"]
@@ -341,6 +412,7 @@ def execute() -> dict[str, Any]:
                 and current["fencing_required"] == 1
                 and current["produced_sha"] is None,
                 "local_pool_staged_state_invalid")
+        mark_phase("sandbox_teardown")
         return staged
 
 
@@ -368,8 +440,10 @@ def _publish_github_step_outputs(report: dict[str, Any]) -> None:
 
 def main() -> int:
     sys.dont_write_bytecode = True
+    mark_phase("entry")
     try:
         result = execute()
+        mark_phase("runner_output")
         _publish_github_step_outputs(result)
         # Never write binary/base64 model artifacts or credentials to logs.
         summary = {k: v for k, v in result.items() if k != "bundle_b64"}
@@ -384,6 +458,7 @@ def main() -> int:
             "result": "ISSUE8_BUNDLE_STAGE_BLOCKED", "reason_code": reason,
             "model_output_published": False, "cas_persisted": False,
             "draft_pr_created": False,
+            **sanitized_failure(exc),
         }, sort_keys=True))
         return 2
 

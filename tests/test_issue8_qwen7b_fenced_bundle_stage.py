@@ -275,3 +275,61 @@ def test_final_integrity_rejects_real_drift_and_identifies_gate(tmp_path, fault,
         state["validator_status"] = " M app/portfolio_bridge.py"
     with pytest.raises(stage.IssueStageBlocked, match="^" + reason + "$"):
         stage.verified_final_checkouts(worker, builder, independent, **values)
+
+
+def test_failure_diagnostics_report_sandbox_phase_not_exception_message(
+        monkeypatch, capsys):
+    import json
+
+    def fail():
+        stage.mark_phase("sandbox_teardown")
+        raise PermissionError(13, "sensitive-content-must-be-redacted")
+    monkeypatch.setattr(stage, "execute", fail)
+    assert stage.main() == 2
+    raw = capsys.readouterr().out
+    report = json.loads(raw)
+    assert report["result"] == "ISSUE8_BUNDLE_STAGE_BLOCKED"
+    assert report["failure_phase"] == "sandbox_teardown"
+    assert report["exception_kind"] == "PermissionError"
+    assert report["cas_persisted"] is False
+    assert report["draft_pr_created"] is False
+    assert "sensitive-content-must-be-redacted" not in raw
+    assert "Traceback" not in raw
+
+
+def test_failure_diagnostics_expose_masked_integrity_code_safely(
+        monkeypatch, capsys):
+    import json
+
+    def fail():
+        stage.mark_phase("source_integrity")
+        try:
+            raise stage.IssueStageBlocked("source_raw_bytes_changed")
+        except stage.IssueStageBlocked:
+            raise OSError("secret-path-not-to-be-logged")
+    monkeypatch.setattr(stage, "execute", fail)
+    assert stage.main() == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["exception_kind"] == "OSError"
+    assert report["masked_exception_kind"] == "IssueStageBlocked"
+    assert report["masked_reason_code"] == "source_raw_bytes_changed"
+    assert report["model_output_published"] is False
+
+
+@pytest.mark.parametrize("phase", ["", None, "dangerous;command", "unexpected"])
+def test_phase_control_rejects_unknown_labels(phase):
+    with pytest.raises(stage.IssueStageBlocked, match="diagnostic_phase_invalid"):
+        stage.mark_phase(phase)
+
+
+def test_reason_code_remains_fail_closed(monkeypatch, capsys):
+    import json
+
+    def fail():
+        stage.mark_phase("source_integrity")
+        raise stage.IssueStageBlocked("source_index_changed")
+    monkeypatch.setattr(stage, "execute", fail)
+    assert stage.main() == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["reason_code"] == "source_index_changed"
+    assert report["cas_persisted"] is False
