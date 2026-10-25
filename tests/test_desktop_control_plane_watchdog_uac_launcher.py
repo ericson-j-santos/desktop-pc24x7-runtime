@@ -135,6 +135,76 @@ def test_launch_surfaces_matching_elevated_failure(
         )
 
 
+def test_launch_rejects_success_receipt_without_elevated_readback(
+    monkeypatch, tmp_path: Path
+) -> None:
+    installation = {
+        "release_watchdog": tmp_path / "desktop_control_plane_watchdog.py",
+        "metadata_path": tmp_path / "metadata.json",
+        "python_executable": tmp_path / "python.exe",
+        "release_root": tmp_path,
+    }
+    monkeypatch.setattr(m, "validate_launcher", lambda **kwargs: None)
+    monkeypatch.setattr(m, "load_installation", lambda path: installation)
+    monkeypatch.setattr(m.watchdog, "task_status", lambda: {"exists": False})
+    monkeypatch.setattr(m, "is_admin", lambda: False)
+    monkeypatch.setattr(m.watchdog, "atomic_json", lambda path, payload: None)
+    monkeypatch.setattr(m, "shell_execute_runas", lambda *args: 33)
+    monkeypatch.setattr(m.uuid, "uuid4", lambda: SimpleNamespace(hex="i" * 32))
+    monkeypatch.setattr(
+        m,
+        "matching_receipt",
+        lambda path, invocation: {"ok": True, "task": {"ok": True}},
+    )
+
+    with pytest.raises(RuntimeError, match="missing_elevated_readback"):
+        m.launch(
+            installation["metadata_path"],
+            confirm=m.LAUNCH_CONFIRM,
+            timeout_seconds=5,
+        )
+
+
+def test_launch_reports_elevated_task_not_visible_to_caller(
+    monkeypatch, tmp_path: Path
+) -> None:
+    installation = {
+        "release_watchdog": tmp_path / "desktop_control_plane_watchdog.py",
+        "metadata_path": tmp_path / "metadata.json",
+        "python_executable": tmp_path / "python.exe",
+        "release_root": tmp_path,
+    }
+    monkeypatch.setattr(m, "validate_launcher", lambda **kwargs: None)
+    monkeypatch.setattr(m, "load_installation", lambda path: installation)
+    monkeypatch.setattr(m.watchdog, "task_status", lambda: {"exists": False})
+    monkeypatch.setattr(m, "is_admin", lambda: False)
+    monkeypatch.setattr(m.watchdog, "atomic_json", lambda path, payload: None)
+    monkeypatch.setattr(m, "shell_execute_runas", lambda *args: 33)
+    monkeypatch.setattr(m.uuid, "uuid4", lambda: SimpleNamespace(hex="i" * 32))
+    monkeypatch.setattr(
+        m,
+        "matching_receipt",
+        lambda path, invocation: {
+            "ok": True,
+            "task": {
+                "elevated_readback": {
+                    "exists": True,
+                    "trigger_at_startup": True,
+                    "logon_type": "S4U",
+                }
+            },
+        },
+    )
+
+    result = m.launch(
+        installation["metadata_path"],
+        confirm=m.LAUNCH_CONFIRM,
+        timeout_seconds=5,
+    )
+    assert result["ok"] is False
+    assert result["result"] == "ELEVATED_TASK_NOT_VISIBLE_TO_CALLER"
+
+
 def test_finalize_requires_verified_task_before_start(
     monkeypatch, tmp_path: Path
 ) -> None:

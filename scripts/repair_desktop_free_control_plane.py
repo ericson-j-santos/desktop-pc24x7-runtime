@@ -214,6 +214,13 @@ def inspect_partial_installation(
     if not python_executable.is_file():
         raise RepairBlocked("installed_python_missing")
     try:
+        orphan_task_file = watchdog.inspect_orphaned_task_file(
+            python_executable=python_executable,
+            launcher=runtime_root / "run.py",
+        )
+    except watchdog.WatchdogError as exc:
+        raise RepairBlocked(str(exc)) from None
+    try:
         import win32com.client  # type: ignore  # noqa: F401
     except ImportError as exc:
         raise RepairBlocked("pywin32_required") from exc
@@ -236,6 +243,7 @@ def inspect_partial_installation(
         "runner_process": process,
         "registry": registry,
         "python_executable": python_executable,
+        "orphan_task_file": orphan_task_file,
     }
 
 
@@ -511,6 +519,7 @@ def preflight_result(context: dict[str, Any], target_sha: str) -> dict[str, Any]
         "runner_status": registry.get("status"),
         "runner_busy": registry.get("busy"),
         "runner_pids": process.get("matching_pids", []),
+        "orphan_task_file": context.get("orphan_task_file"),
         "mutation_performed": False,
         "github_pickup_proven": False,
     }

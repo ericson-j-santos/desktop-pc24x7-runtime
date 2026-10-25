@@ -512,7 +512,7 @@ def test_register_task_cli_writes_sanitized_failure_receipt(
     monkeypatch.setattr(
         m,
         "register_task_from_metadata",
-        lambda path: (_ for _ in ()).throw(m.WatchdogError("synthetic_com_error")),
+        lambda path, **kwargs: (_ for _ in ()).throw(m.WatchdogError("synthetic_com_error")),
     )
     monkeypatch.setattr(m, "now_iso", lambda: "2026-10-25T20:00:00+00:00")
     monkeypatch.setattr(
@@ -540,6 +540,99 @@ def test_register_task_cli_writes_sanitized_failure_receipt(
         "error": "synthetic_com_error",
         "error_type": "WatchdogError",
     }
+
+
+def _scheduled_task_xml(python_executable: Path, launcher: Path) -> bytes:
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        '<RegistrationInfo><URI>\\Automation\\DesktopPc24x7RuntimeWatchdog</URI>'
+        '</RegistrationInfo><Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger>'
+        '</Triggers><Principals><Principal><LogonType>S4U</LogonType></Principal>'
+        '</Principals><Actions><Exec>'
+        f'<Command>{python_executable}</Command><Arguments>"{launcher}"</Arguments>'
+        '</Exec></Actions></Task>'
+    ).encode("utf-16")
+
+
+def test_reconcile_quarantines_only_matching_orphan_task(
+    monkeypatch, tmp_path: Path
+) -> None:
+    python_executable = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    task_file = tmp_path / "System32" / "Tasks" / "Automation" / m.TASK_LEAF
+    python_executable.write_bytes(b"")
+    launcher.write_bytes(b"")
+    task_file.parent.mkdir(parents=True)
+    payload = _scheduled_task_xml(python_executable, launcher)
+    task_file.write_bytes(payload)
+    monkeypatch.setattr(m, "_task_file_path", lambda: task_file)
+    monkeypatch.setattr(m, "task_status", lambda: {"exists": False})
+
+    result = m._reconcile_orphaned_task_file(
+        tmp_path / "runtime",
+        python_executable=python_executable,
+        launcher=launcher,
+        invocation_id="repair-1",
+    )
+
+    assert result and result["reconciled"] is True
+    assert not task_file.exists()
+    backup = Path(result["backup_file"])
+    assert backup.read_bytes() == payload
+    manifest = json.loads((backup.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["task_name"] == m.TASK_NAME
+    assert manifest["invocation_id"] == "repair-1"
+
+
+def test_reconcile_rejects_foreign_orphan_without_mutation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    python_executable = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    foreign_launcher = tmp_path / "foreign.py"
+    task_file = tmp_path / "task.xml"
+    for path in (python_executable, launcher, foreign_launcher):
+        path.write_bytes(b"")
+    payload = _scheduled_task_xml(python_executable, foreign_launcher)
+    task_file.write_bytes(payload)
+    monkeypatch.setattr(m, "_task_file_path", lambda: task_file)
+    monkeypatch.setattr(m, "task_status", lambda: {"exists": False})
+
+    with pytest.raises(m.WatchdogError, match="orphan_task_action_mismatch"):
+        m._reconcile_orphaned_task_file(
+            tmp_path / "runtime",
+            python_executable=python_executable,
+            launcher=launcher,
+            invocation_id="repair-2",
+        )
+    assert task_file.read_bytes() == payload
+
+
+def test_register_from_metadata_requires_elevated_readback(
+    monkeypatch, tmp_path: Path
+) -> None:
+    metadata = tmp_path / "runtime" / "metadata.json"
+    python_executable = tmp_path / "python.exe"
+    launcher = tmp_path / "runtime" / "run.py"
+    metadata.parent.mkdir()
+    python_executable.write_bytes(b"")
+    launcher.write_bytes(b"")
+    monkeypatch.setattr(
+        m,
+        "load_installed_metadata",
+        lambda path, **kwargs: {
+            "runtime_root": metadata.parent,
+            "python_executable": python_executable,
+            "launcher": launcher,
+        },
+    )
+    monkeypatch.setattr(m, "_reconcile_orphaned_task_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(m, "register_boot_task", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(m, "task_status", lambda: {"exists": False})
+
+    with pytest.raises(m.WatchdogError, match="task_scheduler_elevated_readback_failed"):
+        m.register_task_from_metadata(metadata, invocation_id="repair-3")
 
 
 def test_stop_runner_terminates_only_exact_governed_listener(monkeypatch, tmp_path: Path) -> None:

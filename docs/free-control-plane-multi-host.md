@@ -75,6 +75,16 @@ correspondem ao estado original. Recibos forenses produzidos por uma tentativa U
 posterior podem divergir sem substituir o backup original; qualquer drift nos
 arquivos necessários ao rollback continua falhando fechado.
 
+Se o Task Scheduler não enumerar a tarefa, mas o arquivo exato existir em
+`System32\Tasks`, o repair trata o estado como registro órfão. O filho elevado
+só coloca esse arquivo em quarentena quando o XML ainda corresponde ao mesmo
+nome, `BootTrigger`, `S4U`, Python e launcher instalados. O backup é endereçado
+pelo SHA-256 do XML e preservado antes da remoção. XML estrangeiro, alterado ou
+ambíguo bloqueia sem mutação. Depois do novo registro, o próprio processo
+elevado executa um readback independente via Task Scheduler; o recibo UAC só
+pode declarar `ok=true` quando esse readback comprovar `AtStartup + S4U`. O
+chamador normal também precisa enumerar a mesma tarefa antes da finalização.
+
 Executar primeiro com `--preflight-only` e com os quatro valores observados e
 fixados (`--source-sha`, `--expected-installed-sha`,
 `--expected-watchdog-sha256`, `--expected-uac-sha256`). A aplicação usa os

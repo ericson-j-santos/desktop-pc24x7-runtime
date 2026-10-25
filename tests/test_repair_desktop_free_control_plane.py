@@ -75,6 +75,11 @@ def patch_partial_probes(monkeypatch, runtime: Path) -> None:
     monkeypatch.setattr(m.socket, "gethostname", lambda: "DESKTOP-RP23OGS")
     monkeypatch.setattr(m.watchdog, "default_runtime_root", lambda: runtime)
     monkeypatch.setattr(m.watchdog, "task_status", lambda: {"exists": False})
+    monkeypatch.setattr(
+        m.watchdog,
+        "inspect_orphaned_task_file",
+        lambda **kwargs: None,
+    )
     monkeypatch.setattr(m.watchdog, "validate_runner_home", lambda path: path)
     monkeypatch.setattr(
         m.watchdog,
