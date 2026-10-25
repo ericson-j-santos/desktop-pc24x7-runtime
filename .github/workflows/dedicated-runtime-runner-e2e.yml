@@ -14,11 +14,6 @@ on:
         type: string
         required: false
         default: ''
-      inventory_dispatch_provenance:
-        description: Fixed one-shot provenance; empty for owner dispatches
-        type: string
-        required: false
-        default: ''
 
 permissions:
   contents: read
@@ -45,15 +40,9 @@ jobs:
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         env:
           INVENTORY_SOURCE_SHA: ${{ inputs.inventory_source_sha }}
-          INVENTORY_DISPATCH_PROVENANCE: ${{ inputs.inventory_dispatch_provenance }}
         with:
           script: |
-            const ownerDispatch = context.actor === 'ericson-j-santos' &&
-              !process.env.INVENTORY_DISPATCH_PROVENANCE;
-            const authorizedOneShot = context.actor === 'github-actions[bot]' &&
-              process.env.INVENTORY_DISPATCH_PROVENANCE === 'one-shot:20261024-pdqk954';
-            if (context.eventName !== 'workflow_dispatch' ||
-                (!ownerDispatch && !authorizedOneShot) ||
+            if (context.eventName !== 'workflow_dispatch' || context.actor !== 'ericson-j-santos' ||
                 context.repo.owner !== 'ericson-j-santos' || context.repo.repo !== 'desktop-pc24x7-runtime' ||
                 context.ref !== 'refs/heads/main' || process.env.GITHUB_RUN_ATTEMPT !== '1' ||
                 !/^[0-9a-f]{40}$/.test(process.env.INVENTORY_SOURCE_SHA || '') ||
@@ -151,12 +140,12 @@ jobs:
   e2e:
     needs: resolve_rules
     name: Pickup on dedicated Desktop runtime runner
-    # Only the existing inventory lane keeps its six-label contract.
-    # Readback requires the Desktop identity label; do not retag any runner.
+    # Native inventory and readback require the Desktop identity label; do not
+    # retag another runner or rely on the six shared runtime labels.
     # Before dispatch, read back the complete runner registry: id 2 must be the
     # unique eligible DESKTOP-PDQK954-runtime runner, online/idle. Keep the
     # identity/TTL guard first; labels alone never prove physical host identity.
-    runs-on: ${{ fromJSON(inputs.diagnostic == 'native-postgres-inventory' && '["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev"]' || '["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
+    runs-on: ${{ fromJSON('["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
     timeout-minutes: 10
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
