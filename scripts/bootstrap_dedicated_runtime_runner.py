@@ -171,7 +171,7 @@ def registry_snapshot(token: str | None) -> dict[str, Any]:
         and str(item.get("name") or "").casefold() == RUNNER_NAME.casefold()
     ]
     if not matches:
-        return {"present": False, "status": "missing", "busy": False, "labels": [], "labels_ok": False}
+        return {"present": False, "id": None, "status": "missing", "busy": False, "labels": [], "labels_ok": False}
     if len(matches) != 1:
         raise BootstrapError("runner_registry_ambiguous", "mais de um runner dedicado com o mesmo nome")
     item = matches[0]
@@ -185,6 +185,7 @@ def registry_snapshot(token: str | None) -> dict[str, Any]:
     required = {label.casefold() for label in REQUIRED_LABELS}
     return {
         "present": True,
+        "id": item.get("id"),
         "status": str(item.get("status") or "unknown").casefold(),
         "busy": bool(item.get("busy")),
         "labels": labels,

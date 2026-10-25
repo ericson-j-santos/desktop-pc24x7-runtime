@@ -9,6 +9,7 @@ import os
 import socket
 import subprocess
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -57,14 +58,36 @@ def load_installation(metadata_path: Path) -> dict[str, Any]:
     )
 
 
-def build_elevated_arguments(installation: dict[str, Any]) -> str:
+def uac_receipt_path(installation: dict[str, Any]) -> Path:
+    return installation["metadata_path"].resolve().parent / "uac-result.json"
+
+
+def build_elevated_arguments(
+    installation: dict[str, Any], invocation_id: str
+) -> str:
     argv = [
         str(installation["release_watchdog"]),
         "register-task-com",
         "--metadata",
         str(installation["metadata_path"]),
+        "--receipt",
+        str(uac_receipt_path(installation)),
+        "--invocation-id",
+        invocation_id,
     ]
     return subprocess.list2cmdline(argv)
+
+
+def matching_receipt(path: Path, invocation_id: str) -> dict[str, Any] | None:
+    if not path.is_file() or path.is_symlink():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict) or payload.get("invocation_id") != invocation_id:
+        return None
+    return payload
 
 
 def shell_execute_runas(executable: Path, params: str, cwd: Path) -> int:
@@ -122,9 +145,20 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
             **finalized,
         }
 
+    invocation_id = uuid.uuid4().hex
+    receipt_path = uac_receipt_path(installation)
+    watchdog.atomic_json(
+        receipt_path,
+        {
+            "ok": None,
+            "invocation_id": invocation_id,
+            "started_at": watchdog.now_iso(),
+            "state": "uac_pending",
+        },
+    )
     rc = shell_execute_runas(
         installation["python_executable"],
-        build_elevated_arguments(installation),
+        build_elevated_arguments(installation, invocation_id),
         installation["release_root"],
     )
     if rc <= 32:
@@ -141,6 +175,10 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
                 "result": "DESKTOP_CONTROL_PLANE_WATCHDOG_PROVISIONED",
                 **finalized,
             }
+        receipt = matching_receipt(receipt_path, invocation_id)
+        if receipt and receipt.get("ok") is False:
+            error = str(receipt.get("error") or "unknown")[:500]
+            raise RuntimeError(f"uac_registration_failed:{error}")
         time.sleep(1.0)
 
     return {
@@ -148,6 +186,7 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
         "mode": "uac",
         "result": "UAC_APPROVAL_OR_PROVISIONING_PENDING",
         "task": watchdog.task_status(),
+        "uac_receipt": matching_receipt(receipt_path, invocation_id),
     }
 
 

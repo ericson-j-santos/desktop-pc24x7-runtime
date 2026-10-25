@@ -763,7 +763,7 @@ def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, 
             definition,
             TASK_CREATE_OR_UPDATE,
             principal.UserId,
-            "",
+            None,
             TASK_LOGON_S4U,
         )
     except Exception as exc:
@@ -962,6 +962,8 @@ def main() -> int:
 
     register_parser = sub.add_parser("register-task-com")
     register_parser.add_argument("--metadata", type=Path, required=True)
+    register_parser.add_argument("--receipt", type=Path)
+    register_parser.add_argument("--invocation-id")
 
     ns = parser.parse_args()
     try:
@@ -986,10 +988,44 @@ def main() -> int:
             return 0
         if ns.command == "register-task-com":
             payload = register_task_from_metadata(ns.metadata)
+            if ns.receipt or ns.invocation_id:
+                if not ns.receipt or not ns.invocation_id:
+                    raise WatchdogError("recibo UAC incompleto")
+                receipt = ns.receipt.resolve()
+                expected = ns.metadata.resolve().parent / "uac-result.json"
+                if receipt != expected:
+                    raise WatchdogError("caminho de recibo UAC inválido")
+                atomic_json(
+                    receipt,
+                    {
+                        "ok": True,
+                        "invocation_id": ns.invocation_id,
+                        "completed_at": now_iso(),
+                        "task": payload,
+                    },
+                )
             print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
             return 0
         raise WatchdogError("comando inválido")
     except (WatchdogError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+        if (
+            getattr(ns, "command", None) == "register-task-com"
+            and getattr(ns, "receipt", None)
+            and getattr(ns, "invocation_id", None)
+        ):
+            receipt = ns.receipt.resolve()
+            expected = ns.metadata.resolve().parent / "uac-result.json"
+            if receipt == expected:
+                atomic_json(
+                    receipt,
+                    {
+                        "ok": False,
+                        "invocation_id": ns.invocation_id,
+                        "completed_at": now_iso(),
+                        "error": str(exc)[:1000],
+                        "error_type": type(exc).__name__,
+                    },
+                )
         print(
             json.dumps(
                 {

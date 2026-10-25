@@ -504,6 +504,44 @@ def test_runner_config_is_validated_but_never_read() -> None:
     assert '.runner").read_' not in text
 
 
+def test_register_task_cli_writes_sanitized_failure_receipt(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    metadata = tmp_path / "metadata.json"
+    receipt = tmp_path / "uac-result.json"
+    monkeypatch.setattr(
+        m,
+        "register_task_from_metadata",
+        lambda path: (_ for _ in ()).throw(m.WatchdogError("synthetic_com_error")),
+    )
+    monkeypatch.setattr(m, "now_iso", lambda: "2026-10-25T20:00:00+00:00")
+    monkeypatch.setattr(
+        m.sys,
+        "argv",
+        [
+            str(MODULE),
+            "register-task-com",
+            "--metadata",
+            str(metadata),
+            "--receipt",
+            str(receipt),
+            "--invocation-id",
+            "i" * 32,
+        ],
+    )
+    assert m.main() == 2
+    output = capsys.readouterr()
+    assert "synthetic_com_error" in output.err
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert payload == {
+        "ok": False,
+        "invocation_id": "i" * 32,
+        "completed_at": "2026-10-25T20:00:00+00:00",
+        "error": "synthetic_com_error",
+        "error_type": "WatchdogError",
+    }
+
+
 def test_stop_runner_terminates_only_exact_governed_listener(monkeypatch, tmp_path: Path) -> None:
     runner_home = make_runner_home(tmp_path)
     snapshots = iter([
