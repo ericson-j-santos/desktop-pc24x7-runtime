@@ -179,6 +179,24 @@ def launch(metadata_path: Path, *, confirm: str, timeout_seconds: int) -> dict[s
         if receipt and receipt.get("ok") is False:
             error = str(receipt.get("error") or "unknown")[:500]
             raise RuntimeError(f"uac_registration_failed:{error}")
+        if receipt and receipt.get("ok") is True:
+            elevated = receipt.get("task")
+            elevated_readback = (
+                elevated.get("elevated_readback")
+                if isinstance(elevated, dict)
+                else None
+            )
+            if not isinstance(elevated_readback, dict) or not task_headless_ready(
+                elevated_readback
+            ):
+                raise RuntimeError("uac_success_receipt_missing_elevated_readback")
+            return {
+                "ok": False,
+                "mode": "uac",
+                "result": "ELEVATED_TASK_NOT_VISIBLE_TO_CALLER",
+                "task": task,
+                "uac_receipt": receipt,
+            }
         time.sleep(1.0)
 
     return {

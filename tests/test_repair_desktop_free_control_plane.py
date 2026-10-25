@@ -75,6 +75,16 @@ def patch_partial_probes(monkeypatch, runtime: Path) -> None:
     monkeypatch.setattr(m.socket, "gethostname", lambda: "DESKTOP-RP23OGS")
     monkeypatch.setattr(m.watchdog, "default_runtime_root", lambda: runtime)
     monkeypatch.setattr(m.watchdog, "task_status", lambda: {"exists": False})
+    monkeypatch.setattr(
+        m.watchdog,
+        "inspect_orphaned_task_file",
+        lambda **kwargs: None,
+    )
+    monkeypatch.setattr(
+        m.watchdog,
+        "current_user_sid",
+        lambda user_id: "S-1-5-21-100-200-300-1001",
+    )
     monkeypatch.setattr(m.watchdog, "validate_runner_home", lambda path: path)
     monkeypatch.setattr(
         m.watchdog,
@@ -124,6 +134,7 @@ def test_preflight_accepts_only_pinned_partial_state(monkeypatch, tmp_path: Path
     assert result["runner_pids"] == [4321]
     assert result["mutation_performed"] is False
     assert result["github_pickup_proven"] is False
+    assert result["task_acl_preflight"] is True
 
 
 def test_preflight_rejects_any_existing_task(monkeypatch, tmp_path: Path) -> None:
@@ -169,6 +180,55 @@ def test_backup_and_target_release_are_idempotent(monkeypatch, tmp_path: Path) -
     )
     assert repeated_target == target
     assert repeated_target_manifest == manifest
+
+
+def test_backup_replay_allows_only_forensic_receipt_drift(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _, runtime, _, context = inspect(monkeypatch, tmp_path)
+    (runtime / "uac-result.json").write_text(
+        json.dumps({"ok": False, "error": "original"}), encoding="utf-8"
+    )
+    (runtime / "schtasks-result.txt").write_text("original\n", encoding="utf-8")
+    backup, manifest = m.create_backup(context)
+
+    (runtime / "uac-result.json").write_text(
+        json.dumps({"state": "uac_pending", "invocation_id": "new"}),
+        encoding="utf-8",
+    )
+    (runtime / "schtasks-result.txt").write_text("later attempt\n", encoding="utf-8")
+
+    repeated_backup, repeated_manifest = m.create_backup(context)
+    assert repeated_backup == backup
+    assert repeated_manifest == manifest
+    assert json.loads((backup / "uac-result.json").read_text(encoding="utf-8")) == {
+        "ok": False,
+        "error": "original",
+    }
+    assert (backup / "schtasks-result.txt").read_text(encoding="utf-8") == "original\n"
+
+
+def test_backup_replay_rejects_active_rollback_drift(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _, runtime, _, context = inspect(monkeypatch, tmp_path)
+    m.create_backup(context)
+    (runtime / "metadata.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(m.RepairBlocked, match="backup_active_state_changed"):
+        m.create_backup(context)
+
+
+def test_backup_replay_rejects_corrupted_stored_receipt(
+    monkeypatch, tmp_path: Path
+) -> None:
+    _, runtime, _, context = inspect(monkeypatch, tmp_path)
+    (runtime / "uac-result.json").write_text("original\n", encoding="utf-8")
+    backup, _ = m.create_backup(context)
+    (backup / "uac-result.json").write_text("corrupt\n", encoding="utf-8")
+
+    with pytest.raises(m.RepairBlocked, match="backup_integrity_failed"):
+        m.create_backup(context)
 
 
 def test_activation_preserves_runner_identity_and_requires_pickup(
@@ -243,3 +303,5 @@ def test_s4u_registration_passes_no_password_variant() -> None:
     text = (SCRIPTS / "desktop_control_plane_watchdog.py").read_text(encoding="utf-8")
     registration = text.split("folder.RegisterTaskDefinition(", 1)[1].split(")", 1)[0]
     assert "principal.UserId,\n            None,\n            TASK_LOGON_S4U" in registration
+    assert "task_sddl" in registration
+    assert "registered_task.SetSecurityDescriptor(task_sddl, 0)" in text

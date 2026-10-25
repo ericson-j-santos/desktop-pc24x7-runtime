@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 from ctypes import wintypes
+import hashlib
 import json
 import locale
 import os
@@ -97,6 +98,24 @@ def atomic_json(path: Path, payload: dict[str, Any]) -> None:
         with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             json.dump(payload, handle, ensure_ascii=True, sort_keys=True, indent=2)
             handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path)
+    finally:
+        if os.path.exists(tmp_name):
+            os.unlink(tmp_name)
+
+
+def atomic_bytes(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=path.name + ".",
+        suffix=".tmp",
+        dir=str(path.parent),
+    )
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path)
@@ -698,17 +717,217 @@ def load_installed_metadata(
     }
 
 
-def register_task_from_metadata(metadata_path: Path) -> dict[str, Any]:
+def _task_file_path() -> Path:
+    system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    return system_root / "System32" / "Tasks" / TASK_FOLDER.lstrip("\\") / TASK_LEAF
+
+
+def _sha256_bytes(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _same_file(left: Path, right: Path) -> bool:
+    try:
+        return os.path.samefile(left, right)
+    except OSError:
+        return os.path.normcase(str(left.resolve())) == os.path.normcase(
+            str(right.resolve())
+        )
+
+
+def _validate_orphan_task_xml(
+    payload: bytes,
+    *,
+    python_executable: Path,
+    launcher: Path,
+) -> None:
+    import xml.etree.ElementTree as ET
+
+    try:
+        root = ET.fromstring(payload)
+    except ET.ParseError as exc:
+        raise WatchdogError("orphan_task_xml_invalid") from exc
+    ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+    uri = root.findtext(".//t:RegistrationInfo/t:URI", default="", namespaces=ns)
+    logon_type = root.findtext(".//t:Principal/t:LogonType", default="", namespaces=ns)
+    command = root.findtext(".//t:Actions/t:Exec/t:Command", default="", namespaces=ns)
+    arguments = root.findtext(".//t:Actions/t:Exec/t:Arguments", default="", namespaces=ns)
+    boot = root.find(".//t:BootTrigger", ns) is not None
+    if uri != TASK_NAME or logon_type.casefold() != "s4u" or not boot:
+        raise WatchdogError("orphan_task_contract_mismatch")
+    command_path = Path(command)
+    argument_path = Path(arguments.strip().strip('"'))
+    if not _same_file(command_path, python_executable) or not _same_file(
+        argument_path,
+        launcher,
+    ):
+        raise WatchdogError("orphan_task_action_mismatch")
+
+
+def inspect_orphaned_task_file(
+    *,
+    python_executable: Path,
+    launcher: Path,
+) -> dict[str, Any] | None:
+    if task_status().get("exists"):
+        return None
+    task_file = _task_file_path()
+    if not task_file.exists():
+        return None
+    if not task_file.is_file() or task_file.is_symlink():
+        raise WatchdogError("orphan_task_file_invalid")
+    payload = task_file.read_bytes()
+    _validate_orphan_task_xml(
+        payload,
+        python_executable=python_executable,
+        launcher=launcher,
+    )
+    return {
+        "present": True,
+        "task_name": TASK_NAME,
+        "task_file": str(task_file),
+        "task_file_sha256": _sha256_bytes(payload),
+    }
+
+
+def _reconcile_orphaned_task_file(
+    runtime_root: Path,
+    *,
+    python_executable: Path,
+    launcher: Path,
+    invocation_id: str,
+) -> dict[str, Any] | None:
+    inspected = inspect_orphaned_task_file(
+        python_executable=python_executable,
+        launcher=launcher,
+    )
+    if inspected is None:
+        return None
+    task_file = Path(inspected["task_file"])
+    payload = task_file.read_bytes()
+    digest = str(inspected["task_file_sha256"])
+    backup_root = runtime_root / "backups" / "orphaned-scheduled-task" / digest
+    backup_file = backup_root / "DesktopPc24x7RuntimeWatchdog.xml"
+    manifest_path = backup_root / "manifest.json"
+    manifest = {
+        "task_name": TASK_NAME,
+        "task_file_sha256": digest,
+        "invocation_id": invocation_id,
+        "quarantined_at": now_iso(),
+    }
+    if backup_root.exists():
+        try:
+            existing_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            raise WatchdogError("orphan_task_backup_collision") from None
+        if not isinstance(existing_manifest, dict) or (
+            existing_manifest.get("task_name") != TASK_NAME
+            or existing_manifest.get("task_file_sha256") != digest
+            or not backup_file.is_file()
+            or backup_file.is_symlink()
+            or _sha256_bytes(backup_file.read_bytes()) != digest
+        ):
+            raise WatchdogError("orphan_task_backup_collision")
+    else:
+        backup_root.parent.mkdir(parents=True, exist_ok=True)
+        staging = Path(tempfile.mkdtemp(prefix=digest + ".", dir=backup_root.parent))
+        try:
+            atomic_bytes(staging / backup_file.name, payload)
+            atomic_json(staging / manifest_path.name, manifest)
+            os.replace(staging, backup_root)
+        finally:
+            if staging.exists():
+                shutil.rmtree(staging)
+    if _sha256_bytes(task_file.read_bytes()) != digest:
+        raise WatchdogError("orphan_task_changed_before_quarantine")
+    task_file.unlink()
+    return {
+        "reconciled": True,
+        "task_file_sha256": digest,
+        "backup_file": str(backup_file),
+    }
+
+
+def _restore_orphaned_task_file(reconciliation: dict[str, Any] | None) -> None:
+    if not reconciliation or task_status().get("exists"):
+        return
+    task_file = _task_file_path()
+    if task_file.exists():
+        return
+    backup_file = Path(str(reconciliation["backup_file"]))
+    payload = backup_file.read_bytes()
+    if _sha256_bytes(payload) != reconciliation["task_file_sha256"]:
+        raise WatchdogError("orphan_task_backup_integrity_failed")
+    atomic_bytes(task_file, payload)
+
+
+def _task_headless_ready(task: dict[str, Any]) -> bool:
+    return (
+        task.get("exists") is True
+        and task.get("trigger_at_startup") is True
+        and str(task.get("logon_type") or "").casefold() == "s4u"
+    )
+
+
+def register_task_from_metadata(
+    metadata_path: Path,
+    *,
+    invocation_id: str = "direct-elevated",
+) -> dict[str, Any]:
     installation = load_installed_metadata(metadata_path, require_current_release=True)
-    return register_boot_task(
+    reconciliation = _reconcile_orphaned_task_file(
+        installation["runtime_root"],
         python_executable=installation["python_executable"],
         launcher=installation["launcher"],
+        invocation_id=invocation_id,
     )
+    try:
+        registered = register_boot_task(
+            python_executable=installation["python_executable"],
+            launcher=installation["launcher"],
+        )
+        observed = task_status()
+        if not _task_headless_ready(observed):
+            raise WatchdogError("task_scheduler_elevated_readback_failed")
+    except Exception:
+        _restore_orphaned_task_file(reconciliation)
+        raise
+    return {
+        **registered,
+        "elevated_readback": observed,
+        "orphan_reconciled": bool(reconciliation),
+        "orphan_task_file_sha256": (
+            reconciliation.get("task_file_sha256") if reconciliation else None
+        ),
+    }
 
 
 def current_user_id() -> str:
     import getpass
     return f"{socket.gethostname()}\\{getpass.getuser()}"
+
+
+def current_user_sid(user_id: str) -> str:
+    try:
+        import win32security  # type: ignore
+    except ImportError as exc:
+        raise WatchdogError("pywin32 indisponível para resolver SID da tarefa") from exc
+    try:
+        sid, _, _ = win32security.LookupAccountName(None, user_id)
+        value = str(win32security.ConvertSidToStringSid(sid))
+    except Exception as exc:
+        raise WatchdogError("task_principal_sid_unavailable") from exc
+    parts = value.split("-")
+    if len(parts) < 4 or parts[0] != "S" or any(not part.isdigit() for part in parts[1:]):
+        raise WatchdogError("task_principal_sid_invalid")
+    return value
+
+
+def task_security_descriptor(user_sid: str) -> str:
+    parts = user_sid.split("-")
+    if len(parts) < 4 or parts[0] != "S" or any(not part.isdigit() for part in parts[1:]):
+        raise WatchdogError("task_principal_sid_invalid")
+    return f"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;{user_sid})"
 
 
 def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
@@ -756,16 +975,19 @@ def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, 
     principal.UserId = current_user_id()
     principal.LogonType = TASK_LOGON_S4U
     principal.RunLevel = TASK_RUNLEVEL_LUA
+    task_sddl = task_security_descriptor(current_user_sid(principal.UserId))
 
     try:
-        folder.RegisterTaskDefinition(
+        registered_task = folder.RegisterTaskDefinition(
             TASK_LEAF,
             definition,
             TASK_CREATE_OR_UPDATE,
             principal.UserId,
             None,
             TASK_LOGON_S4U,
+            task_sddl,
         )
+        registered_task.SetSecurityDescriptor(task_sddl, 0)
     except Exception as exc:
         detail = repr(exc).casefold()
         if (
@@ -785,6 +1007,7 @@ def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, 
         "password_used": False,
         "run_level": "limited",
         "restart_policy_supported": restart_policy_supported,
+        "task_acl_applied": True,
     }
 
 
@@ -987,7 +1210,10 @@ def main() -> int:
             print(json.dumps(status(runtime_root), ensure_ascii=False, sort_keys=True))
             return 0
         if ns.command == "register-task-com":
-            payload = register_task_from_metadata(ns.metadata)
+            payload = register_task_from_metadata(
+                ns.metadata,
+                invocation_id=ns.invocation_id or "direct-elevated",
+            )
             if ns.receipt or ns.invocation_id:
                 if not ns.receipt or not ns.invocation_id:
                     raise WatchdogError("recibo UAC incompleto")

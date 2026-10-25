@@ -39,6 +39,10 @@ BACKUP_FILES = (
     "uac-result.json",
     "schtasks-result.txt",
 )
+ROLLBACK_FILES = (
+    "metadata.json",
+    "run.py",
+)
 
 
 class RepairBlocked(RuntimeError):
@@ -210,9 +214,22 @@ def inspect_partial_installation(
     if not python_executable.is_file():
         raise RepairBlocked("installed_python_missing")
     try:
+        orphan_task_file = watchdog.inspect_orphaned_task_file(
+            python_executable=python_executable,
+            launcher=runtime_root / "run.py",
+        )
+    except watchdog.WatchdogError as exc:
+        raise RepairBlocked(str(exc)) from None
+    try:
         import win32com.client  # type: ignore  # noqa: F401
     except ImportError as exc:
         raise RepairBlocked("pywin32_required") from exc
+    try:
+        watchdog.task_security_descriptor(
+            watchdog.current_user_sid(watchdog.current_user_id())
+        )
+    except watchdog.WatchdogError as exc:
+        raise RepairBlocked(str(exc)) from None
     for name in TARGET_RELEASE_FILES:
         if not (source_root / "scripts" / name).is_file():
             raise RepairBlocked(f"source_bundle_incomplete:{name}")
@@ -232,6 +249,8 @@ def inspect_partial_installation(
         "runner_process": process,
         "registry": registry,
         "python_executable": python_executable,
+        "orphan_task_file": orphan_task_file,
+        "task_acl_preflight": True,
     }
 
 
@@ -272,12 +291,38 @@ def create_backup(context: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
         if not manifest_path.is_file():
             raise RepairBlocked("backup_collision")
         existing = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if existing != manifest:
+        expected_identity = {
+            key: value for key, value in manifest.items() if key != "files"
+        }
+        existing_identity = {
+            key: value for key, value in existing.items() if key != "files"
+        }
+        if existing_identity != expected_identity:
             raise RepairBlocked("backup_collision")
-        for name, digest in expected_files.items():
-            if sha256_file(destination / name) != digest:
+        stored_files = existing.get("files")
+        if not isinstance(stored_files, dict):
+            raise RepairBlocked("backup_collision")
+        for name, digest in stored_files.items():
+            stored = destination / name
+            if (
+                name not in BACKUP_FILES
+                or not isinstance(digest, str)
+                or not stored.is_file()
+                or stored.is_symlink()
+                or sha256_file(stored) != digest
+            ):
                 raise RepairBlocked("backup_integrity_failed")
-        return destination, manifest
+        for name in ROLLBACK_FILES:
+            current = runtime_root / name
+            digest = stored_files.get(name)
+            if (
+                not isinstance(digest, str)
+                or not current.is_file()
+                or current.is_symlink()
+                or sha256_file(current) != digest
+            ):
+                raise RepairBlocked("backup_active_state_changed")
+        return destination, existing
 
     destination.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=backup_id + ".", dir=destination.parent))
@@ -481,6 +526,8 @@ def preflight_result(context: dict[str, Any], target_sha: str) -> dict[str, Any]
         "runner_status": registry.get("status"),
         "runner_busy": registry.get("busy"),
         "runner_pids": process.get("matching_pids", []),
+        "orphan_task_file": context.get("orphan_task_file"),
+        "task_acl_preflight": bool(context.get("task_acl_preflight")),
         "mutation_performed": False,
         "github_pickup_proven": False,
     }

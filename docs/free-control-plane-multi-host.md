@@ -69,6 +69,30 @@ local e o sucesso do repair continua `PICKUP_PENDING` até job físico independe
 no mesmo SHA. A capability não instala TODO Gateway, não cria credencial, não
 reinicia serviço existente e não reinicia o computador.
 
+Um replay explicitamente autorizado reutiliza o backup somente quando o manifesto
+e todos os arquivos preservados continuam íntegros e a metadata e o launcher ativos
+correspondem ao estado original. Recibos forenses produzidos por uma tentativa UAC
+posterior podem divergir sem substituir o backup original; qualquer drift nos
+arquivos necessários ao rollback continua falhando fechado.
+
+Se o Task Scheduler não enumerar a tarefa, mas o arquivo exato existir em
+`System32\Tasks`, o repair trata o estado como registro órfão. O filho elevado
+só coloca esse arquivo em quarentena quando o XML ainda corresponde ao mesmo
+nome, `BootTrigger`, `S4U`, Python e launcher instalados. O backup é endereçado
+pelo SHA-256 do XML e preservado antes da remoção. XML estrangeiro, alterado ou
+ambíguo bloqueia sem mutação. Depois do novo registro, o próprio processo
+elevado executa um readback independente via Task Scheduler; o recibo UAC só
+pode declarar `ok=true` quando esse readback comprovar `AtStartup + S4U`. O
+chamador normal também precisa enumerar a mesma tarefa antes da finalização.
+
+O registro também aplica uma DACL explícita à tarefa: `SYSTEM` e o grupo local
+de Administradores mantêm controle total, enquanto somente o SID exato do
+principal S4U recebe leitura e execução. A atualização usa o parâmetro SDDL de
+`RegisterTaskDefinition` e reafirma o mesmo descritor no objeto registrado. Isso
+evita recibo elevado positivo acompanhado de invisibilidade para o chamador
+normal, sem conceder acesso a `Authenticated Users` ou alterar a ACL da pasta
+compartilhada `\Automation`.
+
 Executar primeiro com `--preflight-only` e com os quatro valores observados e
 fixados (`--source-sha`, `--expected-installed-sha`,
 `--expected-watchdog-sha256`, `--expected-uac-sha256`). A aplicação usa os

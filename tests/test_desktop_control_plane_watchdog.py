@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -512,7 +513,7 @@ def test_register_task_cli_writes_sanitized_failure_receipt(
     monkeypatch.setattr(
         m,
         "register_task_from_metadata",
-        lambda path: (_ for _ in ()).throw(m.WatchdogError("synthetic_com_error")),
+        lambda path, **kwargs: (_ for _ in ()).throw(m.WatchdogError("synthetic_com_error")),
     )
     monkeypatch.setattr(m, "now_iso", lambda: "2026-10-25T20:00:00+00:00")
     monkeypatch.setattr(
@@ -540,6 +541,99 @@ def test_register_task_cli_writes_sanitized_failure_receipt(
         "error": "synthetic_com_error",
         "error_type": "WatchdogError",
     }
+
+
+def _scheduled_task_xml(python_executable: Path, launcher: Path) -> bytes:
+    return (
+        '<?xml version="1.0" encoding="UTF-16"?>\n'
+        '<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+        '<RegistrationInfo><URI>\\Automation\\DesktopPc24x7RuntimeWatchdog</URI>'
+        '</RegistrationInfo><Triggers><BootTrigger><Enabled>true</Enabled></BootTrigger>'
+        '</Triggers><Principals><Principal><LogonType>S4U</LogonType></Principal>'
+        '</Principals><Actions><Exec>'
+        f'<Command>{python_executable}</Command><Arguments>"{launcher}"</Arguments>'
+        '</Exec></Actions></Task>'
+    ).encode("utf-16")
+
+
+def test_reconcile_quarantines_only_matching_orphan_task(
+    monkeypatch, tmp_path: Path
+) -> None:
+    python_executable = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    task_file = tmp_path / "System32" / "Tasks" / "Automation" / m.TASK_LEAF
+    python_executable.write_bytes(b"")
+    launcher.write_bytes(b"")
+    task_file.parent.mkdir(parents=True)
+    payload = _scheduled_task_xml(python_executable, launcher)
+    task_file.write_bytes(payload)
+    monkeypatch.setattr(m, "_task_file_path", lambda: task_file)
+    monkeypatch.setattr(m, "task_status", lambda: {"exists": False})
+
+    result = m._reconcile_orphaned_task_file(
+        tmp_path / "runtime",
+        python_executable=python_executable,
+        launcher=launcher,
+        invocation_id="repair-1",
+    )
+
+    assert result and result["reconciled"] is True
+    assert not task_file.exists()
+    backup = Path(result["backup_file"])
+    assert backup.read_bytes() == payload
+    manifest = json.loads((backup.parent / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["task_name"] == m.TASK_NAME
+    assert manifest["invocation_id"] == "repair-1"
+
+
+def test_reconcile_rejects_foreign_orphan_without_mutation(
+    monkeypatch, tmp_path: Path
+) -> None:
+    python_executable = tmp_path / "python.exe"
+    launcher = tmp_path / "run.py"
+    foreign_launcher = tmp_path / "foreign.py"
+    task_file = tmp_path / "task.xml"
+    for path in (python_executable, launcher, foreign_launcher):
+        path.write_bytes(b"")
+    payload = _scheduled_task_xml(python_executable, foreign_launcher)
+    task_file.write_bytes(payload)
+    monkeypatch.setattr(m, "_task_file_path", lambda: task_file)
+    monkeypatch.setattr(m, "task_status", lambda: {"exists": False})
+
+    with pytest.raises(m.WatchdogError, match="orphan_task_action_mismatch"):
+        m._reconcile_orphaned_task_file(
+            tmp_path / "runtime",
+            python_executable=python_executable,
+            launcher=launcher,
+            invocation_id="repair-2",
+        )
+    assert task_file.read_bytes() == payload
+
+
+def test_register_from_metadata_requires_elevated_readback(
+    monkeypatch, tmp_path: Path
+) -> None:
+    metadata = tmp_path / "runtime" / "metadata.json"
+    python_executable = tmp_path / "python.exe"
+    launcher = tmp_path / "runtime" / "run.py"
+    metadata.parent.mkdir()
+    python_executable.write_bytes(b"")
+    launcher.write_bytes(b"")
+    monkeypatch.setattr(
+        m,
+        "load_installed_metadata",
+        lambda path, **kwargs: {
+            "runtime_root": metadata.parent,
+            "python_executable": python_executable,
+            "launcher": launcher,
+        },
+    )
+    monkeypatch.setattr(m, "_reconcile_orphaned_task_file", lambda *args, **kwargs: None)
+    monkeypatch.setattr(m, "register_boot_task", lambda **kwargs: {"ok": True})
+    monkeypatch.setattr(m, "task_status", lambda: {"exists": False})
+
+    with pytest.raises(m.WatchdogError, match="task_scheduler_elevated_readback_failed"):
+        m.register_task_from_metadata(metadata, invocation_id="repair-3")
 
 
 def test_stop_runner_terminates_only_exact_governed_listener(monkeypatch, tmp_path: Path) -> None:
@@ -608,3 +702,73 @@ def test_cycle_recovers_runner_even_when_rdc_fails(
     assert payload["partial"] is True
     assert payload["github_pickup_required"] is True
     assert payload["ok"] is False
+
+
+def test_task_security_descriptor_is_exact_and_least_privilege() -> None:
+    sid = "S-1-5-21-100-200-300-1001"
+    assert m.task_security_descriptor(sid) == (
+        "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+        "(A;;GRGX;;;S-1-5-21-100-200-300-1001)"
+    )
+    with pytest.raises(m.WatchdogError, match="task_principal_sid_invalid"):
+        m.task_security_descriptor("DESKTOP\\User")
+
+
+def test_register_boot_task_applies_explicit_task_sddl(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = {}
+
+    class RegisteredTask:
+        def SetSecurityDescriptor(self, sddl, flags):
+            calls["set_security"] = (sddl, flags)
+
+    class Folder:
+        def RegisterTaskDefinition(self, *args):
+            calls["register"] = args
+            return RegisteredTask()
+
+    folder = Folder()
+    definition = SimpleNamespace(
+        RegistrationInfo=SimpleNamespace(),
+        Settings=SimpleNamespace(),
+        Triggers=SimpleNamespace(Create=lambda kind: SimpleNamespace()),
+        Actions=SimpleNamespace(Create=lambda kind: SimpleNamespace()),
+        Principal=SimpleNamespace(),
+    )
+
+    class Service:
+        def Connect(self):
+            return None
+
+        def GetFolder(self, path):
+            return folder
+
+        def NewTask(self, flags):
+            return definition
+
+    fake_client = SimpleNamespace(Dispatch=lambda name: Service())
+    fake_win32com = SimpleNamespace(client=fake_client)
+    monkeypatch.setitem(sys.modules, "win32com", fake_win32com)
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m, "current_user_id", lambda: "DESKTOP-RP23OGS\\User")
+    monkeypatch.setattr(
+        m,
+        "current_user_sid",
+        lambda user_id: "S-1-5-21-100-200-300-1001",
+    )
+
+    result = m.register_boot_task(
+        python_executable=tmp_path / "python.exe",
+        launcher=tmp_path / "run.py",
+    )
+
+    registration = calls["register"]
+    assert registration[4] is None
+    assert registration[5] == m.TASK_LOGON_S4U
+    assert registration[6] == m.task_security_descriptor(
+        "S-1-5-21-100-200-300-1001"
+    )
+    assert calls["set_security"] == (registration[6], 0)
+    assert result["task_acl_applied"] is True
