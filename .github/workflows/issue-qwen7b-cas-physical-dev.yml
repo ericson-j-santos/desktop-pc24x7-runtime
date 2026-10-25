@@ -21,9 +21,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue-qwen7b-cas-readback-20261025' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE_CAS_20261025_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE_CAS_WINDOWS_SHELL_20261025_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE_CAS_20261025_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE_CAS_WINDOWS_SHELL_20261025_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 3
     permissions:
@@ -49,7 +49,7 @@ jobs:
               owner:context.repo.owner,repo:context.repo.repo,branch:'main'
             })).data;
             if (pr.state !== 'open' || !pr.draft || pr.head.sha !== runSHA ||
-                pr.base.sha !== main.commit.sha || !pr.body?.includes('OWNER_ISSUE_CAS_20261025_ONCE') ||
+                pr.base.sha !== main.commit.sha || !pr.body?.includes('OWNER_ISSUE_CAS_WINDOWS_SHELL_20261025_ONCE') ||
                 pr.head.ref !== 'feat/issue-qwen7b-cas-readback-20261025') {
               core.setFailed('ISSUE_CAS_RUNTIME_SHA_DRIFT'); return;
             }
@@ -97,7 +97,7 @@ jobs:
       CORRELATION_ID: issue-cas-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Admit exact Dell host
-        shell: pwsh
+        shell: powershell
         run: |
           if ($env:COMPUTERNAME -ne 'DESKTOP-PDQK954' -or $env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'WRONG_ISSUE_CAS_HOST' }
 
@@ -122,7 +122,7 @@ jobs:
           persist-credentials: false
       - name: Governed Session Launcher
         id: session
-        shell: pwsh
+        shell: powershell
         run: |
           $ErrorActionPreference = 'Stop'
           $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
@@ -139,7 +139,7 @@ jobs:
           "target=$($receipt.target_path)" | Add-Content $env:GITHUB_OUTPUT
           "session=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
       - name: Venv and dependencies through Command Gateway
-        shell: pwsh
+        shell: powershell
         env:
           TARGET: ${{ steps.session.outputs.target }}
           SESSION: ${{ steps.session.outputs.session }}
@@ -159,7 +159,7 @@ jobs:
           & python $gateway @base $python '-m' 'pip' 'install' '--isolated' '--disable-pip-version-check' '--no-input' '--no-cache-dir' '-r' $req
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Persist and verify immutable CAS probe through Gateway
-        shell: pwsh
+        shell: powershell
         env:
           TARGET: ${{ steps.session.outputs.target }}
           SESSION: ${{ steps.session.outputs.session }}
