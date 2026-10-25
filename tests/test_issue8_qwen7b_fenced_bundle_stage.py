@@ -145,7 +145,7 @@ def test_model_entry_has_real_issue_fenced_pool_and_uses_no_github_write():
     source = (Path(__file__).resolve().parents[1] /
               "scripts/issue8_qwen7b_fenced_bundle_stage.py").read_text("utf8")
     for required in (
-        "WorkerPoolStore(", "fencing_required=True",
+        "closing_worker_pool_type(WorkerPoolStore)", "fencing_required=True",
         'git(sandbox, "-c", "core.autocrlf=false", "clone"',
         "pool.claim_task(", "pool.start_task(", "NativeStructuredOllama()",
         "replay_model_calls", "run_bridge_regressions(independent, sandbox)",
@@ -408,3 +408,59 @@ def test_governed_sandbox_rejects_untrusted_parent(tmp_path):
     with pytest.raises(stage.IssueStageBlocked, match="sandbox_parent_unverified"):
         with stage.governed_sandbox(missing):
             pass
+
+
+def test_sqlite_close_context_positive_and_repeat(tmp_path):
+    import sqlite3
+    class Bare:
+        def __init__(self, path): self.path = path
+        def _db(self): return sqlite3.connect(self.path, isolation_level=None)
+    pool = stage.closing_worker_pool_type(Bare)(tmp_path / "worker.db")
+    for _ in range(2):
+        with pool._db() as db:
+            db.execute("CREATE TABLE IF NOT EXISTS notes (id INTEGER)")
+        with pytest.raises(sqlite3.ProgrammingError):
+            db.execute("SELECT 1")
+    (tmp_path / "worker.db").unlink()
+    assert not (tmp_path / "worker.db").exists()
+
+
+def test_sqlite_close_preserves_rollback_on_error(tmp_path):
+    import sqlite3
+    class Bare:
+        def __init__(self, path): self.path = path
+        def _db(self): return sqlite3.connect(self.path)
+    pool = stage.closing_worker_pool_type(Bare)(tmp_path / "worker.db")
+    with pytest.raises(ValueError, match="expected"):
+        with pool._db() as db:
+            db.execute("CREATE TABLE test (id INTEGER)")
+            raise ValueError("expected")
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.execute("SELECT 1")
+
+
+def test_raw_stdlib_sqlite_context_is_not_self_closing(tmp_path):
+    import sqlite3
+    db = sqlite3.connect(tmp_path / "raw.db")
+    with db:
+        assert db.execute("SELECT 1").fetchone() == (1,)
+    assert db.execute("SELECT 1").fetchone() == (1,)
+    db.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.execute("SELECT 1")
+
+
+def test_scoped_db_direct_transaction_path_remains_available(tmp_path):
+    import sqlite3
+    class Bare:
+        def __init__(self, path): self.path = path
+        def _db(self): return sqlite3.connect(self.path)
+    store = stage.closing_worker_pool_type(Bare)(tmp_path / "tx.db")
+    db = store._db()
+    db.execute("CREATE TABLE logs (id INTEGER)")
+    db.execute("INSERT INTO logs VALUES (7)")
+    db.commit()
+    assert db.execute("SELECT id FROM logs").fetchone() == (7,)
+    db.close()
+    with pytest.raises(sqlite3.ProgrammingError):
+        db.execute("SELECT 1")

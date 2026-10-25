@@ -213,6 +213,37 @@ def governed_sandbox(target: Path):
             raise IssueStageBlocked("sandbox_cleanup_incomplete")
 
 
+class _ClosingSQLiteHandle:
+    """Close SQLite's native handle when exiting a transaction context."""
+    def __init__(self, connection):
+        self._connection = connection
+
+    def __enter__(self):
+        try:
+            self._connection.__enter__()
+        except BaseException:
+            self._connection.close()
+            raise
+        return self._connection
+
+    def __exit__(self, *exc):
+        try:
+            return self._connection.__exit__(*exc)
+        finally:
+            self._connection.close()
+
+    def __getattr__(self, name):
+        return getattr(self._connection, name)
+
+
+def closing_worker_pool_type(base_store):
+    """Preserve the pinned WorkerPoolStore logic, but close every read context."""
+    class ScopedStore(base_store):
+        def _db(self):
+            return _ClosingSQLiteHandle(super()._db())
+    return ScopedStore
+
+
 def verified_final_checkouts(
     worker: Path, builder: Path, independent: Path, *,
     source_raw_sha256: str, produced_sha: str,
@@ -325,7 +356,7 @@ def execute() -> dict[str, Any]:
         # This is a REAL isolated WorkerPoolStore and fenced lease. It is NOT
         # the always-on shared DEV authority, hence cannot prove cross-job lease
         # completion. The task is intentionally left running/staged.
-        pool = WorkerPoolStore(sandbox / "worker.db",
+        pool = closing_worker_pool_type(WorkerPoolStore)(sandbox / "worker.db",
                                expected_rules_sha=RULES_SHA,
                                default_lease_seconds=300)
         pool.enable_fenced_cutover(
