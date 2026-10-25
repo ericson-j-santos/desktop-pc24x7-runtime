@@ -532,7 +532,11 @@ def main() -> int:
         )
     except (RepairBlocked, runner.BootstrapError, watchdog.WatchdogError,
             OSError, RuntimeError, ValueError, subprocess.SubprocessError) as exc:
-        reason = str(exc) if isinstance(exc, RepairBlocked) else type(exc).__name__
+        reason = (
+            str(exc)
+            if isinstance(exc, (RepairBlocked, RuntimeError))
+            else type(exc).__name__
+        )
         print(json.dumps({"result": "BLOCKED", "reason": reason[:160]}, sort_keys=True))
         return 3
     print(json.dumps(result, sort_keys=True))
