@@ -156,21 +156,25 @@ def execute() -> dict[str, Any]:
         correlation_id="qwen7b-issue-8-" + WORKER_SHA[:12],
         branch="agent/qwen7b-issue-8-" + WORKER_SHA[:12],
     )
-    before = (worker / PATH).read_bytes()
-    task = trusted_task(binding, before)
-    baseline = validate(before.decode("utf-8"), task)
-    require(baseline["total"] == 42 and baseline["passed"] < 42,
-            "no_real_baseline_failure")
     with tempfile.TemporaryDirectory(prefix="issue8-qwen-", dir=target) as location:
         sandbox = Path(location)
         builder = sandbox / "builder"
         independent = sandbox / "validator"
         state = sandbox / "repair-state"
-        git(sandbox, "clone", "--no-hardlinks", str(worker), str(builder))
+        # Force canonical Git LF materialization on Windows. Hashes in
+        # cross-host CAS receipts must match the blob bytes on hosted Linux.
+        git(sandbox, "clone", "-c", "core.autocrlf=false",
+            "--no-hardlinks", str(worker), str(builder))
         git(builder, "remote", "remove", "origin")
         git(builder, "switch", "-c", "worker/issue8-qwen")
-        require(git(builder, "rev-parse", "HEAD") == WORKER_SHA,
+        require(git(builder, "rev-parse", "HEAD") == WORKER_SHA
+                and git(builder, "rev-parse", "HEAD:" + PATH) == SOURCE_BLOB,
                 "builder_sha_drift")
+        before = (builder / PATH).read_bytes()
+        task = trusted_task(binding, before)
+        baseline = validate(before.decode("utf-8"), task)
+        require(baseline["total"] == 42 and baseline["passed"] < 42,
+                "no_real_baseline_failure")
         regression_preflight = preflight_bridge_regressions(builder, sandbox)
         require(regression_preflight.get("collected_count", 0) >= 52,
                 "regression_preflight_insufficient")
@@ -234,7 +238,8 @@ def execute() -> dict[str, Any]:
                 and replay.get("model_calls") == 0
                 and replay.get("produced_sha") == result["produced_sha"],
                 "no_inference_replay_not_proved")
-        git(sandbox, "clone", "--no-hardlinks", str(builder), str(independent))
+        git(sandbox, "clone", "-c", "core.autocrlf=false",
+            "--no-hardlinks", str(builder), str(independent))
         git(independent, "remote", "remove", "origin")
         git(independent, "checkout", "--detach", result["produced_sha"])
         after = (independent / PATH).read_bytes()
