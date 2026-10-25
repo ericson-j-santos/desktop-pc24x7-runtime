@@ -341,6 +341,25 @@ def test_cycle_recovers_rdc_and_runner_and_writes_sanitized_state(monkeypatch, t
     assert persisted["ok"] is True
 
 
+def test_lenovo_cycle_never_runs_dell_rdc(monkeypatch, tmp_path: Path) -> None:
+    runner_home = make_runner_home(tmp_path)
+    runtime = tmp_path / "runtime"
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: "DESKTOP-RP23OGS")
+    monkeypatch.setattr(m, "validate_runner_home", lambda path: runner_home)
+    monkeypatch.setattr(m, "recover_rdc", lambda **kwargs: pytest.fail("Dell RDC invoked on Lenovo"))
+    monkeypatch.setattr(m, "start_runner", lambda *args, **kwargs: {"status": "process_running"})
+    metadata = {
+        "runtime_root": str(runtime), "release_root": str(tmp_path / "release"),
+        "runner_home": str(runner_home), "python_executable": "python",
+        "source_sha": "a" * 40,
+    }
+    result = m.cycle(metadata)
+    assert result["ok"] is True
+    assert result["rdc_required"] is False
+    assert result["rdc"]["status"] == "not_applicable"
+    assert result["github_pickup_required"] is True
+
+
 def test_install_requires_exact_confirmation(tmp_path: Path) -> None:
     with pytest.raises(m.WatchdogError, match="confirmação inválida"):
         m.install(

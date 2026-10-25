@@ -530,7 +530,10 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         runner = _component_failure("github_runner", exc)
 
-    if recovery_script.is_file():
+    rdc_required = authorized_desktop_profile(host).role == "desktop-primary"
+    if not rdc_required:
+        rdc = {"status": "not_applicable", "reason": "legacy_rdc_primary_only"}
+    elif recovery_script.is_file():
         try:
             rdc = recover_rdc(
                 python_executable=python_executable,
@@ -548,7 +551,7 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
         }
 
     runner_ok = runner.get("status") in {"recovered", "process_running"}
-    rdc_ok = rdc.get("status") in {"healthy", "recovered"}
+    rdc_ok = not rdc_required or rdc.get("status") in {"healthy", "recovered"}
     payload = {
         "schema_version": "2",
         "service": SERVICE_NAME,
@@ -559,6 +562,7 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
         "github_runner": runner,
         "runner_recovery_ok": runner_ok,
         "rdc_recovery_ok": rdc_ok,
+        "rdc_required": rdc_required,
         "ok": runner_ok and rdc_ok,
         "partial": runner_ok != rdc_ok,
         "github_pickup_required": runner_ok,
