@@ -359,6 +359,7 @@ def test_load_installed_metadata_binds_release_and_metadata(
 ) -> None:
     runtime = tmp_path / "runtime"
     monkeypatch.setattr(m, "default_runtime_root", lambda: runtime)
+    monkeypatch.setattr(m.socket, "gethostname", lambda: m.EXPECTED_HOST)
     release = runtime / "releases" / ("a" * 40)
     scripts = release / "scripts"
     scripts.mkdir(parents=True)
