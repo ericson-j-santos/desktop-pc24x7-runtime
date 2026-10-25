@@ -277,7 +277,7 @@ def assert_workflow_is_governed(text):
     assert "draft == true" in text
     assert "github.event.changes.body.from != null" in text
     assert "!contains(github.event.changes.body.from" in text
-    assert "OWNER_RAG_DELL_READONLY_20261025_ONCE" in text
+    assert text.count("OWNER_RAG_DELL_READONLY_20261025_ONCE") >= 3
     assert "RAG_RUNTIME_CI_NOT_PROVED" in text
     assert "RAG_UPSTREAM_MODEL_E2E_NOT_EXECUTED" in text
     assert "cb42568c4b70faa0e3e05bb49d5a6e41b884281f" in text
