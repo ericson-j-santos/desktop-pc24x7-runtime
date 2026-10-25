@@ -333,3 +333,78 @@ def test_reason_code_remains_fail_closed(monkeypatch, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["reason_code"] == "source_index_changed"
     assert report["cas_persisted"] is False
+
+
+def test_governed_sandbox_recovers_one_transient_windows_cleanup_lock(
+        tmp_path, monkeypatch):
+    import shutil
+
+    class Transient:
+        def __init__(self):
+            self.name = str(tmp_path / "issue8-qwen-controlled")
+            Path(self.name).mkdir()
+            self.calls = 0
+
+        def cleanup(self):
+            self.calls += 1
+            if self.calls == 1:
+                raise PermissionError(13, "Windows file lock")
+            shutil.rmtree(self.name)
+
+    item = Transient()
+    sleeps = []
+    monkeypatch.setattr(stage.tempfile, "TemporaryDirectory", lambda **_: item)
+    monkeypatch.setattr(stage.time, "sleep", lambda value: sleeps.append(value))
+    with stage.governed_sandbox(tmp_path) as directory:
+        (directory / "created.txt").write_text("test", encoding="ascii")
+    assert item.calls == 2
+    assert sleeps == [0.5]
+    assert not Path(item.name).exists()
+
+
+def test_governed_sandbox_persistent_cleanup_lock_fails_closed(
+        tmp_path, monkeypatch):
+    class Persistent:
+        def __init__(self):
+            self.name = str(tmp_path / "issue8-qwen-persistent")
+            Path(self.name).mkdir()
+            self.calls = 0
+
+        def cleanup(self):
+            self.calls += 1
+            raise PermissionError(13, "still locked")
+
+    item = Persistent()
+    monkeypatch.setattr(stage.tempfile, "TemporaryDirectory", lambda **_: item)
+    monkeypatch.setattr(stage.time, "sleep", lambda *_: None)
+    with pytest.raises(stage.IssueStageBlocked, match="sandbox_cleanup_permission_denied"):
+        with stage.governed_sandbox(tmp_path):
+            pass
+    assert item.calls == 3
+    assert Path(item.name).exists()
+    assert stage.CURRENT_PHASE == "sandbox_teardown"
+
+
+def test_governed_sandbox_cannot_leave_unverified_directory_on_success(
+        tmp_path, monkeypatch):
+    class Incomplete:
+        def __init__(self):
+            self.name = str(tmp_path / "issue8-qwen-incomplete")
+            Path(self.name).mkdir()
+
+        def cleanup(self):
+            return None
+
+    item = Incomplete()
+    monkeypatch.setattr(stage.tempfile, "TemporaryDirectory", lambda **_: item)
+    with pytest.raises(stage.IssueStageBlocked, match="sandbox_cleanup_incomplete"):
+        with stage.governed_sandbox(tmp_path):
+            pass
+    assert item.name == str(tmp_path / "issue8-qwen-incomplete")
+
+
+def test_governed_sandbox_rejects_untrusted_parent(tmp_path):
+    missing = tmp_path / "nonexistent"
+    with pytest.raises(stage.IssueStageBlocked, match="sandbox_parent_unverified"):
+        with stage.governed_sandbox(missing):
+            pass

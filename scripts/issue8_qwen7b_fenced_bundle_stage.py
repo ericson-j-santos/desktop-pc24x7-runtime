@@ -11,6 +11,8 @@ BEFORE invoking this script through Command Gateway.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import base64
 import hashlib
 import json
@@ -19,6 +21,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 import traceback
 from typing import Any, Callable
 
@@ -172,6 +175,44 @@ def sanitized_failure(exc: Exception) -> dict[str, Any]:
     return result
 
 
+
+@contextmanager
+def governed_sandbox(target: Path):
+    """Cleanup only this stage's temporary directory, with bounded lock recovery.
+
+    Python TemporaryDirectory handles readonly Git files on Windows, but
+    antivirus/filesystem locks may transiently deny unlink. Retry cleanup of
+    the SAME generated directory, never ignore failure or touch other trees.
+    """
+    require(target.is_dir() and not target.is_symlink(),
+            "sandbox_parent_unverified")
+    holder = tempfile.TemporaryDirectory(prefix="issue8-qwen-", dir=target)
+    sandbox = Path(holder.name).resolve()
+    try:
+        require(sandbox.parent == target
+                and sandbox.name.startswith("issue8-qwen-")
+                and sandbox.is_dir() and not sandbox.is_symlink(),
+                "sandbox_boundary_invalid")
+        yield sandbox
+    finally:
+        for attempt in range(3):
+            try:
+                holder.cleanup()
+            except PermissionError:
+                mark_phase("sandbox_teardown")
+                if attempt == 2:
+                    raise IssueStageBlocked("sandbox_cleanup_permission_denied") from None
+                time.sleep((attempt + 1) * 0.5)
+            except OSError:
+                mark_phase("sandbox_teardown")
+                raise
+            else:
+                break
+        if sandbox.exists():
+            mark_phase("sandbox_teardown")
+            raise IssueStageBlocked("sandbox_cleanup_incomplete")
+
+
 def verified_final_checkouts(
     worker: Path, builder: Path, independent: Path, *,
     source_raw_sha256: str, produced_sha: str,
@@ -257,8 +298,7 @@ def execute() -> dict[str, Any]:
         correlation_id="qwen7b-issue-8-" + WORKER_SHA[:12],
         branch="agent/qwen7b-issue-8-" + WORKER_SHA[:12],
     )
-    with tempfile.TemporaryDirectory(prefix="issue8-qwen-", dir=target) as location:
-        sandbox = Path(location)
+    with governed_sandbox(target) as sandbox:
         builder = sandbox / "builder"
         independent = sandbox / "validator"
         state = sandbox / "repair-state"
