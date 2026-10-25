@@ -32,6 +32,33 @@ jobs:
           persist-credentials: false
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
 
+      # Resolve once and pin by full SHA; never execute stale local rules from C:\dev.
+      - name: Resolve immutable canonical rules SHA
+        id: physical_rules
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              branch: 'main',
+            });
+            const sha = String(branch.data.commit.sha || '').toLowerCase();
+            if (!/^[0-9a-f]{40}$/.test(sha)) {
+              core.setFailed('CANARY_RULES_SHA_UNVERIFIED');
+              return;
+            }
+            core.setOutput('sha', sha);
+
+      - name: Checkout immutable canonical operational rules
+        uses: actions/checkout@v4
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ steps.physical_rules.outputs.sha }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
       - name: Materialize governed session
         id: session
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
@@ -43,8 +70,16 @@ jobs:
           )
           $python = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $python) { throw "PYTHON_RUNTIME_NOT_FOUND: $($pythonCandidates -join '; ')" }
-          $result = & $python C:\dev\chatgpt-operational-rules\scripts\session_launcher.py `
-            --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
+          $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $rulesSha = (& git -C $rulesRoot rev-parse HEAD | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $rulesSha -ne '${{ steps.physical_rules.outputs.sha }}') {
+            throw 'CANARY_RULES_SHA_MISMATCH'
+          }
+          $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
+          $launcher = Join-Path $rulesRoot 'scripts\session_launcher.py'
+          $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
+          $result = & $python $launcher `
+            --policy $policy `
             --repo $env:GITHUB_WORKSPACE `
             --session-prefix runtime-canary `
             --correlation-id "runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}" `
@@ -71,8 +106,16 @@ jobs:
           )
           $python = $pythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
           if (-not $python) { throw "PYTHON_RUNTIME_NOT_FOUND: $($pythonCandidates -join '; ')" }
-          & $python C:\dev\chatgpt-operational-rules\scripts\command_gateway.py `
-            --policy C:\dev\chatgpt-operational-rules\config\command-gateway.policy.json `
+          $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $rulesSha = (& git -C $rulesRoot rev-parse HEAD | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $rulesSha -ne '${{ steps.physical_rules.outputs.sha }}') {
+            throw 'CANARY_RULES_SHA_MISMATCH'
+          }
+          $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
+          $launcher = Join-Path $rulesRoot 'scripts\session_launcher.py'
+          $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
+          & $python $gateway `
+            --policy $policy `
             --correlation-id "runtime-canary-${{ github.run_id }}-${{ github.run_attempt }}" `
             run `
             --cwd '${{ steps.session.outputs.target_path }}' `
