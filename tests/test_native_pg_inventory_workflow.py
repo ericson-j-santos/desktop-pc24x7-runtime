@@ -267,7 +267,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         upload = raw.split("      - name: Upload sanitized evidence", 1)[1].split("  queue_watchdog:", 1)[0]
         self.assertIn("if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback')", upload)
 
-    def test_native_routing_matches_existing_dedicated_labels_only(self):
+    def test_native_inventory_routing_requires_exact_desktop_identity_label(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
         job = raw.split("\n  e2e:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
         line = next(line.strip() for line in job.splitlines()
@@ -278,7 +278,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         self.assertTrue(output["ok"])
         self.assertEqual(output["outputs"]["labels"],
                          ["self-hosted", "Windows", "X64", "pc24x7",
-                          "desktop-runtime", "runtime-dev"])
+                          "desktop-runtime", "runtime-dev", "desktop-pdqk954"])
 
     def test_non_native_routing_preserves_all_legacy_labels(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
