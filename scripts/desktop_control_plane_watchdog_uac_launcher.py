@@ -19,10 +19,12 @@ SW_SHOWNORMAL = 1
 
 
 def validate_launcher(*, host: str, platform: str, confirm: str) -> None:
-    if host.casefold() != watchdog.EXPECTED_HOST.casefold():
-        raise RuntimeError(f"launcher permitido somente no host {watchdog.EXPECTED_HOST}")
     if platform != "nt":
         raise RuntimeError("launcher UAC exige Windows")
+    try:
+        watchdog.authorized_desktop_profile(host)
+    except watchdog.WatchdogError as exc:
+        raise RuntimeError(str(exc)) from None
     if confirm != LAUNCH_CONFIRM:
         raise RuntimeError("confirmação UAC inválida")
 
