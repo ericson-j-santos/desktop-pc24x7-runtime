@@ -224,6 +224,12 @@ def inspect_partial_installation(
         import win32com.client  # type: ignore  # noqa: F401
     except ImportError as exc:
         raise RepairBlocked("pywin32_required") from exc
+    try:
+        watchdog.task_security_descriptor(
+            watchdog.current_user_sid(watchdog.current_user_id())
+        )
+    except watchdog.WatchdogError as exc:
+        raise RepairBlocked(str(exc)) from None
     for name in TARGET_RELEASE_FILES:
         if not (source_root / "scripts" / name).is_file():
             raise RepairBlocked(f"source_bundle_incomplete:{name}")
@@ -244,6 +250,7 @@ def inspect_partial_installation(
         "registry": registry,
         "python_executable": python_executable,
         "orphan_task_file": orphan_task_file,
+        "task_acl_preflight": True,
     }
 
 
@@ -520,6 +527,7 @@ def preflight_result(context: dict[str, Any], target_sha: str) -> dict[str, Any]
         "runner_busy": registry.get("busy"),
         "runner_pids": process.get("matching_pids", []),
         "orphan_task_file": context.get("orphan_task_file"),
+        "task_acl_preflight": bool(context.get("task_acl_preflight")),
         "mutation_performed": False,
         "github_pickup_proven": False,
     }

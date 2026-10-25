@@ -85,6 +85,14 @@ elevado executa um readback independente via Task Scheduler; o recibo UAC só
 pode declarar `ok=true` quando esse readback comprovar `AtStartup + S4U`. O
 chamador normal também precisa enumerar a mesma tarefa antes da finalização.
 
+O registro também aplica uma DACL explícita à tarefa: `SYSTEM` e o grupo local
+de Administradores mantêm controle total, enquanto somente o SID exato do
+principal S4U recebe leitura e execução. A atualização usa o parâmetro SDDL de
+`RegisterTaskDefinition` e reafirma o mesmo descritor no objeto registrado. Isso
+evita recibo elevado positivo acompanhado de invisibilidade para o chamador
+normal, sem conceder acesso a `Authenticated Users` ou alterar a ACL da pasta
+compartilhada `\Automation`.
+
 Executar primeiro com `--preflight-only` e com os quatro valores observados e
 fixados (`--source-sha`, `--expected-installed-sha`,
 `--expected-watchdog-sha256`, `--expected-uac-sha256`). A aplicação usa os

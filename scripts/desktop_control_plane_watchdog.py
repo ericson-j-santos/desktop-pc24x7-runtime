@@ -907,6 +907,29 @@ def current_user_id() -> str:
     return f"{socket.gethostname()}\\{getpass.getuser()}"
 
 
+def current_user_sid(user_id: str) -> str:
+    try:
+        import win32security  # type: ignore
+    except ImportError as exc:
+        raise WatchdogError("pywin32 indisponível para resolver SID da tarefa") from exc
+    try:
+        sid, _, _ = win32security.LookupAccountName(None, user_id)
+        value = str(win32security.ConvertSidToStringSid(sid))
+    except Exception as exc:
+        raise WatchdogError("task_principal_sid_unavailable") from exc
+    parts = value.split("-")
+    if len(parts) < 4 or parts[0] != "S" or any(not part.isdigit() for part in parts[1:]):
+        raise WatchdogError("task_principal_sid_invalid")
+    return value
+
+
+def task_security_descriptor(user_sid: str) -> str:
+    parts = user_sid.split("-")
+    if len(parts) < 4 or parts[0] != "S" or any(not part.isdigit() for part in parts[1:]):
+        raise WatchdogError("task_principal_sid_invalid")
+    return f"D:P(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGX;;;{user_sid})"
+
+
 def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
     require_windows_desktop()
     try:
@@ -952,16 +975,19 @@ def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, 
     principal.UserId = current_user_id()
     principal.LogonType = TASK_LOGON_S4U
     principal.RunLevel = TASK_RUNLEVEL_LUA
+    task_sddl = task_security_descriptor(current_user_sid(principal.UserId))
 
     try:
-        folder.RegisterTaskDefinition(
+        registered_task = folder.RegisterTaskDefinition(
             TASK_LEAF,
             definition,
             TASK_CREATE_OR_UPDATE,
             principal.UserId,
             None,
             TASK_LOGON_S4U,
+            task_sddl,
         )
+        registered_task.SetSecurityDescriptor(task_sddl, 0)
     except Exception as exc:
         detail = repr(exc).casefold()
         if (
@@ -981,6 +1007,7 @@ def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, 
         "password_used": False,
         "run_level": "limited",
         "restart_policy_supported": restart_policy_supported,
+        "task_acl_applied": True,
     }
 
 

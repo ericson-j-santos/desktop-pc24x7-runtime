@@ -80,6 +80,11 @@ def patch_partial_probes(monkeypatch, runtime: Path) -> None:
         "inspect_orphaned_task_file",
         lambda **kwargs: None,
     )
+    monkeypatch.setattr(
+        m.watchdog,
+        "current_user_sid",
+        lambda user_id: "S-1-5-21-100-200-300-1001",
+    )
     monkeypatch.setattr(m.watchdog, "validate_runner_home", lambda path: path)
     monkeypatch.setattr(
         m.watchdog,
@@ -129,6 +134,7 @@ def test_preflight_accepts_only_pinned_partial_state(monkeypatch, tmp_path: Path
     assert result["runner_pids"] == [4321]
     assert result["mutation_performed"] is False
     assert result["github_pickup_proven"] is False
+    assert result["task_acl_preflight"] is True
 
 
 def test_preflight_rejects_any_existing_task(monkeypatch, tmp_path: Path) -> None:
@@ -297,3 +303,5 @@ def test_s4u_registration_passes_no_password_variant() -> None:
     text = (SCRIPTS / "desktop_control_plane_watchdog.py").read_text(encoding="utf-8")
     registration = text.split("folder.RegisterTaskDefinition(", 1)[1].split(")", 1)[0]
     assert "principal.UserId,\n            None,\n            TASK_LOGON_S4U" in registration
+    assert "task_sddl" in registration
+    assert "registered_task.SetSecurityDescriptor(task_sddl, 0)" in text

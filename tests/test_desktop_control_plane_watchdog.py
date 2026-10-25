@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -701,3 +702,73 @@ def test_cycle_recovers_runner_even_when_rdc_fails(
     assert payload["partial"] is True
     assert payload["github_pickup_required"] is True
     assert payload["ok"] is False
+
+
+def test_task_security_descriptor_is_exact_and_least_privilege() -> None:
+    sid = "S-1-5-21-100-200-300-1001"
+    assert m.task_security_descriptor(sid) == (
+        "D:P(A;;GA;;;SY)(A;;GA;;;BA)"
+        "(A;;GRGX;;;S-1-5-21-100-200-300-1001)"
+    )
+    with pytest.raises(m.WatchdogError, match="task_principal_sid_invalid"):
+        m.task_security_descriptor("DESKTOP\\User")
+
+
+def test_register_boot_task_applies_explicit_task_sddl(
+    monkeypatch, tmp_path: Path
+) -> None:
+    calls = {}
+
+    class RegisteredTask:
+        def SetSecurityDescriptor(self, sddl, flags):
+            calls["set_security"] = (sddl, flags)
+
+    class Folder:
+        def RegisterTaskDefinition(self, *args):
+            calls["register"] = args
+            return RegisteredTask()
+
+    folder = Folder()
+    definition = SimpleNamespace(
+        RegistrationInfo=SimpleNamespace(),
+        Settings=SimpleNamespace(),
+        Triggers=SimpleNamespace(Create=lambda kind: SimpleNamespace()),
+        Actions=SimpleNamespace(Create=lambda kind: SimpleNamespace()),
+        Principal=SimpleNamespace(),
+    )
+
+    class Service:
+        def Connect(self):
+            return None
+
+        def GetFolder(self, path):
+            return folder
+
+        def NewTask(self, flags):
+            return definition
+
+    fake_client = SimpleNamespace(Dispatch=lambda name: Service())
+    fake_win32com = SimpleNamespace(client=fake_client)
+    monkeypatch.setitem(sys.modules, "win32com", fake_win32com)
+    monkeypatch.setitem(sys.modules, "win32com.client", fake_client)
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m, "current_user_id", lambda: "DESKTOP-RP23OGS\\User")
+    monkeypatch.setattr(
+        m,
+        "current_user_sid",
+        lambda user_id: "S-1-5-21-100-200-300-1001",
+    )
+
+    result = m.register_boot_task(
+        python_executable=tmp_path / "python.exe",
+        launcher=tmp_path / "run.py",
+    )
+
+    registration = calls["register"]
+    assert registration[4] is None
+    assert registration[5] == m.TASK_LOGON_S4U
+    assert registration[6] == m.task_security_descriptor(
+        "S-1-5-21-100-200-300-1001"
+    )
+    assert calls["set_security"] == (registration[6], 0)
+    assert result["task_acl_applied"] is True
