@@ -130,4 +130,6 @@ def test_quarantine_is_durable_but_cannot_promote_failed_physical_job():
     assert "contents: write" not in text.split("\n  quarantine-readback:\n")[1]
     assert "if: needs.publish-cas.result == 'success'" in text
     assert "if: needs.physical.result == 'success'" in text
-    assert "ready_for_pr" not in text.split("\n  quarantine-cas:\n")[1].split("\n  quarantine-readback:\n")[0].lower()
+    writer = text.split("\n  quarantine-cas:\n")[1].split("\n  quarantine-readback:\n")[0].lower()
+    assert "ready_for_pr=false" in writer
+    assert "ready_for_pr=true" not in writer
