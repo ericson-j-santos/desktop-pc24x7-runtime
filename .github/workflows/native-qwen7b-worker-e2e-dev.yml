@@ -25,9 +25,9 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.head.ref == 'test/native-qwen7b-git-eol-one-shot-20261024' &&
        github.event.pull_request.draft == true &&
-       contains(github.event.pull_request.body, 'NATIVE_QWEN_VENV_20261024_7B_ONCE') &&
+       contains(github.event.pull_request.body, 'NATIVE_QWEN_INTEGRITY_20261024_7B_ONCE') &&
        github.event.changes.body.from != null &&
-       !contains(github.event.changes.body.from, 'NATIVE_QWEN_VENV_20261024_7B_ONCE'))
+       !contains(github.event.changes.body.from, 'NATIVE_QWEN_INTEGRITY_20261024_7B_ONCE'))
     name: Native E2E immutable check admission
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -36,7 +36,7 @@ jobs:
       checks: read
       pull-requests: read
     env:
-      WORKER_POOL_SHA: 09226a4d16fac7ca0d126f42cc7d20c4cecc7c4a
+      WORKER_POOL_SHA: 4316e59831898c9081a10c95bf4809db6b20714f
     steps:
       - name: Assert exact reviewed SHAs and real CI jobs
         uses: actions/github-script@v7
@@ -98,7 +98,7 @@ jobs:
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 11
     env:
-      WORKER_POOL_SHA: 09226a4d16fac7ca0d126f42cc7d20c4cecc7c4a
+      WORKER_POOL_SHA: 4316e59831898c9081a10c95bf4809db6b20714f
       RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661
       NATIVE_OLLAMA_DEV: "1"
       NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e
