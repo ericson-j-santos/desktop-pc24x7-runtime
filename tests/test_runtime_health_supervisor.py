@@ -156,8 +156,13 @@ def test_canary_pins_immutable_rules_from_canonical_main() -> None:
     assert 'ref: ${{ steps.physical_rules.outputs.sha }}' in canary
     assert 'persist-credentials: false' in canary
     assert canary.index('Checkout immutable canonical operational rules') < canary.index('Materialize governed session')
-    assert canary.count('CANARY_RULES_SHA_MISMATCH') == 2
-    assert canary.count("$rulesSha -ne '${{ steps.physical_rules.outputs.sha }}'") == 2
+    assert canary.count('function Assert-PinnedRulesSha') == 2
+    assert canary.count('CANARY_RULES_SHA_MISMATCH') == 4
+    assert canary.count('CANARY_RULES_NEGATIVE_REJECTED') == 2
+    assert canary.count('CANARY_RULES_NEGATIVE_ACCEPTED') == 2
+    assert canary.count("$expectedRulesSha = '${{ steps.physical_rules.outputs.sha }}'") == 2
+    assert canary.count('Assert-PinnedRulesSha -Observed $rulesSha -Expected $invalidRulesSha') == 2
+    assert canary.count('Assert-PinnedRulesSha -Observed $rulesSha -Expected $expectedRulesSha') == 2
     assert r'C:\dev\chatgpt-operational-rules' not in canary
     assert "Join-Path $rulesRoot 'scripts\\session_launcher.py'" in canary
     assert "Join-Path $rulesRoot 'scripts\\command_gateway.py'" in canary
