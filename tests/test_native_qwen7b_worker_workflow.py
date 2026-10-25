@@ -26,7 +26,7 @@ def test_native_worker_runs_only_on_approved_dispatch_or_exact_pr_transition():
     assert t.count("github.ref == 'refs/heads/main'") == 1
     assert "github.event.changes.body.from != null" in t
     assert "!contains(github.event.changes.body.from" in t
-    assert "NATIVE_QWEN_PREFLIGHT_20261024_7B_ONCE" in t
+    assert "NATIVE_QWEN_VENV_20261024_7B_ONCE" in t
 
 
 def test_exact_source_rules_host_and_governed_gateway():
@@ -50,7 +50,7 @@ def test_exact_source_rules_host_and_governed_gateway():
 
 def test_native_runner_uses_preinstalled_windows_powershell_not_missing_pwsh():
     source = workflow().split("\n  physical_runner_watchdog:", 1)[0]
-    assert source.count("shell: powershell") == 3
+    assert source.count("shell: powershell") == 5
     assert "shell: pwsh" not in source
     assert 'if ($env:COMPUTERNAME -ne "DESKTOP-PDQK954")' in source
 
@@ -83,3 +83,43 @@ def test_admission_checks_exact_shas_and_executed_ci_before_physical_job():
     assert "WORKER_REQUIRED_CHECK_NOT_EXECUTED_" in t
     assert "DESKTOP_REQUIRED_CHECK_NOT_EXECUTED_" in t
     assert "x.status === 'completed' && x.conclusion === 'success'" in t
+
+
+
+def assert_governed_native_venv(t: str) -> None:
+    """Pinned dependencies must be isolated and all writes governed."""
+    assert "Create isolated native Python venv through Gateway" in t
+    assert "Install pinned Worker Pool test dependencies in venv via Gateway" in t
+    assert 'Join-Path $env:TARGET_PATH ".venv"' in t
+    assert 'Join-Path $env:TARGET_PATH ".venv\\Scripts\\python.exe"' in t
+    assert '"python", "-m", "venv", $venv' in t
+    assert '$nativePython, "-m", "pip", "install"' in t
+    assert '"--isolated", "--disable-pip-version-check", "--no-input"' in t
+    assert '"--no-cache-dir", "-r", $requirements' in t
+    assert '$nativePython, "-m", "pip", "check"' in t
+    assert '$nativePython, $worker,' in t
+    assert t.count('"--risk", "2"') == 3
+    assert t.count('"--risk", "1"') == 1
+    assert "--break-system-packages" not in t
+    assert "--system-site-packages" not in t
+    assert "pip install --user" not in t
+    assert "docker run" not in t.lower()
+    assert "docker exec" not in t.lower()
+
+
+def test_governed_native_venv_and_pinned_dependency_install():
+    assert_governed_native_venv(workflow())
+
+
+def test_native_venv_rejects_unsafe_regressions():
+    import pytest
+    s = workflow()
+    for before, after in [
+        ('"--isolated", "--disable-pip-version-check", "--no-input"', '"--disable-pip-version-check", "--no-input"'),
+        ('"python", "-m", "venv", $venv', '"python", "-m", "pip", "install"'),
+        ('$nativePython, $worker,', '"python", $worker,'),
+        ('"--no-cache-dir", "-r", $requirements', '"--no-cache-dir", "pytest"'),
+    ]:
+        assert before in s
+        with pytest.raises(AssertionError):
+            assert_governed_native_venv(s.replace(before, after, 1))

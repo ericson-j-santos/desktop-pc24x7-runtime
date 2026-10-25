@@ -25,9 +25,9 @@ jobs:
        github.event.pull_request.head.repo.full_name == github.repository &&
        github.event.pull_request.head.ref == 'test/native-qwen7b-git-eol-one-shot-20261024' &&
        github.event.pull_request.draft == true &&
-       contains(github.event.pull_request.body, 'NATIVE_QWEN_PREFLIGHT_20261024_7B_ONCE') &&
+       contains(github.event.pull_request.body, 'NATIVE_QWEN_VENV_20261024_7B_ONCE') &&
        github.event.changes.body.from != null &&
-       !contains(github.event.changes.body.from, 'NATIVE_QWEN_PREFLIGHT_20261024_7B_ONCE'))
+       !contains(github.event.changes.body.from, 'NATIVE_QWEN_VENV_20261024_7B_ONCE'))
     name: Native E2E immutable check admission
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -170,6 +170,76 @@ jobs:
           "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
           "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
 
+
+      - name: Create isolated native Python venv through Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $venv = Join-Path $env:TARGET_PATH ".venv"
+          $argv = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "2",
+            "--timeout", "150",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", "-m", "venv", $venv
+          )
+          & python $gateway @argv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Install pinned Worker Pool test dependencies in venv via Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $nativePython = Join-Path $env:TARGET_PATH ".venv\Scripts\python.exe"
+          $requirements = Join-Path $env:GITHUB_WORKSPACE "external\engineering-worker-pool\requirements.txt"
+          $argv = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "2",
+            "--timeout", "240",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            $nativePython, "-m", "pip", "install",
+            "--isolated", "--disable-pip-version-check", "--no-input",
+            "--no-cache-dir", "-r", $requirements
+          )
+          & python $gateway @argv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $verifyArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "1",
+            "--timeout", "60",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            $nativePython, "-m", "pip", "check"
+          )
+          & python $gateway @verifyArgs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Governed native Ollama real-source repair and independent readback
         shell: powershell
         env:
@@ -181,6 +251,7 @@ jobs:
           $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
           $worker = Join-Path $env:GITHUB_WORKSPACE "external\engineering-worker-pool\scripts\native_structured_worker_e2e.py"
+          $nativePython = Join-Path $env:TARGET_PATH ".venv\Scripts\python.exe"
           $argv = @(
             "--policy", $policy,
             "--correlation-id", $env:CORRELATION_ID,
@@ -191,7 +262,7 @@ jobs:
             "--timeout", "490",
             "--expected-head", $env:ANCHOR_SHA,
             "--",
-            "python", $worker,
+            $nativePython, $worker,
             "--expected-source-sha", $env:WORKER_POOL_SHA,
             "--correlation-id", $env:CORRELATION_ID
           )
