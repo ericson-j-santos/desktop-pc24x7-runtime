@@ -763,7 +763,7 @@ def register_boot_task(*, python_executable: Path, launcher: Path) -> dict[str, 
             definition,
             TASK_CREATE_OR_UPDATE,
             principal.UserId,
-            "",
+            None,
             TASK_LOGON_S4U,
         )
     except Exception as exc:

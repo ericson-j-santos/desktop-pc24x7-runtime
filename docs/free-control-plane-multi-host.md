@@ -51,3 +51,27 @@ Para recuperação de instalação parcial, conservar diretórios e metadata e
 inspecionar o estado antes de qualquer nova tentativa. A presença de tarefa ou
 metadata existente faz o ativador falhar fechado; upgrade/rollback são uma
 capability separada e não usam `--replace` implícito.
+
+## Repair de instalação parcial
+
+`scripts/repair_desktop_free_control_plane.py` é a capability separada para o
+caso estrito em que o runner dedicado permanece online, a metadata do watchdog
+existe e a tarefa `AtStartup + S4U` ainda não existe. Ela não registra, reinicia
+ou substitui o runner. O repair exige SHA limpo da fonte, SHA anterior e digests
+SHA-256 exatos dos scripts instalados, recusa tarefa preexistente e confirma que
+o mesmo processo e o mesmo registro GitHub permanecem ativos antes/depois.
+
+Antes da mutação, preserva metadata, launcher e recibos sanitizados em backup
+idempotente; a release anterior permanece intocada. A nova release é montada em
+diretório imutável próprio e recebe manifesto de arquivos. Se a tarefa não for
+comprovada, metadata e launcher são restaurados. UAC continua exigindo aprovação
+local e o sucesso do repair continua `PICKUP_PENDING` até job físico independente
+no mesmo SHA. A capability não instala TODO Gateway, não cria credencial, não
+reinicia serviço existente e não reinicia o computador.
+
+Executar primeiro com `--preflight-only` e com os quatro valores observados e
+fixados (`--source-sha`, `--expected-installed-sha`,
+`--expected-watchdog-sha256`, `--expected-uac-sha256`). A aplicação usa os
+mesmos argumentos sem `--preflight-only` e exige confirmação literal
+`REPAIR-DESKTOP-FREE-CONTROL-PLANE`. O preflight não escreve no host e a
+confirmação não reduz nenhuma das verificações de identidade ou digest.
