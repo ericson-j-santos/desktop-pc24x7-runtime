@@ -346,7 +346,7 @@ jobs:
       EXPECTED_BUNDLE_SHA256: ${{ needs.publish-cas.outputs.bundle_sha256 }}
       EXPECTED_PRODUCED_SHA: ${{ needs.publish-cas.outputs.produced_sha }}
       CWP_WORKER_SOURCE: ${{ github.workspace }}/external/engineering-worker-pool
-      CWP_BUNDLE_FILE: ${{ runner.temp }}/qwen8-verified.bundle
+      CWP_BUNDLE_FILE: ${{ github.workspace }}/qwen8-verified.bundle
     steps:
       - name: Checkout reviewed runtime script without credentials
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
