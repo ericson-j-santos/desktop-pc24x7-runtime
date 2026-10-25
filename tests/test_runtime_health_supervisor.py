@@ -146,3 +146,20 @@ def test_canary_queue_is_isolated_per_pr_without_cancelling_active_runs() -> Non
     assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow
+
+def test_canary_pins_immutable_rules_from_canonical_main() -> None:
+    workflow = (ROOT / '.github' / 'workflows' / 'runtime-canary.yml').read_text(encoding='utf-8')
+    canary = workflow.split('  queue_watchdog:', 1)[0]
+    assert 'id: physical_rules' in canary
+    assert "repo: 'chatgpt-operational-rules'" in canary
+    assert 'core.setFailed(\'CANARY_RULES_SHA_UNVERIFIED\')' in canary
+    assert 'ref: ${{ steps.physical_rules.outputs.sha }}' in canary
+    assert 'persist-credentials: false' in canary
+    assert canary.index('Checkout immutable canonical operational rules') < canary.index('Materialize governed session')
+    assert canary.count('CANARY_RULES_SHA_MISMATCH') == 2
+    assert canary.count("$rulesSha -ne '${{ steps.physical_rules.outputs.sha }}'") == 2
+    assert r'C:\dev\chatgpt-operational-rules' not in canary
+    assert "Join-Path $rulesRoot 'scripts\\session_launcher.py'" in canary
+    assert "Join-Path $rulesRoot 'scripts\\command_gateway.py'" in canary
+    assert "Join-Path $rulesRoot 'config\\command-gateway.policy.json'" in canary
+    assert '--require-runner-version-preflight' in canary
