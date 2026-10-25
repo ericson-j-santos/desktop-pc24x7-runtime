@@ -193,7 +193,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         raw = WORKFLOW.read_text(encoding="utf-8")
         trigger = raw.split("\npermissions:", 1)[0]
         self.assertIn("default: runner-identity", trigger)
-        self.assertIn("options: [runner-identity, native-postgres-inventory, native-postgres-readback]", trigger)
+        self.assertIn("options: [runner-identity, native-postgres-inventory, native-postgres-readback, native-wsl-postgres-qualification]", trigger)
         for forbidden in ("\n  push:", "\n  schedule:", "\n  pull_request:", "\n      command:",
                           "\n      host:", "\n      path:", "\n      url:"):
             self.assertNotIn(forbidden, trigger)
@@ -213,9 +213,9 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
     def test_native_mode_cannot_cancel_other_work(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("format('native-pg-inventory-954-{0}', github.run_id)", raw)
-        self.assertIn("cancel-in-progress: $" + "{{ (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback') }}", raw)
+        self.assertIn("cancel-in-progress: $" + "{{ (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification') }}", raw)
         cancel = raw.split("      - name: Fail closed and cancel stalled canary", 1)[1]
-        self.assertIn("if: steps.watchdog.outcome == 'failure' && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback')", cancel)
+        self.assertIn("if: steps.watchdog.outcome == 'failure' && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification')", cancel)
         self.assertIn("NATIVE_INVENTORY_PICKUP_EXPIRED_NO_COLLECTION_ALLOWED", raw)
 
     def test_native_groups_are_unique_and_legacy_behavior_is_unchanged(self):
@@ -251,7 +251,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         raw = WORKFLOW.read_text(encoding="utf-8")
         self.assertIn("artifacts/native-pg-inventory/evidence.json", raw)
         upload = raw.split("      - name: Upload sanitized evidence", 1)[1].split("  queue_watchdog:", 1)[0]
-        self.assertIn("if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback')", upload)
+        self.assertIn("if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification')", upload)
 
     def test_native_inventory_routing_requires_exact_desktop_identity_label(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
@@ -308,7 +308,7 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         steps = job.split("    steps:\n", 1)[1]
         self.assertTrue(steps.startswith("      - name: " + PICKUP + "\n"))
         guard = steps.split("\n      - name:", 1)[0]
-        self.assertIn("if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback')", guard)
+        self.assertIn("if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback' || inputs.diagnostic == 'native-wsl-postgres-qualification')", guard)
         self.assertNotIn("continue-on-error", guard)
         self.assertIn("process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime'", guard)
         self.assertIn("hostname().toUpperCase() !== 'DESKTOP-PDQK954'", guard)
@@ -346,9 +346,11 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         raw = WORKFLOW.read_text(encoding="utf-8")
         names = ("Prove exact host, repository, runner and version through Command Gateway",
                  "Read fixed native PostgreSQL metadata through Command Gateway",
-                 "Read fixed PostgreSQL listener owners and legacy receipts through Command Gateway")
+                 "Read fixed PostgreSQL listener owners and legacy receipts through Command Gateway",
+                 "Qualify default WSL for native PostgreSQL through Command Gateway")
         for mode, expected in (("runner-identity", 0), ("native-postgres-inventory", 1),
-                               ("native-postgres-readback", 2)):
+                               ("native-postgres-readback", 2),
+                               ("native-wsl-postgres-qualification", 3)):
             enabled = []
             for index, name in enumerate(names):
                 block = raw.split("      - name: " + name + "\n", 1)[1].split("\n      - name:", 1)[0]
@@ -374,7 +376,8 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
             block = raw.split("      - name: " + name + "\n", 1)[1].split("\n      - name:", 1)[0]
             condition = next(line.strip()[4:] for line in block.splitlines()
                              if line.strip().startswith("if: "))
-            for mode in ("native-postgres-inventory", "native-postgres-readback"):
+            for mode in ("native-postgres-inventory", "native-postgres-readback",
+                         "native-wsl-postgres-qualification"):
                 output = execute({**fixture(), "inputs": {"diagnostic": mode}},
                                  source="core.setOutput('enabled', (" + condition + "));")
                 self.assertTrue(output["outputs"]["enabled"])
@@ -386,6 +389,20 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
             self.assertIn(required, block)
         for forbidden in ("inputs.command", "inputs.path", "inputs.host", "native_windows_pg_readback.py --"):
             self.assertNotIn(forbidden, block)
+
+    def test_wsl_qualification_is_fixed_governed_and_non_artifact(self):
+        raw = WORKFLOW.read_text(encoding="utf-8")
+        block = raw.split("      - name: Qualify default WSL for native PostgreSQL", 1)[1]
+        block = block.split("      - name: Upload sanitized evidence", 1)[0]
+        for required in ("native_wsl_pg_qualification.py", "command_gateway.py",
+                         '"--risk", "1"', '"--expected-head"', '"--session-id"',
+                         '"--timeout", "60"', '"python", "-B", $script'):
+            self.assertIn(required, block)
+        for forbidden in ("inputs.command", "inputs.path", "inputs.host", "wsl.exe"):
+            self.assertNotIn(forbidden, block)
+        upload = raw.split("      - name: Upload sanitized evidence", 1)[1]
+        upload = upload.split("  queue_watchdog:", 1)[0]
+        self.assertIn("inputs.diagnostic != 'native-wsl-postgres-qualification'", upload)
 
     def test_readback_concurrency_is_unique_and_cannot_cancel(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
