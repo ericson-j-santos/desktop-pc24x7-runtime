@@ -66,7 +66,7 @@ O run físico [#40378386092](https://github.com/ericson-j-santos/desktop-pc24x7-
 
 O diagnóstico não modifica `research_issue`, seleção, ranking, prompts ou respostas do Qwen. Se o recibo apresentar recusa, identidade e SHA atuais, hash íntegro e processo atestado, registra somente fontes allowlisted, quantidade de fontes, número de chamadas do modelo e número de seleções tentadas. O caso `no_candidate_snippet` significa que nenhuma seleção de citação foi solicitada. `model_declined_candidate` significa que houve ao menos uma seleção sem citação aceita. Esses estados não comprovam quais linhas individuais foram apresentadas; uma investigação de candidatos requer telemetria posterior na fonte do Worker Pool. Nenhum texto de documento, prompt ou resposta bruta é publicado.
 
-A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de aprovação fica indisponível e não se publicam CAS, Validator ou PR de agente. A única nova autorização de teste via edição da PR é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_IDENTITY_DIAGNOSTIC_ONCE`, após checks realmente executados no HEAD atualizado e revalidação de owner/rules/runner/custo. Sem Docker, Neon, merge, deploy ou custo incremental.
+A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de aprovação fica indisponível e não se publicam CAS, Validator ou PR de agente. A única nova autorização de teste via edição da PR é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RUN_ATTEMPT_ONCE`, após checks realmente executados no HEAD atualizado e revalidação de owner/rules/runner/custo. Sem Docker, Neon, merge, deploy ou custo incremental.
 
 ## Alinhamento de regras no preflight (26/10)
 
