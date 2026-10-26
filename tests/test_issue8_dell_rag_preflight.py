@@ -445,3 +445,43 @@ def test_workflow_only_emits_bounded_diagnostic_and_keeps_failure():
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in raw
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_IDENTITY_DIAGNOSTIC_ONCE" in raw
     assert "contents: write" not in raw and "ollama pull" not in raw.lower()
+
+
+def test_actions_github_script_run_attempt_uses_actual_actions_environment():
+    """Execute the workflow's own predicate in Node with positive/negative cases.
+
+    actions/github-script v7 does not reliably expose context.runAttempt.
+    GITHUB_RUN_ATTEMPT is a documented runner environment variable.
+    """
+    import subprocess
+    from pathlib import Path
+    workflow = (
+        Path(__file__).resolve().parents[1]
+        / ".github" / "workflows" / "issue8-dell-native-rag-readonly.yml"
+    ).read_text(encoding="utf-8")
+    expression_line = next(
+        line.strip() for line in workflow.splitlines()
+        if line.strip().startswith("run_attempt:r.run_attempt===")
+    )
+    expression = expression_line.split("run_attempt:", 1)[1].rstrip(",")
+    assert expression == "r.run_attempt===String(process.env.GITHUB_RUN_ATTEMPT)"
+    assert "context.runAttempt" not in workflow
+
+    source = "\n".join((
+        "const r={run_attempt:'1'};",
+        "const context={runAttempt:undefined};",
+        "process.env.GITHUB_RUN_ATTEMPT='1';",
+        "if (!(" + expression + ")) process.exit(1);",
+        "r.run_attempt='2';",
+        "if (" + expression + ") process.exit(2);",
+        "r.run_attempt='1';",
+        "delete process.env.GITHUB_RUN_ATTEMPT;",
+        "if (" + expression + ") process.exit(3);",
+    ))
+    observed = subprocess.run(
+        ["node", "-e", source], capture_output=True, text=True,
+        check=False, timeout=12,
+    )
+    assert observed.returncode == 0, (
+        observed.stderr[:300] if observed.stderr else "attempt_contract_invalid"
+    )

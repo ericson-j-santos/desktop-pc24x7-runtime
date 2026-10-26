@@ -460,7 +460,7 @@ jobs:
               session:r.session_result==='SESSION_LAUNCH_OK',
               snapshot:/^[0-9a-f]{64}$/.test(r.snapshot_sha256||''),
               run_id:r.run_id===String(context.runId),
-              run_attempt:r.run_attempt===String(context.runAttempt),
+              run_attempt:r.run_attempt===String(process.env.GITHUB_RUN_ATTEMPT),
               independent_readback:r.independent_git_source_readback===true,
               cas_write:r.cas_write===false,
               draft_pr:r.draft_pr_created===false,

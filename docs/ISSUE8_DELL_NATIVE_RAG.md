@@ -71,3 +71,15 @@ A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de ap
 ## Alinhamento de regras no preflight (26/10)
 
 A regra canônica `chatgpt-operational-rules/main` avançou de `92e8b5c87684212964b24ff3597f9f9f8aea49a6` para `8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8` após a PR #181 (sonda WSL do Noteri); o pin atual de código e workflow foi atualizado para `8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8`. As versões históricas mencionadas acima permanecem apenas evidência das execuções anteriores. Nenhuma política foi ignorada nem relaxada.
+
+## Identidade de tentativa no readback hospedado — 26/10/2026
+
+A execução física #40401305040 passou, mas o readback hospedado falhou
+com `ISSUE8_RECEIPT_IDENTITY_INVALID`. A análise do ZIP original confirmou
+`run_attempt='1'`, baseline 26/42 e duas chamadas reais ao Qwen.
+O defeito foi isolado na comparação com `context.runAttempt`,
+indisponível na versão do `actions/github-script` fixada no workflow.
+A verificação agora usa a variável oficial `GITHUB_RUN_ATTEMPT`,
+mantendo igualdade exata, sem default permissivo. Um teste executa
+a expressão real do workflow no Node para o caso positivo, divergência
+e variável ausente. Nenhuma recusa do Qwen foi convertida em sucesso.
