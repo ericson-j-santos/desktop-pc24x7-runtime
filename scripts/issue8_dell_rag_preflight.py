@@ -22,7 +22,7 @@ from pathlib import Path
 HOST_REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
 WORKER_SHA = "047c77b6b867ff5d489bd74f6fd80989719ab85e"
-RULES_SHA = "92e8b5c87684212964b24ff3597f9f9f8aea49a6"
+RULES_SHA = "8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
@@ -47,7 +47,11 @@ def _set_phase(phase: str) -> None:
 
 
 class PreflightBlocked(RuntimeError):
-    """Never contain user input, remote API body, paths, or credentials."""
+    """Fixed reason code plus optionally bounded, never raw diagnostic fields."""
+
+    def __init__(self, code: str, *, diagnostic: dict[str, object] | None = None):
+        super().__init__(code)
+        self.diagnostic = diagnostic
 
 
 def require(ok: bool, code: str) -> None:
@@ -210,6 +214,69 @@ def read_original_bytes(reader: object, path: str, sha: str) -> bytes:
         raise PreflightBlocked("issue8_independent_api_unavailable") from None
 
 
+def safe_rag_refusal_diagnostic(receipt: object) -> dict[str, object] | None:
+    """Only SHA-bound, allowlisted metadata; never source/model text."""
+    if type(receipt) is not dict:
+        return None
+    if (receipt.get("schema_version") != "worker.rag.issue-context-v1"
+            or receipt.get("issue_number") != ISSUE_NUMBER
+            or receipt.get("head_sha") != WORKER_SHA
+            or receipt.get("base_sha") != WORKER_SHA
+            or receipt.get("state") != "insufficient_evidence"
+            or receipt.get("selected_reference") is not None
+            or receipt.get("model_process_verified") is not True
+            or receipt.get("issue_head_readback_stable") is not True
+            or receipt.get("execution_authorized") is not False
+            or receipt.get("state_changed") is not False):
+        return None
+    sources = receipt.get("sources")
+    query_hashes = receipt.get("search_query_sha256")
+    calls = receipt.get("model_calls")
+    if (type(sources) is not list or not 1 <= len(sources) <= 2
+            or type(query_hashes) is not list or len(query_hashes) != len(sources)
+            or not all(type(q) is str and SHA64.fullmatch(q) for q in query_hashes)
+            or type(calls) is not int or not len(sources) <= calls <= 2 * len(sources)):
+        return None
+    allowed = {"README.md", "docs/ISSUE_QWEN7B_DRAFT_HANDOFF.md"}
+    paths: list[str] = []
+    for source in sources:
+        if type(source) is not dict:
+            return None
+        path = source.get("path")
+        if (type(path) is not str or path not in allowed or path in paths
+                or source.get("ref_sha") != WORKER_SHA
+                or type(source.get("blob_sha")) is not str
+                or not SHA40.fullmatch(source["blob_sha"])
+                or type(source.get("sha256")) is not str
+                or not SHA64.fullmatch(source["sha256"])):
+            return None
+        paths.append(path)
+    stored = receipt.get("receipt_sha256")
+    if type(stored) is not str or not SHA64.fullmatch(stored):
+        return None
+    unhashed = dict(receipt)
+    unhashed.pop("receipt_sha256", None)
+    try:
+        rebuilt = hashlib.sha256(json.dumps(
+            unhashed, ensure_ascii=False, sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+    except (TypeError, ValueError):
+        return None
+    if rebuilt != stored:
+        return None
+    rounds = calls - len(sources)
+    return {
+        "schema_version": "issue8.rag.refusal-diagnostic-v1",
+        "source_paths": paths,
+        "source_count": len(sources),
+        "model_calls": calls,
+        "selection_rounds": rounds,
+        "refusal_kind": "model_declined_candidate" if rounds else "no_candidate_snippet",
+        "citation_selected": False,
+    }
+
+
 def attest_issue_rag_receipt(receipt: object) -> None:
     """Distinguish trusted failure categories; never promote refusal to success.
 
@@ -283,7 +350,14 @@ def run(env: dict[str, str]) -> dict[str, object]:
     NativeStructuredOllama.no_cloud()
     _set_phase('research')
     receipt = research_issue(approved, github_token=env.get("GITHUB_TOKEN") or None)
-    attest_issue_rag_receipt(receipt)
+    try:
+        attest_issue_rag_receipt(receipt)
+    except PreflightBlocked as exc:
+        if str(exc) == "issue8_rag_insufficient_evidence":
+            raise PreflightBlocked(
+                str(exc), diagnostic=safe_rag_refusal_diagnostic(receipt),
+            ) from None
+        raise
 
     # Separate API client validates the exact cited bytes after inference.
     _set_phase('readback')
@@ -348,13 +422,18 @@ def main() -> int:
             )
             else "issue8_native_dependency_unavailable"
         )
-        print(json.dumps({
+        failure = {
             "result": "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED",
             "reason_code": code,
             "phase": _PHASE if _PHASE in _PHASES else "identity",
             "state_changed": False,
             "draft_pr_created": False,
-        }, sort_keys=True))
+        }
+        if (code == "issue8_rag_insufficient_evidence"
+                and type(exc) is PreflightBlocked
+                and type(exc.diagnostic) is dict):
+            failure["rag_diagnostic"] = exc.diagnostic
+        print(json.dumps(failure, sort_keys=True))
         return 2
     print(json.dumps(observed, sort_keys=True))
     return 0

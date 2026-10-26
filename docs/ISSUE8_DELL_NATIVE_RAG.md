@@ -58,3 +58,16 @@ marcadores consumidos nem modificar serviços, patch, CAS ou produção.
 O segundo run [#40377362575](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40377362575) passou no contrato, mas foi bloqueado **antes do Dell** por HTTP 500 ao ler o comentário OWNER via API GitHub. Isso confirma instabilidade transitória em mais de uma rota GET, não CI/owner reprovado.
 
 Agora as dez consultas de admissão e as sete consultas de readback são **sequenciais** e usam tentativas limitadas (até três) para 429 e HTTP 500/502/503/504. Erros 403/404, respostas vazias, esgotamento das tentativas, SHA/OWNER divergente ou checks não executados falham fechado. Um teste Node executa controles positivos/negativos da função de retry, e o readback exige citação em fonte allowlisted antes do GET. Novo marcador de execução única: `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE` após CI aprovado no novo HEAD. Não repetir runs anteriores nem promover skips a sucesso.
+
+
+## Diagnóstico sanitizado da recusa Qwen RAG — 26/10/2026
+
+O run físico [#40378386092](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40378386092), SHA `427e8ea914e8fd1cf8de464e2e8c18131a46a5a5`, concluiu admissão, Session Launcher, Gateway e iniciou inferência local, mas falhou com `issue8_rag_insufficient_evidence` na fase `research`. A leitura independente de sucesso foi corretamente ignorada. A correção PT-BR da PR Worker Pool #56 não resolve comprovadamente essa recusa.
+
+O diagnóstico não modifica `research_issue`, seleção, ranking, prompts ou respostas do Qwen. Se o recibo apresentar recusa, identidade e SHA atuais, hash íntegro e processo atestado, registra somente fontes allowlisted, quantidade de fontes, número de chamadas do modelo e número de seleções tentadas. O caso `no_candidate_snippet` significa que nenhuma seleção de citação foi solicitada. `model_declined_candidate` significa que houve ao menos uma seleção sem citação aceita. Esses estados não comprovam quais linhas individuais foram apresentadas; uma investigação de candidatos requer telemetria posterior na fonte do Worker Pool. Nenhum texto de documento, prompt ou resposta bruta é publicado.
+
+A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de aprovação fica indisponível e não se publicam CAS, Validator ou PR de agente. A única nova autorização de teste via edição da PR é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE`, após checks realmente executados no HEAD atualizado e revalidação de owner/rules/runner/custo. Sem Docker, Neon, merge, deploy ou custo incremental.
+
+## Alinhamento de regras no preflight (26/10)
+
+A regra canônica `chatgpt-operational-rules/main` avançou de `92e8b5c87684212964b24ff3597f9f9f8aea49a6` para `8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8` após a PR #181 (sonda WSL do Noteri); o pin atual de código e workflow foi atualizado para `8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8`. As versões históricas mencionadas acima permanecem apenas evidência das execuções anteriores. Nenhuma política foi ignorada nem relaxada.

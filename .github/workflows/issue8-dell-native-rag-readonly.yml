@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -107,7 +107,7 @@ jobs:
                 d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -126,7 +126,7 @@ jobs:
               core.setFailed('ISSUE8_NOTERI_PR_SCOPE_CHANGED');return;
             }
             if (wm.data.commit.sha!=='047c77b6b867ff5d489bd74f6fd80989719ab85e' ||
-                rule.data.commit.sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6' ||
+                rule.data.commit.sha!=='8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8' ||
                 issue.data.state!=='open' || !!issue.data.pull_request ||
                 ownerComment.data.user?.login!==owner ||
                 ownerComment.data.author_association!=='OWNER' ||
@@ -163,7 +163,7 @@ jobs:
     env:
       EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
       WORKER_POOL_SHA: 047c77b6b867ff5d489bd74f6fd80989719ab85e
-      RULES_SHA: 92e8b5c87684212964b24ff3597f9f9f8aea49a6
+      RULES_SHA: 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8
       AGENT_CORE_SHA: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
       CORRELATION_ID: issue8-dell-${{ github.run_id }}-${{ github.run_attempt }}
       NATIVE_OLLAMA_DEV: '1'
@@ -323,6 +323,36 @@ jobs:
               } catch { }
             }
             Write-Output "ISSUE8_SANITIZED_PHASE=$phase"
+            if ($null -ne $safe -and $safe.reason_code -eq 'issue8_rag_insufficient_evidence') {
+              $metadata=$safe.rag_diagnostic
+              if ($null -ne $metadata -and
+                  $metadata.schema_version -eq 'issue8.rag.refusal-diagnostic-v1' -and
+                  $metadata.citation_selected -eq $false -and
+                  ($metadata.source_count -is [int] -or $metadata.source_count -is [long]) -and
+                  ($metadata.model_calls -is [int] -or $metadata.model_calls -is [long]) -and
+                  ($metadata.selection_rounds -is [int] -or $metadata.selection_rounds -is [long]) -and
+                  $metadata.source_count -ge 1 -and $metadata.source_count -le 2 -and
+                  $metadata.model_calls -ge $metadata.source_count -and
+                  $metadata.model_calls -le (2 * $metadata.source_count) -and
+                  $metadata.selection_rounds -eq ($metadata.model_calls - $metadata.source_count) -and
+                  $metadata.refusal_kind -in @('model_declined_candidate','no_candidate_snippet')) {
+                $reportedPaths=@($metadata.source_paths)
+                $allowedPaths=@('README.md','docs/ISSUE_QWEN7B_DRAFT_HANDOFF.md')
+                if ($reportedPaths.Count -eq $metadata.source_count -and
+                    @($reportedPaths | Where-Object { $_ -notin $allowedPaths }).Count -eq 0 -and
+                    @($reportedPaths | Select-Object -Unique).Count -eq $reportedPaths.Count -and
+                    (($metadata.selection_rounds -gt 0 -and
+                      $metadata.refusal_kind -eq 'model_declined_candidate') -or
+                     ($metadata.selection_rounds -eq 0 -and
+                      $metadata.refusal_kind -eq 'no_candidate_snippet'))) {
+                  Write-Output ('ISSUE8_RAG_SAFE_DIAGNOSTIC=kind=' +
+                    $metadata.refusal_kind + ';paths=' + ($reportedPaths -join ',') +
+                    ';sources=' + $metadata.source_count +
+                    ';model_calls=' + $metadata.model_calls +
+                    ';selection_rounds=' + $metadata.selection_rounds)
+                }
+              }
+            }
             throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'
           }
           if ($envelope.state_changed -ne $false) { throw 'ISSUE8_GATEWAY_STATE_INVALID' }
@@ -413,7 +443,7 @@ jobs:
                 r.schema_version!=='issue8.native.rag.readonly-v1' ||
                 r.issue_number!==8 || r.worker_sha!==workerSHA ||
                 r.runtime_sha!==thisSHA ||
-                r.rules_sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6' ||
+                r.rules_sha!=='8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8' ||
                 r.model_digest_prefix!=='dae161e27b0e' ||
                 r.baseline_total!==42 || !Number.isInteger(r.baseline_passed) ||
                 r.baseline_passed<0 || r.baseline_passed>=42 ||

@@ -189,13 +189,13 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "DESKTOP-PDQK954-runtime" in t
@@ -216,7 +216,7 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
 
 def m_sha_in_text(t):
     return ("047c77b6b867ff5d489bd74f6fd80989719ab85e" in t
-            and "92e8b5c87684212964b24ff3597f9f9f8aea49a6" in t)
+            and "8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8" in t)
 
 
 
@@ -230,7 +230,7 @@ def test_dell_workflow_yaml_parses_and_corruption_fails(tmp_path):
     assert {"contract", "admission", "physical", "watchdog", "independent_readback"} <= set(parsed["jobs"])
     assert "DESKTOP-PDQK954-runtime" in raw
     assert "runner_id)===2" in raw and "runner_id!==2" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE" in raw
     assert "Python compile and tests" in raw and "Portable Linux compile and tests" in raw
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED" in raw
     assert "contents: write" not in raw
@@ -301,7 +301,7 @@ def test_issue8_rag_receipt_rejections_remain_fail_closed(field,value,reason):
 
 def test_recovery_uses_new_marker_only():
     content=WORKFLOW.read_text(encoding="utf-8")
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE" not in content
     assert "issue8_rag_insufficient_evidence" in SCRIPT.read_text(encoding="utf-8")
 
@@ -357,5 +357,86 @@ const handler=__HELPER__;
     assert "const workerChecks=await boundedAdmissionGet" in raw
     assert "const comment=await boundedReadbackGet" in raw
     assert "ISSUE8_READBACK_SOURCE_NOT_ALLOWLISTED" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE" in raw
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE" not in raw
+
+
+def _signed_refusal_fixture(m, *, paths=("README.md",), calls=2):
+    """Synthetic SHA-bound receipt, not a physical-model test."""
+    receipt = {
+        "schema_version": "worker.rag.issue-context-v1",
+        "issue_number": m.ISSUE_NUMBER,
+        "head_sha": m.WORKER_SHA, "base_sha": m.WORKER_SHA,
+        "state": "insufficient_evidence", "selected_reference": None,
+        "model_process_verified": True, "issue_head_readback_stable": True,
+        "execution_authorized": False, "state_changed": False,
+        "sources": [{"path": p, "ref_sha": m.WORKER_SHA, "blob_sha": "a"*40,
+                     "sha256": "b"*64, "untrusted": "SENSITIVE_SOURCE_TEXT"}
+                    for p in paths],
+        "search_query_sha256": ["c"*64 for _ in paths],
+        "model_calls": calls,
+    }
+    payload = m.json.dumps(receipt, ensure_ascii=False, sort_keys=True,
+                           separators=(",", ":")).encode("utf-8")
+    receipt["receipt_sha256"] = m.hashlib.sha256(payload).hexdigest()
+    return receipt
+
+
+def test_safe_refusal_classification_positive_negative_and_replay(capsys, monkeypatch):
+    m = module()
+    refusal = _signed_refusal_fixture(m)
+    diagnosis = m.safe_rag_refusal_diagnostic(refusal)
+    assert diagnosis == {
+        "schema_version": "issue8.rag.refusal-diagnostic-v1",
+        "source_paths": ["README.md"], "source_count": 1,
+        "model_calls": 2, "selection_rounds": 1,
+        "refusal_kind": "model_declined_candidate", "citation_selected": False,
+    }
+    empty = _signed_refusal_fixture(m, paths=(
+        "docs/ISSUE_QWEN7B_DRAFT_HANDOFF.md", "README.md"), calls=2)
+    assert m.safe_rag_refusal_diagnostic(empty)["refusal_kind"] == "no_candidate_snippet"
+    assert m.safe_rag_refusal_diagnostic(refusal) == diagnosis
+    with pytest.raises(m.PreflightBlocked, match="issue8_rag_insufficient_evidence"):
+        m.attest_issue_rag_receipt(refusal)
+    error = m.PreflightBlocked("issue8_rag_insufficient_evidence", diagnostic=diagnosis)
+    monkeypatch.setattr(m, "run", lambda *_: (_ for _ in ()).throw(error))
+    assert m.main() == 2
+    output = capsys.readouterr().out
+    decoded = json.loads(output)
+    assert decoded["rag_diagnostic"] == diagnosis
+    assert decoded["state_changed"] is False and decoded["draft_pr_created"] is False
+    assert "SENSITIVE_SOURCE_TEXT" not in output
+
+
+@pytest.mark.parametrize("field,value", [
+    ("state", "supported"), ("model_calls", True),
+    ("selected_reference", {"path":"README.md"}),
+    ("head_sha", "0"*40), ("execution_authorized", True),
+    ("model_process_verified", False),
+])
+def test_sanitized_diagnostic_rejects_unverified_receipts(field,value):
+    m = module()
+    data = _signed_refusal_fixture(m)
+    data[field] = value
+    assert m.safe_rag_refusal_diagnostic(data) is None
+
+
+def test_sanitized_diagnostic_blocks_unsafe_path_duplicate_and_modified_hash():
+    m = module()
+    forbidden = _signed_refusal_fixture(m, paths=("../private.key",))
+    assert m.safe_rag_refusal_diagnostic(forbidden) is None
+    duplicate = _signed_refusal_fixture(m, paths=("README.md","README.md"), calls=4)
+    assert m.safe_rag_refusal_diagnostic(duplicate) is None
+    corrupted = _signed_refusal_fixture(m)
+    corrupted["receipt_sha256"] = "0"*64
+    assert m.safe_rag_refusal_diagnostic(corrupted) is None
+
+
+def test_workflow_only_emits_bounded_diagnostic_and_keeps_failure():
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    assert "ISSUE8_RAG_SAFE_DIAGNOSTIC=" in raw
+    assert "issue8.rag.refusal-diagnostic-v1" in raw
+    assert "model_declined_candidate" in raw and "no_candidate_snippet" in raw
+    assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE" in raw
+    assert "contents: write" not in raw and "ollama pull" not in raw.lower()
