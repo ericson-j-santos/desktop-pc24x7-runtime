@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_SOURCE_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_SOURCE_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -66,7 +66,7 @@ jobs:
             const owner='ericson-j-santos', worker='engineering-worker-pool';
             const current=context.payload.pull_request;
             const sha=current.head.sha;
-            const [pr,main,wm,rule,ownerComment,issue,file,dellChecks,workerChecks]=await Promise.all([
+            const [pr,main,wm,rule,ownerComment,issue,file,dellChecks,workerChecks,codePR,codeChecks]=await Promise.all([
               github.rest.pulls.get({owner,repo:context.repo.repo,pull_number:current.number}),
               github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
               github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
@@ -75,7 +75,9 @@ jobs:
               github.rest.issues.get({owner,repo:worker,issue_number:8}),
               github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'74035488dac6938bfc14957621e86168003cd0c6'}),
               github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}),
-              github.rest.checks.listForRef({owner,repo:worker,ref:'74035488dac6938bfc14957621e86168003cd0c6',per_page:100})
+              github.rest.checks.listForRef({owner,repo:worker,ref:'74035488dac6938bfc14957621e86168003cd0c6',per_page:100}),
+              github.rest.pulls.get({owner,repo:worker,pull_number:56}),
+              github.rest.checks.listForRef({owner,repo:worker,ref:'f100717c4f71f831a4b34d7dff3909d50f42ed65',per_page:100})
             ]);
             const d=pr.data;
             if (d.state!=='open' || !d.draft ||
@@ -84,7 +86,7 @@ jobs:
                 d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_SOURCE_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -116,10 +118,24 @@ jobs:
             const passed=(set,name,ref)=>set.data.check_runs.some(c=>
               c.name===name&&c.head_sha===ref&&c.status==='completed'&&
               c.conclusion==='success'&&c.started_at&&c.completed_at);
+            const reviewedSha='f100717c4f71f831a4b34d7dff3909d50f42ed65';
+            const reviewed=codePR.data;
+            const codeFiles=(await github.rest.pulls.listFiles({
+              owner,repo:worker,pull_number:56,per_page:100
+            })).data;
+            const allowedCode=new Set(['app/issue_rag_research.py','tests/issue_rag_contract_check.py']);
+            if (reviewed.head.sha!==reviewedSha ||
+                reviewed.head.repo?.full_name!==owner+'/'+worker ||
+                reviewed.base.sha!==wm.data.commit.sha ||
+                !(reviewed.state==='open'||reviewed.merged===true) ||
+                codeFiles.length!==2 ||
+                !codeFiles.every(f=>allowedCode.has(f.filename)&&f.status==='modified')) {
+              core.setFailed('ISSUE8_REVIEWED_RAG_CODE_DRIFT');return;
+            }
             if (!['Python compile and tests','Portable Linux compile and tests'].every(n=>passed(dellChecks,n,sha)) ||
-                !['test','candidate-canary'].every(n=>
-                  passed(workerChecks,n,'74035488dac6938bfc14957621e86168003cd0c6'))) {
-              core.setFailed('ISSUE8_NOTERI_CURRENT_CI_NOT_EXECUTED');return;
+                !['test','candidate-canary'].every(n=>passed(workerChecks,n,wm.data.commit.sha)) ||
+                !['test','candidate-canary'].every(n=>passed(codeChecks,n,reviewedSha))) {
+              core.setFailed('ISSUE8_REVIEWED_RAG_CI_NOT_PROVED');return;
             }
             core.info(JSON.stringify({
               result:'ISSUE8_NOTERI_PHYSICAL_ADMISSION_OK',
@@ -138,6 +154,7 @@ jobs:
     env:
       EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
       WORKER_POOL_SHA: 74035488dac6938bfc14957621e86168003cd0c6
+      WORKER_CODE_SHA: f100717c4f71f831a4b34d7dff3909d50f42ed65
       RULES_SHA: 92e8b5c87684212964b24ff3597f9f9f8aea49a6
       AGENT_CORE_SHA: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
       CORRELATION_ID: issue8-dell-${{ github.run_id }}-${{ github.run_attempt }}
@@ -162,6 +179,13 @@ jobs:
           repository: ericson-j-santos/engineering-worker-pool
           ref: ${{ env.WORKER_POOL_SHA }}
           path: _worker_pool
+          persist-credentials: false
+      - name: Checkout CI-reviewed Worker Pool PT-BR RAG code
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_CODE_SHA }}
+          path: _worker_code
           persist-credentials: false
       - name: Checkout reviewed Agent Core source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
@@ -387,6 +411,7 @@ jobs:
             if (r.result!=='ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' ||
                 r.schema_version!=='issue8.native.rag.readonly-v1' ||
                 r.issue_number!==8 || r.worker_sha!==workerSHA ||
+                r.worker_code_sha!=='f100717c4f71f831a4b34d7dff3909d50f42ed65' ||
                 r.runtime_sha!==thisSHA ||
                 r.rules_sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6' ||
                 r.model_digest_prefix!=='dae161e27b0e' ||
@@ -405,14 +430,15 @@ jobs:
                 r.model_commands_authorized!==false || r.state_changed!==false) {
               core.setFailed('ISSUE8_RECEIPT_IDENTITY_INVALID');return;
             }
-            const [jobs,main,wm,comment,issue,source]=await Promise.all([
+            const [jobs,main,wm,comment,issue,source,reviewed]=await Promise.all([
               github.rest.actions.listJobsForWorkflowRun({
                 owner,repo:context.repo.repo,run_id:context.runId,per_page:100}),
               github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
               github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
               github.rest.issues.getComment({owner,repo:worker,comment_id:6404265064}),
               github.rest.issues.get({owner,repo:worker,issue_number:8}),
-              github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA})
+              github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA}),
+              github.rest.pulls.get({owner,repo:worker,pull_number:56})
             ]);
             const j=jobs.data.jobs.find(x=>x.name==='Dell Qwen issue8 native RAG read-only');
             const needed=[
@@ -429,6 +455,8 @@ jobs:
                   s.status==='completed'&&s.conclusion==='success')) ||
                 main.data.commit.sha!==context.payload.pull_request.base.sha||
                 wm.data.commit.sha!==workerSHA||
+                reviewed.data.head.sha!=='f100717c4f71f831a4b34d7dff3909d50f42ed65'||
+                reviewed.data.base.sha!==workerSHA||
                 comment.data.user?.login!==owner ||
                 comment.data.author_association!=='OWNER' ||
                 comment.data.body!=='/local-agent authorize bridge.property.v1 sha:'+workerSHA ||
