@@ -26,7 +26,7 @@ This revision **does not relax** the RAG acceptance. It emits one of the finite 
 A pesquisa RAG da issue #8 no Dell falhou com evidência insuficiente no run
 #40369704989. A PR Worker Pool #56 corrige apenas a pontuação dos trechos
 portugueses; foi integrada à main no SHA `be69b27455f99606a03ce5cba6ca809e1082f2b4`, com
-blob `d9b348f6f1e5c71f182940f4ec03fb94268d28c6` de `app/issue_rag_research.py`.
+blob `7d27e62e296bafd3079ed37d72b4e817917a76fe` de `app/issue_rag_research.py`.
 A fonte `app/portfolio_bridge.py` mantém o Git blob anterior, e o
 proprietário publicou a autorização SHA-bound #6427072933 específica da nova
 main. Este canário usa somente o código integrado na main e exige readback
@@ -66,7 +66,7 @@ O run físico [#40378386092](https://github.com/ericson-j-santos/desktop-pc24x7-
 
 O diagnóstico não modifica `research_issue`, seleção, ranking, prompts ou respostas do Qwen. Se o recibo apresentar recusa, identidade e SHA atuais, hash íntegro e processo atestado, registra somente fontes allowlisted, quantidade de fontes, número de chamadas do modelo e número de seleções tentadas. O caso `no_candidate_snippet` significa que nenhuma seleção de citação foi solicitada. `model_declined_candidate` significa que houve ao menos uma seleção sem citação aceita. Esses estados não comprovam quais linhas individuais foram apresentadas; uma investigação de candidatos requer telemetria posterior na fonte do Worker Pool. Nenhum texto de documento, prompt ou resposta bruta é publicado.
 
-A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de aprovação fica indisponível e não se publicam CAS, Validator ou PR de agente. A única nova autorização de teste via edição da PR é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE`, após checks realmente executados no HEAD atualizado e revalidação de owner/rules/runner/custo. Sem Docker, Neon, merge, deploy ou custo incremental.
+A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de aprovação fica indisponível e não se publicam CAS, Validator ou PR de agente. A única nova autorização de teste via edição da PR é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE`, após checks realmente executados no HEAD atualizado e revalidação de owner/rules/runner/custo. Sem Docker, Neon, merge, deploy ou custo incremental.
 
 ## Alinhamento de regras no preflight (26/10)
 

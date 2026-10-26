@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -107,7 +107,7 @@ jobs:
                 d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -135,7 +135,7 @@ jobs:
                 file.data.type!=='file' ||
                 file.data.sha!=='d9a25c574163c49f695e774609949160d94f4490' ||
                 ragImplementation.data.type!=='file' ||
-                ragImplementation.data.sha!=='d9b348f6f1e5c71f182940f4ec03fb94268d28c6') {
+                ragImplementation.data.sha!=='7d27e62e296bafd3079ed37d72b4e817917a76fe') {
               core.setFailed('ISSUE8_NOTERI_OWNER_OR_SOURCE_DRIFT');return;
             }
             const passed=(set,name,ref)=>set.data.check_runs.some(c=>
@@ -509,7 +509,7 @@ jobs:
                   s.status==='completed'&&s.conclusion==='success')) ||
                 main.data.commit.sha!==context.payload.pull_request.base.sha||
                 wm.data.commit.sha!==workerSHA||
-                implementation.data.sha!=='d9b348f6f1e5c71f182940f4ec03fb94268d28c6'||
+                implementation.data.sha!=='7d27e62e296bafd3079ed37d72b4e817917a76fe'||
                 comment.data.user?.login!==owner ||
                 comment.data.author_association!=='OWNER' ||
                 comment.data.body!=='/local-agent authorize bridge.property.v1 sha:'+workerSHA ||
