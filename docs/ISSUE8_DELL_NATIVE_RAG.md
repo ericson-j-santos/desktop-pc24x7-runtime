@@ -33,3 +33,21 @@ main. Este canário usa somente o código integrado na main e exige readback
 da versão de pesquisa, sem segundo checkout experimental. O marcador físico
 único é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE`. A recusa do modelo continua bloqueando qualquer
 aprovação, PR, CAS, merge ou deploy.
+
+
+## Recuperação da consulta de CI remoto (26/10/2026)
+
+O disparo de `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE`
+produziu [run #40376199312](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40376199312): contrato aprovado,
+mas a admissão hospedada falhou **antes de pickup do Dell** por HTTP 500 do
+GitHub API `GET /commits/047c77b6.../check-runs`. Isso não é CI reprovado
+nem falha de RAG. A nova leitura GET-only usa até três tentativas para 429 e
+5xx transitórios, intervalos limitados e erro estático sanitizado em resposta
+permanente ou após esgotar tentativas. Ela nunca substitui a verificação de
+`completed/success` no SHA exato por uma aprovação presumida.
+
+O teste executa o helper JavaScript com Node: 500→500→200, rejeição imediata
+de 403, esgotamento de 503 e rejeição de resposta malformada. A recuperação
+física exige novo marcador `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE`, transição única após CI positivo
+e todas as mesmas revalidações de owner, Worker Pool e custo. Não repetir
+marcadores consumidos nem modificar serviços, patch, CAS ou produção.

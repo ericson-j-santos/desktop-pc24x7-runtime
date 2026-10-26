@@ -189,13 +189,13 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "DESKTOP-PDQK954-runtime" in t
@@ -230,7 +230,7 @@ def test_dell_workflow_yaml_parses_and_corruption_fails(tmp_path):
     assert {"contract", "admission", "physical", "watchdog", "independent_readback"} <= set(parsed["jobs"])
     assert "DESKTOP-PDQK954-runtime" in raw
     assert "runner_id)===2" in raw and "runner_id!==2" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE" in raw
     assert "Python compile and tests" in raw and "Portable Linux compile and tests" in raw
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED" in raw
     assert "contents: write" not in raw
@@ -301,7 +301,7 @@ def test_issue8_rag_receipt_rejections_remain_fail_closed(field,value,reason):
 
 def test_recovery_uses_new_marker_only():
     content=WORKFLOW.read_text(encoding="utf-8")
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE" not in content
     assert "issue8_rag_insufficient_evidence" in SCRIPT.read_text(encoding="utf-8")
 
@@ -314,3 +314,49 @@ def test_merged_ptbr_source_is_exactly_authenticated_and_pinned():
     assert "implementation.data.sha" in yml
     assert yml.count("d9b348f6f1e5c71f182940f4ec03fb94268d28c6")>=2
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE" not in yml
+
+
+def test_bounded_worker_check_retry_is_readonly_and_failclosed():
+    """Execute the GitHub Actions helper against transient and negative responses."""
+    import subprocess
+    raw = WORKFLOW.read_text(encoding="utf-8")
+    start = raw.index("            async function boundedWorkerChecks(")
+    stop = raw.index("            const [pr,main,wm,rule", start)
+    helper = raw[start:stop]
+    source = helper + r"""
+const assert = require('node:assert/strict');
+(async()=>{
+  const noWait=async()=>{};
+  let count=0;
+  const two500ThenOK=async()=>{
+    count++;
+    if(count<3) throw {status:500};
+    return {data:{check_runs:[{name:'test',status:'completed',conclusion:'success'}]}};
+  };
+  let result=await boundedWorkerChecks(two500ThenOK,noWait);
+  assert.equal(count,3);
+  assert.equal(result.data.check_runs[0].name,'test');
+  count=0;
+  await assert.rejects(
+    boundedWorkerChecks(async()=>{count++;throw {status:403};},noWait),
+    /ISSUE8_WORKER_CHECKS_GET_PERMANENT/
+  );
+  assert.equal(count,1);
+  count=0;
+  await assert.rejects(
+    boundedWorkerChecks(async()=>{count++;throw {status:503};},noWait),
+    /ISSUE8_WORKER_CHECKS_GET_EXHAUSTED/
+  );
+  assert.equal(count,3);
+  await assert.rejects(
+    boundedWorkerChecks(async()=>({data:{}}),noWait),
+    /ISSUE8_WORKER_CHECKS_GET_PERMANENT/
+  );
+})().catch(error=>{process.stderr.write(String(error.message));process.exit(1)});
+"""
+    outcome = subprocess.run(["node", "-e", source], text=True,
+                             capture_output=True, timeout=20, check=False)
+    assert outcome.returncode == 0, outcome.stderr[-500:]
+    assert "boundedWorkerChecks(()=>github.rest.checks.listForRef" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE" not in raw

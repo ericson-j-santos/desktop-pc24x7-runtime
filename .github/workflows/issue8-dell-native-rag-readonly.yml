@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -66,6 +66,29 @@ jobs:
             const owner='ericson-j-santos', worker='engineering-worker-pool';
             const current=context.payload.pull_request;
             const sha=current.head.sha;
+            // GET-only: bounded retries for transient API faults, never a check bypass.
+            async function boundedWorkerChecks(read, pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))) {
+              for (let attempt=1;attempt<=3;attempt++) {
+                try {
+                  const response=await read();
+                  if (!response?.data||!Array.isArray(response.data.check_runs)) {
+                    throw new Error('ISSUE8_WORKER_CHECKS_MALFORMED');
+                  }
+                  return response;
+                } catch (error) {
+                  const status=Number(error?.status);
+                  const transient=[429,500,502,503,504].includes(status);
+                  if (!transient) {
+                    throw new Error('ISSUE8_WORKER_CHECKS_GET_PERMANENT');
+                  }
+                  if (attempt===3) {
+                    throw new Error('ISSUE8_WORKER_CHECKS_GET_EXHAUSTED');
+                  }
+                  await pause(attempt*1000);
+                }
+              }
+              throw new Error('ISSUE8_WORKER_CHECKS_UNAVAILABLE');
+            }
             const [pr,main,wm,rule,ownerComment,issue,file,dellChecks,workerChecks,ragImplementation]=await Promise.all([
               github.rest.pulls.get({owner,repo:context.repo.repo,pull_number:current.number}),
               github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
@@ -75,7 +98,7 @@ jobs:
               github.rest.issues.get({owner,repo:worker,issue_number:8}),
               github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'}),
               github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}),
-              github.rest.checks.listForRef({owner,repo:worker,ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e',per_page:100}),
+              boundedWorkerChecks(()=>github.rest.checks.listForRef({owner,repo:worker,ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e',per_page:100})),
               github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'})
             ]);
             const d=pr.data;
@@ -85,7 +108,7 @@ jobs:
                 d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
