@@ -305,3 +305,10 @@ def test_s4u_registration_passes_no_password_variant() -> None:
     assert "principal.UserId,\n            None,\n            TASK_LOGON_S4U" in registration
     assert "task_sddl" in registration
     assert "registered_task.SetSecurityDescriptor(task_sddl, 0)" in text
+
+
+def test_repair_reuses_import_safe_watchdog_launcher() -> None:
+    assert m.launcher_bytes() == m.watchdog.launcher_bytes()
+    text = m.launcher_bytes().decode("utf-8")
+    assert "script_dir = script.parent" in text
+    assert "sys.path.insert(0, str(script_dir))" in text

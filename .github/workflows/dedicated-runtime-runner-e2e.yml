@@ -9,6 +9,11 @@ on:
         required: true
         default: runner-identity
         options: [runner-identity, native-postgres-inventory, native-postgres-readback, native-wsl-postgres-qualification]
+      lenovo_control_plane_pickup:
+        description: Fixed DESKTOP-RP23OGS control-plane pickup; accepts no commands or targets
+        type: boolean
+        required: true
+        default: false
       inventory_source_sha:
         description: Full reviewed main SHA; required only for native inventory
         type: string
@@ -139,6 +144,7 @@ jobs:
 
   e2e:
     needs: resolve_rules
+    if: inputs.lenovo_control_plane_pickup != true
     name: Pickup on dedicated Desktop runtime runner
     # Native inventory and readback require the Desktop identity label; do not
     # retag another runner or rely on the six shared runtime labels.
@@ -342,6 +348,98 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  lenovo_pickup:
+    needs: resolve_rules
+    if: inputs.lenovo_control_plane_pickup == true && inputs.diagnostic == 'runner-identity'
+    name: Pickup on Lenovo free control plane
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
+    timeout-minutes: 5
+    env:
+      RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
+      CORRELATION_ID: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_REL: artifacts\lenovo-control-plane-pickup\evidence.json
+    steps:
+      - name: Checkout exact runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Checkout canonical operational rules exact SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Bootstrap governed Lenovo session and runner version preflight
+        id: lenovo_session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          if ($env:RUNNER_NAME -ne 'DESKTOP-RP23OGS-runtime' -or
+              [System.Net.Dns]::GetHostName().ToUpperInvariant() -ne 'DESKTOP-RP23OGS') {
+            throw 'LENOVO_PHYSICAL_IDENTITY_MISMATCH'
+          }
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $anchorSha = "${{ github.sha }}"
+          $syncRef = "origin/$env:GITHUB_REF_NAME"
+          $raw = & python $launcher `
+            --policy $policy `
+            --repo $env:GITHUB_WORKSPACE `
+            --session-prefix lenovo-control-plane-pickup `
+            --correlation-id $env:CORRELATION_ID `
+            --expected-head $anchorSha `
+            --sync-ref $syncRef `
+            --require-runner-version-preflight
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = @($raw)[-1] | ConvertFrom-Json
+          if ($data.result -ne 'SESSION_LAUNCH_OK' -or $data.state_validated -ne $true -or
+              $data.head -ne $anchorSha -or $data.runner_version_preflight.ok -ne $true) {
+            throw 'LENOVO_SESSION_LAUNCH_BLOCKED'
+          }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
+
+      - name: Prove Lenovo control-plane pickup through Command Gateway
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.lenovo_session.outputs.target_path }}
+          SESSION_ID: ${{ steps.lenovo_session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.lenovo_session.outputs.anchor_sha }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $probe = Join-Path $env:TARGET_PATH "scripts\lenovo_control_plane_pickup.py"
+          & python $gateway `
+            --policy $policy `
+            --correlation-id $env:CORRELATION_ID `
+            run `
+            --cwd $env:TARGET_PATH `
+            --session-id $env:SESSION_ID `
+            --risk 1 `
+            --timeout 60 `
+            --expected-head $env:ANCHOR_SHA `
+            -- python -B $probe `
+              --expected-source-sha $env:GITHUB_SHA `
+              --evidence-file $env:EVIDENCE_REL
+          exit $LASTEXITCODE
+
+      - name: Upload Lenovo pickup evidence
+        if: always() && steps.lenovo_session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.lenovo_session.outputs.target_path }}/artifacts/lenovo-control-plane-pickup/evidence.json
+          if-no-files-found: error
+          retention-days: 30
+
   queue_watchdog:
     needs: resolve_rules
     name: Dedicated runner queue watchdog
@@ -353,7 +451,8 @@ jobs:
     env:
       RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
       TARGET_RUN_ID: ${{ github.run_id }}
-      TARGET_JOB_NAME: Pickup on dedicated Desktop runtime runner
+      TARGET_JOB_NAME: ${{ inputs.lenovo_control_plane_pickup == true && 'Pickup on Lenovo free control plane' || 'Pickup on dedicated Desktop runtime runner' }}
+      EXPECTED_RUNNER: ${{ inputs.lenovo_control_plane_pickup == true && 'DESKTOP-RP23OGS-runtime' || 'DESKTOP-PDQK954-runtime' }}
       STALL_AFTER_SECONDS: "300"
       CORRELATION_ID: dedicated-runner-watchdog-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
@@ -389,7 +488,7 @@ jobs:
               // A changed status alone (including skipped) is not runner pickup.
               const pickedUp = job && job.run_id === runId
                 && Number.isSafeInteger(job.runner_id) && job.runner_id > 0
-                && job.runner_name === 'DESKTOP-PDQK954-runtime'
+                && job.runner_name === process.env.EXPECTED_RUNNER
                 && ['in_progress', 'completed'].includes(job.status);
               if (pickedUp) {
                 fs.writeFileSync('progress-watchdog-input.json', JSON.stringify({

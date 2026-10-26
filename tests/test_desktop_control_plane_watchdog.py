@@ -26,6 +26,39 @@ def make_runner_home(tmp_path: Path) -> Path:
     return root
 
 
+def test_launcher_adds_release_scripts_to_import_path(tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    scripts = runtime / "releases" / ("a" * 40) / "scripts"
+    scripts.mkdir(parents=True)
+    evidence = tmp_path / "launcher-evidence.txt"
+    (scripts / "pc24x7_host_policy.py").write_text(
+        "MARKER = 'sibling-import-ok'\n", encoding="utf-8"
+    )
+    (scripts / "desktop_control_plane_watchdog.py").write_text(
+        "from pathlib import Path\n"
+        "from pc24x7_host_policy import MARKER\n"
+        f"Path({str(evidence)!r}).write_text(MARKER, encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (runtime / "metadata.json").write_text(
+        json.dumps({"release_root": str(scripts.parent)}), encoding="utf-8"
+    )
+    launcher = m._write_launcher(runtime)
+
+    completed = subprocess.run(
+        [sys.executable, str(launcher)],
+        cwd=runtime,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert evidence.read_text(encoding="utf-8") == "sibling-import-ok"
+    assert "sys.path.insert(0, str(script_dir))" in launcher.read_text(encoding="utf-8")
+
+
 def test_rejects_other_host(monkeypatch) -> None:
     monkeypatch.setattr(m.os, "name", "nt")
     monkeypatch.setattr(m.socket, "gethostname", lambda: "UNKNOWN-HOST")

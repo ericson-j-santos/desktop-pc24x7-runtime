@@ -380,15 +380,7 @@ def stage_target_release(source_root: Path, runtime_root: Path, target_sha: str)
 
 
 def launcher_bytes() -> bytes:
-    return (
-        "from pathlib import Path\n"
-        "import json, runpy, sys\n"
-        "metadata = Path(__file__).with_name('metadata.json')\n"
-        "payload = json.loads(metadata.read_text(encoding='utf-8'))\n"
-        "script = Path(payload['release_root']) / 'scripts' / 'desktop_control_plane_watchdog.py'\n"
-        "sys.argv = [str(script), 'watch', '--metadata', str(metadata)]\n"
-        "runpy.run_path(str(script), run_name='__main__')\n"
-    ).encode("utf-8")
+    return watchdog.launcher_bytes()
 
 
 def restore_active_files(runtime_root: Path, backup_root: Path) -> None:

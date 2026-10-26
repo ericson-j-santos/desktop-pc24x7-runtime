@@ -52,3 +52,18 @@ def test_canary_queue_is_bounded_fail_closed() -> None:
     assert "actions: write" in raw
     assert "cancelWorkflowRun" in raw
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in raw
+
+
+def test_lenovo_pickup_is_exact_sha_host_runner_and_artifact_bound() -> None:
+    raw = workflow_text()
+    assert "lenovo_control_plane_pickup:" in raw
+    assert "inputs.lenovo_control_plane_pickup == true" in raw
+    assert "inputs.diagnostic == 'runner-identity'" in raw
+    assert "Pickup on Lenovo free control plane" in raw
+    assert "desktop-rp23ogs" in raw
+    assert "DESKTOP-RP23OGS-runtime" in raw
+    assert "LENOVO_PHYSICAL_IDENTITY_MISMATCH" in raw
+    assert "scripts\\lenovo_control_plane_pickup.py" in raw
+    assert "--expected-source-sha $env:GITHUB_SHA" in raw
+    assert "lenovo-control-plane-pickup/evidence.json" in raw
+    assert "process.env.EXPECTED_RUNNER" in raw
