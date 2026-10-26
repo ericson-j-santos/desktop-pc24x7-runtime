@@ -13,3 +13,9 @@ SHA rule pin: 92e8b5c87684212964b24ff3597f9f9f8aea49a6. Correlation: `issue8-del
 The hosted contract also installs pinned PyYAML. Admission now enforces
 exactly five authorized paths including the CI syntax check, and GitHub GET
 requests use only the existing bounded token supplied through Actions env.
+
+## Result of first Dell issue-bound probe
+
+Run [#40368039499](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40368039499) established the authenticated issue #8, physical runner ID 2, Session Launcher and Gateway, and actually invoked Qwen. It then blocked with `issue8_real_rag_not_verified` (the original combined condition did not isolate refusal, head drift, model process, readback or call count). Independent source readback was skipped as required.
+
+This revision **does not relax** the RAG acceptance. It emits one of the finite reason codes under `issue8_rag_*`, including a model decision of insufficient evidence, while keeping the workflow fail-closed. The previous one-shot marker is consumed. Only a separate owner-only body transition to `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE`, after SHA-specific Windows/Linux CI and renewed admission, authorizes another physical diagnostic run. Do not retry if no material change was made.

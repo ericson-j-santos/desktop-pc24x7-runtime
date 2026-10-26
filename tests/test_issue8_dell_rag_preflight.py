@@ -189,13 +189,13 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "DESKTOP-PDQK954-runtime" in t
@@ -230,7 +230,7 @@ def test_dell_workflow_yaml_parses_and_corruption_fails(tmp_path):
     assert {"contract", "admission", "physical", "watchdog", "independent_readback"} <= set(parsed["jobs"])
     assert "DESKTOP-PDQK954-runtime" in raw
     assert "runner_id)===2" in raw and "runner_id!==2" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE" in raw
     assert "Python compile and tests" in raw and "Portable Linux compile and tests" in raw
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED" in raw
     assert "contents: write" not in raw
@@ -264,3 +264,43 @@ def test_hosted_admission_rejects_cross_host_scope_and_has_parser():
     assert "GITHUB_TOKEN: " in raw
     assert "issue8-qwen-native-rag-readonly.yml" not in raw
     assert "ISSUE8_NATIVE_RAG_NOTERI.md" not in raw
+
+@pytest.mark.parametrize("field,value,reason", [
+    ("schema_version", "worker.rag.evidence-v1", "issue8_rag_identity_invalid"),
+    ("issue_number", 9, "issue8_rag_identity_invalid"),
+    ("head_sha", "0"*40, "issue8_rag_head_mismatch"),
+    ("base_sha", "0"*40, "issue8_rag_head_mismatch"),
+    ("state", "insufficient_evidence", "issue8_rag_insufficient_evidence"),
+    ("model_process_verified", False, "issue8_rag_model_process_unverified"),
+    ("issue_head_readback_stable", False, "issue8_rag_source_readback_unverified"),
+    ("execution_authorized", True, "issue8_rag_readonly_boundary_invalid"),
+    ("state_changed", True, "issue8_rag_readonly_boundary_invalid"),
+    ("model_calls", 1, "issue8_rag_model_calls_invalid"),
+    ("model_calls", True, "issue8_rag_model_calls_invalid"),
+])
+def test_issue8_rag_receipt_rejections_remain_fail_closed(field,value,reason):
+    m=module()
+    positive={
+        "schema_version":"worker.rag.issue-context-v1",
+        "issue_number":m.ISSUE_NUMBER,
+        "head_sha":m.WORKER_SHA,
+        "base_sha":m.WORKER_SHA,
+        "state":"supported",
+        "model_process_verified":True,
+        "issue_head_readback_stable":True,
+        "execution_authorized":False,
+        "state_changed":False,
+        "model_calls":2,
+    }
+    m.attest_issue_rag_receipt(positive)
+    bad=dict(positive)
+    bad[field]=value
+    with pytest.raises(m.PreflightBlocked,match="^"+reason+"$"):
+        m.attest_issue_rag_receipt(bad)
+
+
+def test_recovery_uses_new_marker_only():
+    content=WORKFLOW.read_text(encoding="utf-8")
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE" not in content
+    assert "issue8_rag_insufficient_evidence" in SCRIPT.read_text(encoding="utf-8")

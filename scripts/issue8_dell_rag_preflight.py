@@ -210,6 +210,33 @@ def read_original_bytes(reader: object, path: str, sha: str) -> bytes:
         raise PreflightBlocked("issue8_independent_api_unavailable") from None
 
 
+def attest_issue_rag_receipt(receipt: object) -> None:
+    """Distinguish trusted failure categories; never promote refusal to success.
+
+    This only checks the *shape and process* of a real model result. Actual
+    GitHub source bytes/citation are independently verified afterwards.
+    """
+    require(type(receipt) is dict, "issue8_rag_schema_invalid")
+    require(receipt.get("schema_version") == "worker.rag.issue-context-v1"
+            and receipt.get("issue_number") == ISSUE_NUMBER,
+            "issue8_rag_identity_invalid")
+    require(receipt.get("head_sha") == WORKER_SHA
+            and receipt.get("base_sha") == WORKER_SHA,
+            "issue8_rag_head_mismatch")
+    require(receipt.get("state") == "supported",
+            "issue8_rag_insufficient_evidence")
+    require(receipt.get("model_process_verified") is True,
+            "issue8_rag_model_process_unverified")
+    require(receipt.get("issue_head_readback_stable") is True,
+            "issue8_rag_source_readback_unverified")
+    require(receipt.get("execution_authorized") is False
+            and receipt.get("state_changed") is False,
+            "issue8_rag_readonly_boundary_invalid")
+    calls = receipt.get("model_calls")
+    require(type(calls) is int and 2 <= calls <= 4,
+            "issue8_rag_model_calls_invalid")
+
+
 def run(env: dict[str, str]) -> dict[str, object]:
     _set_phase('identity')
     identity = validate_environment(env)
@@ -256,18 +283,7 @@ def run(env: dict[str, str]) -> dict[str, object]:
     NativeStructuredOllama.no_cloud()
     _set_phase('research')
     receipt = research_issue(approved, github_token=env.get("GITHUB_TOKEN") or None)
-    require(type(receipt) is dict and
-            receipt.get("schema_version") == "worker.rag.issue-context-v1"
-            and receipt.get("head_sha") == WORKER_SHA
-            and receipt.get("issue_number") == ISSUE_NUMBER
-            and receipt.get("state") == "supported"
-            and receipt.get("model_process_verified") is True
-            and receipt.get("issue_head_readback_stable") is True
-            and receipt.get("execution_authorized") is False
-            and receipt.get("state_changed") is False
-            and type(receipt.get("model_calls")) is int
-            and 2 <= receipt["model_calls"] <= 4,
-            "issue8_real_rag_not_verified")
+    attest_issue_rag_receipt(receipt)
 
     # Separate API client validates the exact cited bytes after inference.
     _set_phase('readback')
