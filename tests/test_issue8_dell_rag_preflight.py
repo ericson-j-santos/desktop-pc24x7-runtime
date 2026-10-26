@@ -189,13 +189,13 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "DESKTOP-PDQK954-runtime" in t
@@ -230,9 +230,12 @@ def test_dell_workflow_yaml_parses_and_corruption_fails(tmp_path):
     assert {"contract", "admission", "physical", "watchdog", "independent_readback"} <= set(parsed["jobs"])
     assert "DESKTOP-PDQK954-runtime" in raw
     assert "runner_id)===2" in raw and "runner_id!==2" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE" in raw
     assert "Python compile and tests" in raw and "Portable Linux compile and tests" in raw
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED" in raw
+    assert "const bytes=fs.readFileSync" in raw
+    assert "bytes.length>10000" in raw
+    assert "raw.charCodeAt(0)===0xFEFF" in raw
     assert "contents: write" not in raw
     assert "ollama pull" not in raw.lower()
     with pytest.raises(yaml.YAMLError):
@@ -301,7 +304,7 @@ def test_issue8_rag_receipt_rejections_remain_fail_closed(field,value,reason):
 
 def test_recovery_uses_new_marker_only():
     content=WORKFLOW.read_text(encoding="utf-8")
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE" not in content
     assert "issue8_rag_insufficient_evidence" in SCRIPT.read_text(encoding="utf-8")
 
@@ -357,7 +360,7 @@ const handler=__HELPER__;
     assert "const workerChecks=await boundedAdmissionGet" in raw
     assert "const comment=await boundedReadbackGet" in raw
     assert "ISSUE8_READBACK_SOURCE_NOT_ALLOWLISTED" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE" in raw
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE" not in raw
 
 
@@ -438,5 +441,5 @@ def test_workflow_only_emits_bounded_diagnostic_and_keeps_failure():
     assert "issue8.rag.refusal-diagnostic-v1" in raw
     assert "model_declined_candidate" in raw and "no_candidate_snippet" in raw
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_SOURCE_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE" in raw
     assert "contents: write" not in raw and "ollama pull" not in raw.lower()
