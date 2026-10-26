@@ -34,7 +34,7 @@ jobs:
           python-version: '3.12'
       - name: Positive/negative preflight tests
         run: |
-          python -m pip install --disable-pip-version-check pytest==8.4.2
+          python -m pip install --disable-pip-version-check pytest==8.4.2 PyYAML==6.0.3
           python -m compileall -q scripts/issue8_dell_rag_preflight.py tests/test_issue8_dell_rag_preflight.py
           python -m pytest -q tests/test_issue8_dell_rag_preflight.py
 
@@ -91,10 +91,11 @@ jobs:
               owner,repo:context.repo.repo,pull_number:d.number,per_page:100
             })).data;
             const allowed=new Set([
-              '.github/workflows/issue8-qwen-native-rag-readonly.yml',
+              '.github/workflows/issue8-dell-native-rag-readonly.yml',
               'scripts/issue8_dell_rag_preflight.py',
               'tests/test_issue8_dell_rag_preflight.py',
-              'docs/ISSUE8_NATIVE_RAG_NOTERI.md'
+              'docs/ISSUE8_DELL_NATIVE_RAG.md',
+              '.github/workflows/ci.yml'
             ]);
             if (files.length!==allowed.size ||
                 !files.every(f=>allowed.has(f.filename) &&

@@ -9,3 +9,7 @@ Gate: PR draft, one-shot body marker `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE
 No Docker on Dell, no cloud inference, no service install, no patch, no CAS write, no model-directed command, no merge/deploy. A failure requires evidence-based repair, not a blind retry. Even full success leaves the next task pending: one real Qwen patch -> CAS git bundle -> independent validator 42/42 + 52/52 -> exactly one agent-generated draft PR -> readback/replay.
 
 SHA rule pin: 92e8b5c87684212964b24ff3597f9f9f8aea49a6. Correlation: `issue8-dell-native-rag-20261026`.
+
+The hosted contract also installs pinned PyYAML. Admission now enforces
+exactly five authorized paths including the CI syntax check, and GitHub GET
+requests use only the existing bounded token supplied through Actions env.

@@ -248,3 +248,19 @@ def test_wrong_computer_blocks_before_checkout(tmp_path, monkeypatch):
     with pytest.raises(m.PreflightBlocked, match="issue8_wrong_physical_computer"):
         m.run(env)
     assert calls==[]
+
+def test_hosted_admission_rejects_cross_host_scope_and_has_parser():
+    raw=WORKFLOW.read_text(encoding="utf-8")
+    paths=[
+        "'.github/workflows/issue8-dell-native-rag-readonly.yml'",
+        "'scripts/issue8_dell_rag_preflight.py'",
+        "'tests/test_issue8_dell_rag_preflight.py'",
+        "'docs/ISSUE8_DELL_NATIVE_RAG.md'",
+        "'.github/workflows/ci.yml'",
+    ]
+    assert all(raw.count(path)==1 for path in paths)
+    assert "files.length!==allowed.size" in raw
+    assert "PyYAML==6.0.3" in raw
+    assert "GITHUB_TOKEN: " in raw
+    assert "issue8-qwen-native-rag-readonly.yml" not in raw
+    assert "ISSUE8_NATIVE_RAG_NOTERI.md" not in raw
