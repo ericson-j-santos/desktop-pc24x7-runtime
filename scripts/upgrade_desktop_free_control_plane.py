@@ -59,9 +59,10 @@ def inspect_active_installation(
 
     runtime_root = watchdog.default_runtime_root().resolve()
     metadata_path = runtime_root / "metadata.json"
-    installation = watchdog.load_installed_metadata(
-        metadata_path, require_current_release=True
-    )
+    # This upgrader intentionally executes from the clean target checkout, not
+    # from the currently installed release.  The immutable installed release is
+    # still proven below by its metadata path and pinned file digests.
+    installation = watchdog.load_installed_metadata(metadata_path)
     metadata = dict(installation["metadata"])
     if repair.require_sha(str(metadata.get("source_sha") or ""), "installed_source_sha_invalid") != previous:
         raise UpgradeBlocked("installed_source_sha_changed")

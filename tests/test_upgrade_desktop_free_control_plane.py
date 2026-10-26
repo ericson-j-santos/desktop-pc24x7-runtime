@@ -146,3 +146,4 @@ def test_upgrade_contract_does_not_register_runner_task_or_credentials() -> None
     assert "registration-token" not in text
     assert "TODO Gateway" not in text
     assert '"github_pickup_proven": False' in text
+    assert "require_current_release=True" not in text
