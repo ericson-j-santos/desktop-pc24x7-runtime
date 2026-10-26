@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_IDENTITY_DIAGNOSTIC_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_IDENTITY_DIAGNOSTIC_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -107,7 +107,7 @@ jobs:
                 d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_BOM_READBACK_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_IDENTITY_DIAGNOSTIC_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -442,26 +442,36 @@ jobs:
             const owner='ericson-j-santos',worker='engineering-worker-pool';
             const workerSHA='be69b27455f99606a03ce5cba6ca809e1082f2b4';
             const thisSHA=context.payload.pull_request.head.sha;
-            if (r.result!=='ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' ||
-                r.schema_version!=='issue8.native.rag.readonly-v1' ||
-                r.issue_number!==8 || r.worker_sha!==workerSHA ||
-                r.runtime_sha!==thisSHA ||
-                r.rules_sha!=='8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8' ||
-                r.model_digest_prefix!=='dae161e27b0e' ||
-                r.baseline_total!==42 || !Number.isInteger(r.baseline_passed) ||
-                r.baseline_passed<0 || r.baseline_passed>=42 ||
-                !Number.isInteger(r.model_calls) ||
-                r.model_calls<2||r.model_calls>4||
-                !/^[0-9a-f]{64}$/.test(r.source_sha256||'') ||
-                !/^[0-9a-f]{64}$/.test(r.receipt_sha256||'') ||
-                r.session_result!=='SESSION_LAUNCH_OK' ||
-                !/^[0-9a-f]{64}$/.test(r.snapshot_sha256||'') ||
-                r.run_id!==String(context.runId) ||
-                r.run_attempt!==String(context.runAttempt) ||
-                r.independent_git_source_readback!==true ||
-                r.cas_write!==false || r.draft_pr_created!==false ||
-                r.model_commands_authorized!==false || r.state_changed!==false) {
-              core.setFailed('ISSUE8_RECEIPT_IDENTITY_INVALID');return;
+            const identityChecks={
+              result:r.result==='ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED',
+              schema:r.schema_version==='issue8.native.rag.readonly-v1',
+              issue:r.issue_number===8,
+              worker:r.worker_sha===workerSHA,
+              runtime:r.runtime_sha===thisSHA,
+              rules:r.rules_sha==='8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8',
+              model_digest:r.model_digest_prefix==='dae161e27b0e',
+              baseline_total:r.baseline_total===42,
+              baseline_passed:Number.isInteger(r.baseline_passed)&&
+                r.baseline_passed>=0&&r.baseline_passed<42,
+              model_calls:Number.isInteger(r.model_calls)&&
+                r.model_calls>=2&&r.model_calls<=4,
+              source_sha:/^[0-9a-f]{64}$/.test(r.source_sha256||''),
+              receipt_sha:/^[0-9a-f]{64}$/.test(r.receipt_sha256||''),
+              session:r.session_result==='SESSION_LAUNCH_OK',
+              snapshot:/^[0-9a-f]{64}$/.test(r.snapshot_sha256||''),
+              run_id:r.run_id===String(context.runId),
+              run_attempt:r.run_attempt===String(context.runAttempt),
+              independent_readback:r.independent_git_source_readback===true,
+              cas_write:r.cas_write===false,
+              draft_pr:r.draft_pr_created===false,
+              model_commands:r.model_commands_authorized===false,
+              state_changed:r.state_changed===false
+            };
+            const identityFailures=Object.entries(identityChecks)
+              .filter(([,ok])=>!ok).map(([name])=>name);
+            if (identityFailures.length) {
+              core.setFailed('ISSUE8_RECEIPT_IDENTITY_INVALID_'+
+                identityFailures.join('_'));return;
             }
             // Independent hosted readback also fails closed on GitHub API faults.
             async function boundedReadbackGet(label, read, pause=ms=>new Promise(done=>setTimeout(done,ms))) {
