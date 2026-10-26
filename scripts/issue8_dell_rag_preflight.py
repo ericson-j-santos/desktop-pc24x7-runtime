@@ -21,13 +21,12 @@ from pathlib import Path
 
 HOST_REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
-WORKER_SHA = "74035488dac6938bfc14957621e86168003cd0c6"
-WORKER_CODE_SHA = "f100717c4f71f831a4b34d7dff3909d50f42ed65"
+WORKER_SHA = "047c77b6b867ff5d489bd74f6fd80989719ab85e"
 RULES_SHA = "92e8b5c87684212964b24ff3597f9f9f8aea49a6"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
-OWNER_COMMENT_ID = 6404265064
+OWNER_COMMENT_ID = 6423646539
 MODEL_PIN = "dae161e27b0e"
 SHA40 = re.compile(r"[a-f0-9]{40}\Z")
 SHA64 = re.compile(r"[a-f0-9]{64}\Z")
@@ -88,7 +87,6 @@ def validate_environment(env: dict[str, str]) -> dict[str, str]:
             and attempt.isdigit() and 1 <= int(attempt) <= 20,
             "issue8_run_identity_invalid")
     require(env.get("WORKER_POOL_SHA") == WORKER_SHA
-            and env.get("WORKER_CODE_SHA") == WORKER_CODE_SHA
             and env.get("RULES_SHA") == RULES_SHA,
             "issue8_pinned_source_mismatch")
     workspace = env.get("GITHUB_WORKSPACE", "")
@@ -162,7 +160,6 @@ def verify_pinned_checkout(env: dict[str, str], identity: dict[str, str]) -> tup
     for repo, pinned in (
         (host, identity["runtime_sha"]),
         (worker, WORKER_SHA),
-        (workspace / "_worker_code", WORKER_CODE_SHA),
         (rules, RULES_SHA),
     ):
         require(read_git(repo, "rev-parse", "HEAD") == pinned,
@@ -246,13 +243,7 @@ def run(env: dict[str, str]) -> dict[str, object]:
     _set_phase('checkouts')
     worker, original = verify_pinned_checkout(env, identity)
     sys.dont_write_bytecode = True
-    # Run the CI-validated, immutable PT-BR issue RAG implementation.
-    # The authorized issue, accepted source and published base remain
-    # separately pinned to WORKER_SHA; no code from the PR is published.
-    sys.path.insert(0, str(Path(identity["workspace"]) / "_worker_code"))
-    code_root=Path(identity["workspace"]) / "_worker_code"
-    require(read_git(code_root, "rev-parse", "HEAD") == WORKER_CODE_SHA,
-            "issue8_reviewed_code_sha_invalid")
+    sys.path.insert(0, str(worker))
     _set_phase('agent_core')
     agent = Path(identity["workspace"]) / "_agent_core"
     require(read_git(agent, "rev-parse", "HEAD")
@@ -305,14 +296,11 @@ def run(env: dict[str, str]) -> dict[str, object]:
     require(current == WORKER_SHA, "issue8_main_changed_after_rag")
     _, post_source = verify_pinned_checkout(env, identity)
     require(post_source == original, "issue8_worker_modified")
-    require(read_git(Path(identity["workspace"]) / "_worker_code", "rev-parse", "HEAD") == WORKER_CODE_SHA,
-            "issue8_reviewed_code_sha_changed")
     result = {
         "result": "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED",
         "schema_version": "issue8.native.rag.readonly-v1",
         "issue_number": ISSUE_NUMBER,
         "worker_sha": WORKER_SHA,
-        "worker_code_sha": WORKER_CODE_SHA,
         "runtime_sha": identity["runtime_sha"],
         "rules_sha": RULES_SHA,
         "model_calls": receipt["model_calls"],

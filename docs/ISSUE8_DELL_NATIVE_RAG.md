@@ -1,6 +1,6 @@
 # Issue #8 — Dell native Qwen RAG preflight
 
-This is a **read-only physical qualification** of the existing authorized issue #8. It does not implement or certify an autonomous patch, CAS publication or draft PR. It reuses `engineering-worker-pool@74035488dac6938bfc14957621e86168003cd0c6`, official owner authorization comment #6404265064, and `agent-core@1fc032d4c412bdb4ed202cf1193caf0cb49490ce`.
+This is a **read-only physical qualification** of the existing authorized issue #8. It does not implement or certify an autonomous patch, CAS publication or draft PR. It reuses `engineering-worker-pool@047c77b6b867ff5d489bd74f6fd80989719ab85e`, official owner authorization comment #6423646539, and `agent-core@1fc032d4c412bdb4ed202cf1193caf0cb49490ce`.
 
 Noteri's latest physical canary [#40247590037](https://github.com/ericson-j-santos/noteri-runtime/actions/runs/40247590037) was fail-closed with `native_model_ambiguous_or_missing`. Do not install, rename or download a model to bypass attestation. Dell successfully executed native Qwen with the matching GGUF digest in [#40221994125](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40221994125). This experiment qualifies *issue-specific* evidence on that alternative host instead of repeating Noteri's known blocker.
 
@@ -18,19 +18,18 @@ requests use only the existing bounded token supplied through Actions env.
 
 Run [#40368039499](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40368039499) established the authenticated issue #8, physical runner ID 2, Session Launcher and Gateway, and actually invoked Qwen. It then blocked with `issue8_real_rag_not_verified` (the original combined condition did not isolate refusal, head drift, model process, readback or call count). Independent source readback was skipped as required.
 
-This revision **does not relax** the RAG acceptance. It emits one of the finite reason codes under `issue8_rag_*`, including a model decision of insufficient evidence, while keeping the workflow fail-closed. The previous one-shot marker is consumed. Only a separate owner-only body transition to `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE`, after SHA-specific Windows/Linux CI and renewed admission, authorizes another physical diagnostic run. Do not retry if no material change was made.
+This revision **does not relax** the RAG acceptance. It emits one of the finite reason codes under `issue8_rag_*`, including a model decision of insufficient evidence, while keeping the workflow fail-closed. The previous one-shot marker is consumed. Only a separate owner-only body transition to `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE`, after SHA-specific Windows/Linux CI and renewed admission, authorizes another physical diagnostic run. Do not retry if no material change was made.
 
 
-## Qualificação da correção RAG PT-BR sem mudar a main autorizada
+## Próximo canário — correção PT-BR integrada em SHA autorizado
 
-O run físico Dell #40369704989 executou Qwen com a issue #8, mas retornou
-`issue8_rag_insufficient_evidence`. A PR Worker Pool #56
-(`f100717c4f71f831a4b34d7dff3909d50f42ed65`) corrige o ranking de candidatos português sem
-falsificar a decisão do modelo. Este canário faz dois checkouts separados:
-`_worker_pool@74035488dac6938bfc14957621e86168003cd0c6` retém a
-fonte/autorização BASE da issue, e `_worker_code@f100717c4f71f831a4b34d7dff3909d50f42ed65`
-contém apenas código revisado e testado pela CI para pesquisa RAG. O Hosted
-admission confirma PR #56, diff de apenas dois arquivos e os checks obrigatórios
-de ambos os SHAs. O readback registra `worker_code_sha` e não declara o
-código PR #56 implantado ou autorizado para publicação. O modelo continua a
-poder retornar insuficiência e o Gateway falha fechado.
+A pesquisa RAG da issue #8 no Dell falhou com evidência insuficiente no run
+#40369704989. A PR Worker Pool #56 corrige apenas a pontuação dos trechos
+portugueses; foi integrada à main no SHA `047c77b6b867ff5d489bd74f6fd80989719ab85e`, com
+blob `d9b348f6f1e5c71f182940f4ec03fb94268d28c6` de `app/issue_rag_research.py`.
+A fonte `app/portfolio_bridge.py` mantém o Git blob anterior, e o
+proprietário publicou a autorização SHA-bound #6423646539 específica da nova
+main. Este canário usa somente o código integrado na main e exige readback
+da versão de pesquisa, sem segundo checkout experimental. O marcador físico
+único é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE`. A recusa do modelo continua bloqueando qualquer
+aprovação, PR, CAS, merge ou deploy.

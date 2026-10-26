@@ -45,7 +45,6 @@ def valid_env(m, workspace):
         "CORRELATION_ID": "issue8-dell-12345-1",
         "EXPECTED_RUNTIME_SHA": "b"*40,
         "WORKER_POOL_SHA": m.WORKER_SHA,
-        "WORKER_CODE_SHA": m.WORKER_CODE_SHA,
         "RULES_SHA": m.RULES_SHA,
         "GITHUB_RUN_ID": "12345",
         "GITHUB_RUN_ATTEMPT": "1",
@@ -60,8 +59,8 @@ def test_positive_host_identity_does_not_authorize_execution(tmp_path):
     assert a["runtime_sha"]=="b"*40
     assert a["run_id"]=="12345"
     assert m.MODEL_PIN=="dae161e27b0e"
-    assert m.WORKER_SHA=="74035488dac6938bfc14957621e86168003cd0c6"
-    assert m.OWNER_COMMENT_ID==6404265064
+    assert m.WORKER_SHA=="047c77b6b867ff5d489bd74f6fd80989719ab85e"
+    assert m.OWNER_COMMENT_ID==6423646539
 
 
 @pytest.mark.parametrize("field,value",[
@@ -78,7 +77,6 @@ def test_positive_host_identity_does_not_authorize_execution(tmp_path):
     ("CORRELATION_ID","bad; injection"),
     ("EXPECTED_RUNTIME_SHA","abc"),
     ("WORKER_POOL_SHA","c"*40),
-    ("WORKER_CODE_SHA","c"*40),
     ("RULES_SHA","c"*40),
     ("GITHUB_RUN_ID","unsafe"),
     ("GITHUB_RUN_ATTEMPT","0"),
@@ -131,7 +129,6 @@ def test_source_blob_revalidated_before_any_model(monkeypatch,tmp_path):
     (workspace/"session"/"scripts").mkdir(parents=True)
     (workspace/"session"/"scripts"/"issue8_dell_rag_preflight.py").write_text("pass\n")
     (workspace/"_worker_pool"/"app").mkdir(parents=True)
-    (workspace/"_worker_code").mkdir()
     (workspace/"_rules").mkdir()
     content=b"from source at pinned SHA\n"
     (workspace/"_worker_pool"/m.SOURCE_PATH).write_bytes(content)
@@ -144,9 +141,7 @@ def test_source_blob_revalidated_before_any_model(monkeypatch,tmp_path):
         if args==("status","--porcelain","--untracked-files=no"):
             return ""
         return (env["EXPECTED_RUNTIME_SHA"] if root.name=="session"
-                else m.WORKER_SHA if root.name=="_worker_pool"
-                else m.WORKER_CODE_SHA if root.name=="_worker_code"
-                else m.RULES_SHA)
+                else m.WORKER_SHA if root.name=="_worker_pool" else m.RULES_SHA)
     monkeypatch.setattr(m,"read_git",get)
     identity=m.validate_environment(env)
     worker,raw=m.verify_pinned_checkout(env,identity)
@@ -194,17 +189,17 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
     assert "types: [edited]" in t
     assert "github.actor == 'ericson-j-santos'" in t
     assert "github.event.changes.body.from != null" in t
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_SOURCE_ONCE" in t
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE" in t
     assert "ISSUE8_SANITIZED_FAILURE=" in t
     assert "^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$" in t
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED" in t
     assert "gatewayStatus -ne 0" in t
     assert "2>&1" in t
-    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_SOURCE_ONCE')" in t
+    assert "!contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE')" in t
     assert "throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'" in t
     assert "runner_name" in t
     assert "DESKTOP-PDQK954-runtime" in t
-    assert "6404265064" in t
+    assert "6423646539" in t
     assert m_sha_in_text(t)
     assert "--require-runner-version-preflight" in t
     assert "SESSION_LAUNCH_OK" in t
@@ -220,7 +215,7 @@ def test_workflow_has_gated_one_shot_routing_and_no_write_permissions():
 
 
 def m_sha_in_text(t):
-    return ("74035488dac6938bfc14957621e86168003cd0c6" in t
+    return ("047c77b6b867ff5d489bd74f6fd80989719ab85e" in t
             and "92e8b5c87684212964b24ff3597f9f9f8aea49a6" in t)
 
 
@@ -235,7 +230,7 @@ def test_dell_workflow_yaml_parses_and_corruption_fails(tmp_path):
     assert {"contract", "admission", "physical", "watchdog", "independent_readback"} <= set(parsed["jobs"])
     assert "DESKTOP-PDQK954-runtime" in raw
     assert "runner_id)===2" in raw and "runner_id!==2" in raw
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_SOURCE_ONCE" in raw
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE" in raw
     assert "Python compile and tests" in raw and "Portable Linux compile and tests" in raw
     assert "ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED" in raw
     assert "contents: write" not in raw
@@ -306,29 +301,16 @@ def test_issue8_rag_receipt_rejections_remain_fail_closed(field,value,reason):
 
 def test_recovery_uses_new_marker_only():
     content=WORKFLOW.read_text(encoding="utf-8")
-    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_SOURCE_ONCE" in content
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE" in content
     assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE" not in content
     assert "issue8_rag_insufficient_evidence" in SCRIPT.read_text(encoding="utf-8")
 
-def test_unreviewed_worker_code_sha_blocks_before_import_or_model(tmp_path, monkeypatch):
+def test_merged_ptbr_source_is_exactly_authenticated_and_pinned():
     m=module()
-    env=valid_env(m,tmp_path)
-    calls=[]
-    monkeypatch.setattr(m,"verify_pinned_checkout",lambda *_: (calls.append("sources") or (tmp_path,b"orig")))
-    monkeypatch.setattr(m,"read_git",lambda *_: "0"*40)
-    (tmp_path/"_worker_code").mkdir()
-    with pytest.raises(m.PreflightBlocked,match="issue8_reviewed_code_sha_invalid"):
-        m.run(env)
-    assert calls==["sources"]
-
-
-def test_reviewed_code_and_base_are_distinct_static_shas():
-    m=module()
-    assert m.WORKER_CODE_SHA=="f100717c4f71f831a4b34d7dff3909d50f42ed65"
-    assert m.WORKER_SHA=="74035488dac6938bfc14957621e86168003cd0c6"
-    assert m.WORKER_CODE_SHA!=m.WORKER_SHA
-    raw=WORKFLOW.read_text(encoding="utf-8")
-    assert "path: _worker_pool" in raw and "path: _worker_code" in raw
-    assert "ISSUE8_REVIEWED_RAG_CI_NOT_PROVED" in raw
-    assert "ISSUE8_REVIEWED_RAG_CODE_DRIFT" in raw
-    assert "reviewed.data.head.sha" in raw
+    assert m.WORKER_SHA=="047c77b6b867ff5d489bd74f6fd80989719ab85e"
+    assert m.OWNER_COMMENT_ID==6423646539
+    yml=WORKFLOW.read_text(encoding="utf-8")
+    assert "ragImplementation.data.sha" in yml
+    assert "implementation.data.sha" in yml
+    assert yml.count("d9b348f6f1e5c71f182940f4ec03fb94268d28c6")>=2
+    assert "OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_REASON_V2_ONCE" not in yml
