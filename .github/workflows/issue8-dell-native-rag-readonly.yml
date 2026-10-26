@@ -1,0 +1,458 @@
+name: Issue8 Qwen RAG Dell Physical DEV (read-only)
+
+on:
+  pull_request:
+    types: [edited]
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: issue8-dell-rag-physical-${{ github.event.pull_request.head.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Issue8 read-only contract
+    if: >-
+      github.event.action == 'edited' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout exact PR SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Positive/negative preflight tests
+        run: |
+          python -m pip install --disable-pip-version-check pytest==8.4.2
+          python -m compileall -q scripts/issue8_dell_rag_preflight.py tests/test_issue8_dell_rag_preflight.py
+          python -m pytest -q tests/test_issue8_dell_rag_preflight.py
+
+  admission:
+    name: Issue8 owner SHA and completed CI admission
+    needs: contract
+    if: >-
+      needs.contract.result == 'success' &&
+      github.event.action == 'edited' &&
+      github.actor == 'ericson-j-santos' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
+      github.event.pull_request.draft == true &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE') &&
+      github.event.changes.body.from != null &&
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE')
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Independently admit live issue, owner, source and exact SHAs
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const owner='ericson-j-santos', worker='engineering-worker-pool';
+            const current=context.payload.pull_request;
+            const sha=current.head.sha;
+            const [pr,main,wm,rule,ownerComment,issue,file,dellChecks,workerChecks]=await Promise.all([
+              github.rest.pulls.get({owner,repo:context.repo.repo,pull_number:current.number}),
+              github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
+              github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
+              github.rest.repos.getBranch({owner,repo:'chatgpt-operational-rules',branch:'main'}),
+              github.rest.issues.getComment({owner,repo:worker,comment_id:6404265064}),
+              github.rest.issues.get({owner,repo:worker,issue_number:8}),
+              github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'74035488dac6938bfc14957621e86168003cd0c6'}),
+              github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}),
+              github.rest.checks.listForRef({owner,repo:worker,ref:'74035488dac6938bfc14957621e86168003cd0c6',per_page:100})
+            ]);
+            const d=pr.data;
+            if (d.state!=='open' || !d.draft ||
+                d.user?.login!==owner ||
+                d.head.repo?.full_name!==owner+'/'+context.repo.repo ||
+                d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
+                d.head.sha!==sha || d.base.ref!=='main' ||
+                d.base.sha!==main.data.commit.sha ||
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_ONCE')) {
+              core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
+            }
+            const files=(await github.rest.pulls.listFiles({
+              owner,repo:context.repo.repo,pull_number:d.number,per_page:100
+            })).data;
+            const allowed=new Set([
+              '.github/workflows/issue8-qwen-native-rag-readonly.yml',
+              'scripts/issue8_dell_rag_preflight.py',
+              'tests/test_issue8_dell_rag_preflight.py',
+              'docs/ISSUE8_NATIVE_RAG_NOTERI.md'
+            ]);
+            if (files.length!==allowed.size ||
+                !files.every(f=>allowed.has(f.filename) &&
+                  ['added','modified'].includes(f.status))) {
+              core.setFailed('ISSUE8_NOTERI_PR_SCOPE_CHANGED');return;
+            }
+            if (wm.data.commit.sha!=='74035488dac6938bfc14957621e86168003cd0c6' ||
+                rule.data.commit.sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6' ||
+                issue.data.state!=='open' || !!issue.data.pull_request ||
+                ownerComment.data.user?.login!==owner ||
+                ownerComment.data.author_association!=='OWNER' ||
+                ownerComment.data.issue_url!=='https://api.github.com/repos/'+owner+'/'+worker+'/issues/8' ||
+                ownerComment.data.body!=='/local-agent authorize bridge.property.v1 sha:74035488dac6938bfc14957621e86168003cd0c6' ||
+                file.data.type!=='file' ||
+                file.data.sha!=='d9a25c574163c49f695e774609949160d94f4490') {
+              core.setFailed('ISSUE8_NOTERI_OWNER_OR_SOURCE_DRIFT');return;
+            }
+            const passed=(set,name,ref)=>set.data.check_runs.some(c=>
+              c.name===name&&c.head_sha===ref&&c.status==='completed'&&
+              c.conclusion==='success'&&c.started_at&&c.completed_at);
+            if (!['Python compile and tests','Portable Linux compile and tests'].every(n=>passed(dellChecks,n,sha)) ||
+                !['test','candidate-canary'].every(n=>
+                  passed(workerChecks,n,'74035488dac6938bfc14957621e86168003cd0c6'))) {
+              core.setFailed('ISSUE8_NOTERI_CURRENT_CI_NOT_EXECUTED');return;
+            }
+            core.info(JSON.stringify({
+              result:'ISSUE8_NOTERI_PHYSICAL_ADMISSION_OK',
+              host_sha:sha,worker_sha:wm.data.commit.sha,
+              source_sha:file.data.sha,owner_comment_id:ownerComment.data.id
+            }));
+
+  physical:
+    name: Dell Qwen issue8 native RAG read-only
+    needs: admission
+    if: needs.admission.result == 'success'
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
+    timeout-minutes: 13
+    permissions:
+      contents: read
+    env:
+      EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
+      WORKER_POOL_SHA: 74035488dac6938bfc14957621e86168003cd0c6
+      RULES_SHA: 92e8b5c87684212964b24ff3597f9f9f8aea49a6
+      AGENT_CORE_SHA: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
+      CORRELATION_ID: issue8-dell-${{ github.run_id }}-${{ github.run_attempt }}
+      NATIVE_OLLAMA_DEV: '1'
+      NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Verify real qualified Dell runner
+        shell: powershell
+        run: |
+          if ($env:COMPUTERNAME -ne 'DESKTOP-PDQK954' -or
+              $env:RUNNER_NAME -ne 'DESKTOP-PDQK954-runtime') { throw 'ISSUE8_NOTERI_WRONG_RUNNER' }
+      - name: Checkout exact proposed Dell source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ env.EXPECTED_RUNTIME_SHA }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Checkout exact authorized Worker Pool SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/engineering-worker-pool
+          ref: ${{ env.WORKER_POOL_SHA }}
+          path: _worker_pool
+          persist-credentials: false
+      - name: Checkout reviewed Agent Core source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/agent-core
+          ref: ${{ env.AGENT_CORE_SHA }}
+          path: _agent_core
+          persist-credentials: false
+      - name: Checkout canonical operational rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ env.RULES_SHA }}
+          path: _rules
+          persist-credentials: false
+
+      - name: Canonical Session Launcher and real runner version preflight
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference='Stop'
+          $launcher=Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
+          $policy=Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $args=@('--policy',$policy,'--repo',$env:GITHUB_WORKSPACE,
+            '--session-prefix','issue8-dell-rag',
+            '--correlation-id',$env:CORRELATION_ID,
+            '--expected-head',$env:EXPECTED_RUNTIME_SHA,
+            '--sync-ref','origin/feat/issue8-dell-native-rag-preflight-20261026',
+            '--require-runner-version-preflight')
+          $raw=& python -B $launcher @args
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'ISSUE8_SESSION_LAUNCH_FAILED' }
+          $session=@($raw)[-1] | ConvertFrom-Json
+          if ($session.result -ne 'SESSION_LAUNCH_OK' -or
+              $session.head -ne $env:EXPECTED_RUNTIME_SHA -or
+              $session.state_validated -ne $true -or
+              $session.snapshot_sha256 -notmatch '^[0-9a-f]{64}$' -or
+              -not $session.session_id) {
+            throw 'ISSUE8_SESSION_LAUNCH_BLOCKED'
+          }
+          "target=$($session.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session=$($session.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "snapshot=$($session.snapshot_sha256)" | Add-Content $env:GITHUB_OUTPUT
+          Write-Output 'ISSUE8_NOTERI_SESSION_LAUNCH_OK'
+
+      - name: Create isolated Python venv and pin httpx through Gateway
+        shell: powershell
+        env:
+          SESSION_TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $policy=Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $gateway=Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $venv=Join-Path $env:SESSION_TARGET_PATH '.venv'
+          $py=Join-Path $venv 'Scripts\python.exe'
+          $args=@('--policy',$policy,'--correlation-id',$env:CORRELATION_ID,
+            'run','--cwd',$env:SESSION_TARGET_PATH,'--session-id',$env:SESSION_ID,
+            '--risk','2','--timeout','180',
+            '--expected-head',$env:EXPECTED_RUNTIME_SHA,'--')
+          & python -B $gateway @args 'python' '-m' 'venv' $venv
+          if ($LASTEXITCODE -ne 0) { throw 'ISSUE8_VENV_GATEWAY_BLOCKED' }
+          & python -B $gateway @args $py '-m' 'pip' 'install' '--isolated' '--no-input' '--disable-pip-version-check' '--no-cache-dir' 'httpx==0.28.1'
+          if ($LASTEXITCODE -ne 0) { throw 'ISSUE8_DEPENDENCY_GATEWAY_BLOCKED' }
+          & python -B $gateway @args $py '-m' 'pip' 'check'
+          if ($LASTEXITCODE -ne 0) { throw 'ISSUE8_DEPENDENCY_CHECK_BLOCKED' }
+
+      - name: Execute issue8 Qwen RAG and failing baseline via Risk1 Gateway
+        id: probe
+        shell: powershell
+        env:
+          SESSION_TARGET_PATH: ${{ steps.session.outputs.target }}
+          SESSION_ID: ${{ steps.session.outputs.session }}
+          SESSION_SNAPSHOT_SHA256: ${{ steps.session.outputs.snapshot }}
+          SESSION_LAUNCH_RESULT: SESSION_LAUNCH_OK
+          SESSION_STATE_VALIDATED: 'true'
+          SESSION_GATEWAY_BOUND: 'true'
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference='Stop'
+          $policy=Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $gateway=Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $py=Join-Path $env:SESSION_TARGET_PATH '.venv\Scripts\python.exe'
+          $script=Join-Path $env:SESSION_TARGET_PATH 'scripts\issue8_dell_rag_preflight.py'
+          $args=@('--policy',$policy,'--correlation-id',$env:CORRELATION_ID,
+            'run','--cwd',$env:SESSION_TARGET_PATH,'--session-id',$env:SESSION_ID,
+            '--risk','1','--timeout','300',
+            '--expected-head',$env:EXPECTED_RUNTIME_SHA,'--',$py,'-B',$script)
+          # The Gateway emits redacted JSON for policy denials and command failure.
+          # Capture streams without exposing native stderr or unsafe subprocess output.
+          $savedPreference=$ErrorActionPreference
+          try {
+            $ErrorActionPreference='Continue'
+            $raw=& python -B $gateway @args 2>&1
+            $gatewayStatus=$LASTEXITCODE
+          } finally {
+            $ErrorActionPreference=$savedPreference
+          }
+          $envelope=$null
+          foreach ($line in @($raw)) {
+            try {
+              $candidate=$line.ToString() | ConvertFrom-Json -ErrorAction Stop
+              if ($candidate.PSObject.Properties.Name -contains 'gateway_exit_code') {
+                $envelope=$candidate
+              }
+            } catch {
+              # Raw tool output is never written to CI logs.
+            }
+          }
+          if ($null -eq $envelope) { throw 'ISSUE8_GATEWAY_ENVELOPE_UNAVAILABLE' }
+          if ($gatewayStatus -ne 0 -or $envelope.gateway_exit_code -ne 0) {
+            $reason='issue8_gateway_execution_unavailable'
+            if ($envelope.result -eq 'blocked') {
+              $reason='issue8_gateway_policy_blocked'
+            } elseif ($envelope.stdout) {
+              try {
+                $diag=$envelope.stdout | ConvertFrom-Json -ErrorAction Stop
+                if ($diag.result -eq 'ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED' -and
+                    $diag.reason_code -cmatch '^(?:issue8_|rag_|main_|owner_|native_|github_|context_)[a-z0-9_]{2,95}$') {
+                  $reason=$diag.reason_code
+                }
+              } catch {
+                # Unexpected or malformed output does not bypass failure gate.
+              }
+            }
+            Write-Output "ISSUE8_SANITIZED_FAILURE=$reason"
+            $phase='unknown'
+            if ($envelope.stdout) {
+              try {
+                $safe=$envelope.stdout | ConvertFrom-Json -ErrorAction Stop
+                if ($safe.result -eq 'ISSUE8_NATIVE_RAG_PREFLIGHT_BLOCKED' -and
+                    $safe.phase -cin @('identity','checkouts','agent_core','imports','owner','baseline','model','research','readback')) {
+                  $phase=$safe.phase
+                }
+              } catch { }
+            }
+            Write-Output "ISSUE8_SANITIZED_PHASE=$phase"
+            throw 'ISSUE8_NATIVE_RAG_GATEWAY_BLOCKED'
+          }
+          if ($envelope.state_changed -ne $false) { throw 'ISSUE8_GATEWAY_STATE_INVALID' }
+          $out=$envelope.stdout | ConvertFrom-Json
+          if ($out.result -ne 'ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' -or
+              $out.worker_sha -ne $env:WORKER_POOL_SHA -or
+              $out.runtime_sha -ne $env:EXPECTED_RUNTIME_SHA -or
+              $out.baseline_total -ne 42 -or $out.baseline_passed -ge 42 -or
+              $out.model_calls -lt 2 -or $out.model_calls -gt 4 -or
+              $out.independent_git_source_readback -ne $true -or
+              $out.cas_write -ne $false -or
+              $out.draft_pr_created -ne $false -or $out.state_changed -ne $false) {
+            throw 'ISSUE8_NATIVE_RAG_RECEIPT_INVALID'
+          }
+          New-Item -ItemType Directory -Force (Join-Path $env:GITHUB_WORKSPACE 'artifacts\issue8-rag') | Out-Null
+          $out | ConvertTo-Json -Depth 6 | Set-Content (Join-Path $env:GITHUB_WORKSPACE 'artifacts\issue8-rag\receipt.json') -Encoding UTF8
+          Write-Output 'ISSUE8_NATIVE_RAG_RECEIPT_ACCEPTED'
+
+      - name: Upload sanitized result for independent hosted readback
+        if: steps.probe.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: issue8-native-rag-${{ github.run_id }}
+          path: artifacts/issue8-rag/receipt.json
+          if-no-files-found: error
+          retention-days: 2
+
+  watchdog:
+    name: Dell runner pickup watchdog 300s
+    needs: admission
+    if: needs.admission.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Stop stale job without self-hosted pickup
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const started=Date.now(),limit=300000;
+            while (Date.now()-started<limit) {
+              const {data}=await github.rest.actions.listJobsForWorkflowRun({
+                owner:context.repo.owner,repo:context.repo.repo,
+                run_id:context.runId,per_page:100
+              });
+              const job=data.jobs.find(j=>j.name==='Dell Qwen issue8 native RAG read-only');
+              if (job && job.runner_name==='DESKTOP-PDQK954-runtime' &&
+                  Number(job.runner_id)===2 &&
+                  (job.status==='in_progress'||job.status==='completed')) {
+                core.info('ISSUE8_NOTERI_REAL_PICKUP_OBSERVED');return;
+              }
+              await new Promise(resolve=>setTimeout(resolve,15000));
+            }
+            core.setFailed('ISSUE8_NOTERI_RUNNER_NOT_PICKED_300S');
+            await github.rest.actions.cancelWorkflowRun({
+              owner:context.repo.owner,repo:context.repo.repo,run_id:context.runId
+            });
+
+  independent_readback:
+    name: Independent Dell issue8 RAG source and job readback
+    needs: [admission, physical]
+    if: needs.admission.result == 'success' && needs.physical.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    permissions:
+      actions: read
+      contents: read
+      issues: read
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: issue8-native-rag-${{ github.run_id }}
+          path: .tmp/issue8-rag-readback
+      - name: Compare real job and immutable GitHub source from fresh API
+        uses: actions/github-script@f28e40c7f34bde8b3046d885e986cb6290c5673b
+        with:
+          script: |
+            const fs=require('fs'),crypto=require('crypto');
+            const raw=fs.readFileSync('.tmp/issue8-rag-readback/receipt.json','utf8');
+            if (raw.length>10000) {core.setFailed('ISSUE8_RECEIPT_UNBOUNDED');return;}
+            const r=JSON.parse(raw);
+            const owner='ericson-j-santos',worker='engineering-worker-pool';
+            const workerSHA='74035488dac6938bfc14957621e86168003cd0c6';
+            const thisSHA=context.payload.pull_request.head.sha;
+            if (r.result!=='ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' ||
+                r.schema_version!=='issue8.native.rag.readonly-v1' ||
+                r.issue_number!==8 || r.worker_sha!==workerSHA ||
+                r.runtime_sha!==thisSHA ||
+                r.rules_sha!=='92e8b5c87684212964b24ff3597f9f9f8aea49a6' ||
+                r.model_digest_prefix!=='dae161e27b0e' ||
+                r.baseline_total!==42 || !Number.isInteger(r.baseline_passed) ||
+                r.baseline_passed<0 || r.baseline_passed>=42 ||
+                !Number.isInteger(r.model_calls) ||
+                r.model_calls<2||r.model_calls>4||
+                !/^[0-9a-f]{64}$/.test(r.source_sha256||'') ||
+                !/^[0-9a-f]{64}$/.test(r.receipt_sha256||'') ||
+                r.session_result!=='SESSION_LAUNCH_OK' ||
+                !/^[0-9a-f]{64}$/.test(r.snapshot_sha256||'') ||
+                r.run_id!==String(context.runId) ||
+                r.run_attempt!==String(context.runAttempt) ||
+                r.independent_git_source_readback!==true ||
+                r.cas_write!==false || r.draft_pr_created!==false ||
+                r.model_commands_authorized!==false || r.state_changed!==false) {
+              core.setFailed('ISSUE8_RECEIPT_IDENTITY_INVALID');return;
+            }
+            const [jobs,main,wm,comment,issue,source]=await Promise.all([
+              github.rest.actions.listJobsForWorkflowRun({
+                owner,repo:context.repo.repo,run_id:context.runId,per_page:100}),
+              github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
+              github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
+              github.rest.issues.getComment({owner,repo:worker,comment_id:6404265064}),
+              github.rest.issues.get({owner,repo:worker,issue_number:8}),
+              github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA})
+            ]);
+            const j=jobs.data.jobs.find(x=>x.name==='Dell Qwen issue8 native RAG read-only');
+            const needed=[
+              'Verify real qualified Dell runner',
+              'Canonical Session Launcher and real runner version preflight',
+              'Create isolated Python venv and pin httpx through Gateway',
+              'Execute issue8 Qwen RAG and failing baseline via Risk1 Gateway',
+              'Upload sanitized result for independent hosted readback'
+            ];
+            if (!j || j.status!=='completed'||j.conclusion!=='success'||
+                j.runner_name!=='DESKTOP-PDQK954-runtime'||j.runner_id!==2||
+                j.head_sha!==thisSHA ||
+                !needed.every(n=>j.steps?.some(s=>s.name===n&&
+                  s.status==='completed'&&s.conclusion==='success')) ||
+                main.data.commit.sha!==context.payload.pull_request.base.sha||
+                wm.data.commit.sha!==workerSHA||
+                comment.data.user?.login!==owner ||
+                comment.data.author_association!=='OWNER' ||
+                comment.data.body!=='/local-agent authorize bridge.property.v1 sha:'+workerSHA ||
+                issue.data.state!=='open'||!!issue.data.pull_request) {
+              core.setFailed('ISSUE8_INDEPENDENT_JOB_OR_OWNER_DRIFT');return;
+            }
+            if (source.data.type!=='file' || source.data.path!==r.citation_path) {
+              core.setFailed('ISSUE8_INDEPENDENT_SOURCE_MISSING');return;
+            }
+            const decoded=Buffer.from(source.data.content.replace(/\s+/g,''),'base64');
+            const sha256=crypto.createHash('sha256').update(decoded).digest('hex');
+            const gitBlob=crypto.createHash('sha1').update(
+              Buffer.concat([Buffer.from('blob '+decoded.length+'\0'),decoded])
+            ).digest('hex');
+            const lines=decoded.toString('utf8').split(/\r?\n/);
+            if (sha256!==r.source_sha256 || gitBlob!==source.data.sha ||
+                source.data.size!==decoded.length ||
+                !Number.isInteger(r.citation_line) ||
+                r.citation_line<1 || r.citation_line>lines.length) {
+              core.setFailed('ISSUE8_INDEPENDENT_SOURCE_DRIFT');return;
+            }
+            core.info(JSON.stringify({
+              result:'ISSUE8_NATIVE_RAG_INDEPENDENT_READBACK_VERIFIED',
+              physical_job_id:j.id,runner_id:j.runner_id,
+              worker_sha:workerSHA,source_sha256:sha256,
+              model_calls:r.model_calls,baseline_passed:r.baseline_passed,
+              correlation_id:r.correlation_id
+            }));
