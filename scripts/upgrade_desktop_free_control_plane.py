@@ -89,7 +89,10 @@ def inspect_active_installation(
     if repair.sha256_file(launcher) != expected_launcher:
         raise UpgradeBlocked("installed_launcher_digest_changed")
 
-    runner_home = watchdog.validate_runner_home(Path(installation["runner_home"]))
+    runner_home_value = str(metadata.get("runner_home") or "").strip()
+    if not runner_home_value:
+        raise UpgradeBlocked("installed_runner_home_missing")
+    runner_home = watchdog.validate_runner_home(Path(runner_home_value))
     process = watchdog.runner_process_snapshot(runner_home)
     pids = process.get("matching_pids") or []
     if len(pids) != 1 or process.get("unresolved_pids"):
