@@ -51,3 +51,10 @@ de 403, esgotamento de 503 e rejeição de resposta malformada. A recuperação
 física exige novo marcador `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE`, transição única após CI positivo
 e todas as mesmas revalidações de owner, Worker Pool e custo. Não repetir
 marcadores consumidos nem modificar serviços, patch, CAS ou produção.
+
+
+## Recuperação de GET autenticados em admissão e readback (26/10)
+
+O segundo run [#40377362575](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40377362575) passou no contrato, mas foi bloqueado **antes do Dell** por HTTP 500 ao ler o comentário OWNER via API GitHub. Isso confirma instabilidade transitória em mais de uma rota GET, não CI/owner reprovado.
+
+Agora as dez consultas de admissão e as sete consultas de readback são **sequenciais** e usam tentativas limitadas (até três) para 429 e HTTP 500/502/503/504. Erros 403/404, respostas vazias, esgotamento das tentativas, SHA/OWNER divergente ou checks não executados falham fechado. Um teste Node executa controles positivos/negativos da função de retry, e o readback exige citação em fonte allowlisted antes do GET. Novo marcador de execução única: `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE` após CI aprovado no novo HEAD. Não repetir runs anteriores nem promover skips a sucesso.

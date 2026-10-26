@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -66,41 +66,40 @@ jobs:
             const owner='ericson-j-santos', worker='engineering-worker-pool';
             const current=context.payload.pull_request;
             const sha=current.head.sha;
-            // GET-only: bounded retries for transient API faults, never a check bypass.
-            async function boundedWorkerChecks(read, pause=ms=>new Promise(resolve=>setTimeout(resolve,ms))) {
-              for (let attempt=1;attempt<=3;attempt++) {
+            // Exact, serialized GET-only admission with bounded transient retries.
+            async function boundedAdmissionGet(label, read, pause=ms=>new Promise(done=>setTimeout(done,ms))) {
+              const allowed=new Set(['pr','desktop_main','worker_main','rules_main','owner_comment',
+                'issue','source','desktop_checks','worker_checks','rag_implementation']);
+              if (!allowed.has(label)) throw new Error('ISSUE8_ADMISSION_GET_ROUTE_DENIED');
+              for(let attempt=1;attempt<=3;attempt++) {
                 try {
                   const response=await read();
-                  if (!response?.data||!Array.isArray(response.data.check_runs)) {
-                    throw new Error('ISSUE8_WORKER_CHECKS_MALFORMED');
+                  if (!response||response.data===null||response.data===undefined) {
+                    throw new Error('ISSUE8_ADMISSION_GET_INVALID_RESPONSE');
                   }
                   return response;
-                } catch (error) {
+                } catch(error) {
                   const status=Number(error?.status);
-                  const transient=[429,500,502,503,504].includes(status);
-                  if (!transient) {
-                    throw new Error('ISSUE8_WORKER_CHECKS_GET_PERMANENT');
+                  if (![429,500,502,503,504].includes(status)) {
+                    throw new Error('ISSUE8_ADMISSION_GET_PERMANENT_'+label);
                   }
-                  if (attempt===3) {
-                    throw new Error('ISSUE8_WORKER_CHECKS_GET_EXHAUSTED');
-                  }
+                  if (attempt===3) throw new Error('ISSUE8_ADMISSION_GET_EXHAUSTED_'+label);
                   await pause(attempt*1000);
                 }
               }
-              throw new Error('ISSUE8_WORKER_CHECKS_UNAVAILABLE');
+              throw new Error('ISSUE8_ADMISSION_GET_UNAVAILABLE_'+label);
             }
-            const [pr,main,wm,rule,ownerComment,issue,file,dellChecks,workerChecks,ragImplementation]=await Promise.all([
-              github.rest.pulls.get({owner,repo:context.repo.repo,pull_number:current.number}),
-              github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
-              github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
-              github.rest.repos.getBranch({owner,repo:'chatgpt-operational-rules',branch:'main'}),
-              github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}),
-              github.rest.issues.get({owner,repo:worker,issue_number:8}),
-              github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'}),
-              github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}),
-              boundedWorkerChecks(()=>github.rest.checks.listForRef({owner,repo:worker,ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e',per_page:100})),
-              github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'})
-            ]);
+            // Serialized requests avoid a burst of remote GitHub checks reads.
+            const pr=await boundedAdmissionGet('pr',()=>github.rest.pulls.get({owner,repo:context.repo.repo,pull_number:current.number}));
+            const main=await boundedAdmissionGet('desktop_main',()=>github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}));
+            const wm=await boundedAdmissionGet('worker_main',()=>github.rest.repos.getBranch({owner,repo:worker,branch:'main'}));
+            const rule=await boundedAdmissionGet('rules_main',()=>github.rest.repos.getBranch({owner,repo:'chatgpt-operational-rules',branch:'main'}));
+            const ownerComment=await boundedAdmissionGet('owner_comment',()=>github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}));
+            const issue=await boundedAdmissionGet('issue',()=>github.rest.issues.get({owner,repo:worker,issue_number:8}));
+            const file=await boundedAdmissionGet('source',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'}));
+            const dellChecks=await boundedAdmissionGet('desktop_checks',()=>github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}));
+            const workerChecks=await boundedAdmissionGet('worker_checks',()=>github.rest.checks.listForRef({owner,repo:worker,ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e',per_page:100}));
+            const ragImplementation=await boundedAdmissionGet('rag_implementation',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'}));
             const d=pr.data;
             if (d.state!=='open' || !d.draft ||
                 d.user?.login!==owner ||
@@ -108,7 +107,7 @@ jobs:
                 d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_HTTP500_RECOVERY_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_API_GET_RECOVERY_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -431,16 +430,40 @@ jobs:
                 r.model_commands_authorized!==false || r.state_changed!==false) {
               core.setFailed('ISSUE8_RECEIPT_IDENTITY_INVALID');return;
             }
-            const [jobs,main,wm,comment,issue,source,implementation]=await Promise.all([
-              github.rest.actions.listJobsForWorkflowRun({
-                owner,repo:context.repo.repo,run_id:context.runId,per_page:100}),
-              github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}),
-              github.rest.repos.getBranch({owner,repo:worker,branch:'main'}),
-              github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}),
-              github.rest.issues.get({owner,repo:worker,issue_number:8}),
-              github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA}),
-              github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:workerSHA})
-            ]);
+            // Independent hosted readback also fails closed on GitHub API faults.
+            async function boundedReadbackGet(label, read, pause=ms=>new Promise(done=>setTimeout(done,ms))) {
+              const allowed=new Set(['jobs','desktop_main','worker_main','owner_comment',
+                'issue','source','rag_implementation']);
+              if (!allowed.has(label)) throw new Error('ISSUE8_READBACK_GET_ROUTE_DENIED');
+              for(let attempt=1;attempt<=3;attempt++) {
+                try {
+                  const result=await read();
+                  if (!result||result.data===null||result.data===undefined) {
+                    throw new Error('ISSUE8_READBACK_GET_INVALID_RESPONSE');
+                  }
+                  return result;
+                } catch(error) {
+                  const status=Number(error?.status);
+                  if (![429,500,502,503,504].includes(status)) {
+                    throw new Error('ISSUE8_READBACK_GET_PERMANENT_'+label);
+                  }
+                  if (attempt===3) throw new Error('ISSUE8_READBACK_GET_EXHAUSTED_'+label);
+                  await pause(attempt*1000);
+                }
+              }
+              throw new Error('ISSUE8_READBACK_GET_UNAVAILABLE_'+label);
+            }
+            const approvedCitationPaths=new Set(['README.md','AGENTS.md','docs/ISSUE_QWEN7B_DRAFT_HANDOFF.md']);
+            if (!approvedCitationPaths.has(r.citation_path)) {
+              core.setFailed('ISSUE8_READBACK_SOURCE_NOT_ALLOWLISTED');return;
+            }
+            const jobs=await boundedReadbackGet('jobs',()=>github.rest.actions.listJobsForWorkflowRun({owner,repo:context.repo.repo,run_id:context.runId,per_page:100}));
+            const main=await boundedReadbackGet('desktop_main',()=>github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}));
+            const wm=await boundedReadbackGet('worker_main',()=>github.rest.repos.getBranch({owner,repo:worker,branch:'main'}));
+            const comment=await boundedReadbackGet('owner_comment',()=>github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}));
+            const issue=await boundedReadbackGet('issue',()=>github.rest.issues.get({owner,repo:worker,issue_number:8}));
+            const source=await boundedReadbackGet('source',()=>github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA}));
+            const implementation=await boundedReadbackGet('rag_implementation',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:workerSHA}));
             const j=jobs.data.jobs.find(x=>x.name==='Dell Qwen issue8 native RAG read-only');
             const needed=[
               'Verify real qualified Dell runner',
