@@ -45,6 +45,7 @@ const sandbox = {
     STALL_AFTER_SECONDS: input.stall_seconds,
     TARGET_RUN_ID: '77',
     TARGET_JOB_NAME: input.job_name,
+    EXPECTED_RUNNER: input.expected_runner,
     CORRELATION_ID: 'watchdog-regression',
   }},
   Date: TestDate,
@@ -85,7 +86,12 @@ def job(**changes: object) -> dict:
     return value
 
 
-def observe(final_job: dict, pickup_after_ms: int = 0, workflow_age_ms: int = 120_000) -> dict:
+def observe(
+    final_job: dict,
+    pickup_after_ms: int = 0,
+    workflow_age_ms: int = 120_000,
+    expected_runner: str = "DESKTOP-PDQK954-runtime",
+) -> dict:
     text = WORKFLOW.read_text(encoding="utf-8")
     queue = text.split("  queue_watchdog:\n", 1)[1]
     budget = re.search(r'STALL_AFTER_SECONDS: "(\d+)"', queue)
@@ -96,6 +102,7 @@ def observe(final_job: dict, pickup_after_ms: int = 0, workflow_age_ms: int = 12
         "source": observer_source(text), "start_ms": START_MS,
         "workflow_age_ms": workflow_age_ms, "pickup_after_ms": pickup_after_ms,
         "stall_seconds": budget.group(1), "job_name": JOB_NAME,
+        "expected_runner": expected_runner,
         "queued_job": job(), "final_job": final_job,
     }
     with tempfile.TemporaryDirectory(prefix="dedicated-watchdog-test-") as directory:
@@ -131,6 +138,15 @@ def test_setup_age_does_not_cancel_a_valid_pickup_at_150_seconds() -> None:
     assert result["elapsed_ms"] == 150_000
     assert result["reads"] > 1
     assert len(result["writes"]) == 1
+    assert result["writes"][0]["data"]["state"] == "running"
+    assert result["failures"] == result["cancellations"] == []
+
+
+def test_lenovo_pickup_is_material_progress_only_for_exact_lenovo_runner() -> None:
+    result = observe(
+        job(status="in_progress", runner_id=24, runner_name="DESKTOP-RP23OGS-runtime"),
+        expected_runner="DESKTOP-RP23OGS-runtime",
+    )
     assert result["writes"][0]["data"]["state"] == "running"
     assert result["failures"] == result["cancellations"] == []
 

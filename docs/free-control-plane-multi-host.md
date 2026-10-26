@@ -99,3 +99,35 @@ fixados (`--source-sha`, `--expected-installed-sha`,
 mesmos argumentos sem `--preflight-only` e exige confirmação literal
 `REPAIR-DESKTOP-FREE-CONTROL-PLANE`. O preflight não escreve no host e a
 confirmação não reduz nenhuma das verificações de identidade ou digest.
+
+## Upgrade do launcher S4U e pickup do Lenovo
+
+O launcher persistido precisa inserir o diretório `scripts` da release no
+`sys.path` antes de executar o watchdog com `runpy`. Sem isso, a ação S4U encerra
+com código `1` ao importar `pc24x7_host_policy`, antes de criar `state.json`.
+`scripts/upgrade_desktop_free_control_plane.py` corrige esse estado sem registrar
+novamente a tarefa e sem substituir ou reiniciar o runner. O upgrade exige o SHA
+e os hashes observados do watchdog, launcher UAC e `run.py`, cria backup
+idempotente, monta uma release imutável, inicia a tarefa existente e só finaliza
+quando um `state.json` fresco no novo SHA comprova runner recovery e escopo
+`rdc_required=false` no Lenovo.
+O upgrade também normaliza `runtime_root` para o diretório físico que contém o
+launcher registrado, evitando divergência entre a virtualização de
+`LOCALAPPDATA` do aplicativo, o contexto S4U e o processo do runner. O pickup
+deriva esse diretório da ação da própria tarefa e rejeita metadata apontando
+para outro local.
+
+Executar primeiro com `--preflight-only` e confirmação literal
+`UPGRADE-DESKTOP-FREE-CONTROL-PLANE`. A execução física usa os mesmos argumentos
+sem `--preflight-only`; não usa UAC porque preserva a tarefa AtStartup+S4U e sua
+ACL já registradas.
+
+O pickup independente usa a entrada booleana fixa
+`lenovo_control_plane_pickup=true`, combinada somente com o diagnóstico
+`runner-identity`, no workflow
+`.github/workflows/dedicated-runtime-runner-e2e.yml`. O job requer a etiqueta
+exclusiva `desktop-rp23ogs`, confirma hostname, nome do runner, SHA do workflow,
+metadata, tarefa em execução e estado fresco, passa pelo Session Launcher e
+Command Gateway e publica somente o artifact sanitizado
+`lenovo-control-plane-pickup-<run>-<attempt>`. O watchdog hospedado cancela a
+execução se o runner físico exato não fizer pickup em 300 segundos.

@@ -653,18 +653,24 @@ def _copy_release(source_root: Path, release_root: Path) -> None:
         shutil.copy2(required, scripts / required_name)
 
 
-def _write_launcher(runtime_root: Path) -> Path:
-    launcher = runtime_root / "run.py"
-    launcher.write_text(
+def launcher_bytes() -> bytes:
+    return (
         "from pathlib import Path\n"
         "import json, runpy, sys\n"
         "metadata = Path(__file__).with_name('metadata.json')\n"
         "payload = json.loads(metadata.read_text(encoding='utf-8'))\n"
         "script = Path(payload['release_root']) / 'scripts' / 'desktop_control_plane_watchdog.py'\n"
+        "script_dir = script.parent\n"
+        "if str(script_dir) not in sys.path:\n"
+        "    sys.path.insert(0, str(script_dir))\n"
         "sys.argv = [str(script), 'watch', '--metadata', str(metadata)]\n"
-        "runpy.run_path(str(script), run_name='__main__')\n",
-        encoding="utf-8",
-    )
+        "runpy.run_path(str(script), run_name='__main__')\n"
+    ).encode("utf-8")
+
+
+def _write_launcher(runtime_root: Path) -> Path:
+    launcher = runtime_root / "run.py"
+    launcher.write_bytes(launcher_bytes())
     return launcher
 
 

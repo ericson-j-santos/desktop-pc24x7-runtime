@@ -35,11 +35,18 @@ def _self_hosted_selectors() -> list[tuple[Path, set[str]]]:
 def test_desktop_runtime_workflows_require_a_host_specific_label() -> None:
     selectors = _self_hosted_selectors()
     assert selectors
+    secondary = []
     for workflow, labels in selectors:
         if "noteri" in labels:
             continue
         assert "pc24x7" in labels, workflow.name
+        if "desktop-rp23ogs" in labels:
+            secondary.append((workflow, labels))
+            assert workflow.name == "dedicated-runtime-runner-e2e.yml"
+            assert "desktop-pdqk954" not in labels
+            continue
         assert "desktop-pdqk954" in labels, f"generic or RP23OGS-ambiguous selector: {workflow.name}: {labels}"
+    assert len(secondary) == 1
 
 
 def test_no_generic_windows_self_hosted_selector_remains() -> None:
