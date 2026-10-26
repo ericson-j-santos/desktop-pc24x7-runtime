@@ -1,6 +1,6 @@
 # Issue #8 — Dell native Qwen RAG preflight
 
-This is a **read-only physical qualification** of the existing authorized issue #8. It does not implement or certify an autonomous patch, CAS publication or draft PR. It reuses `engineering-worker-pool@047c77b6b867ff5d489bd74f6fd80989719ab85e`, official owner authorization comment #6423646539, and `agent-core@1fc032d4c412bdb4ed202cf1193caf0cb49490ce`.
+This is a **read-only physical qualification** of the existing authorized issue #8. It does not implement or certify an autonomous patch, CAS publication or draft PR. It reuses `engineering-worker-pool@be69b27455f99606a03ce5cba6ca809e1082f2b4`, official owner authorization comment #6427072933, and `agent-core@1fc032d4c412bdb4ed202cf1193caf0cb49490ce`.
 
 Noteri's latest physical canary [#40247590037](https://github.com/ericson-j-santos/noteri-runtime/actions/runs/40247590037) was fail-closed with `native_model_ambiguous_or_missing`. Do not install, rename or download a model to bypass attestation. Dell successfully executed native Qwen with the matching GGUF digest in [#40221994125](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/40221994125). This experiment qualifies *issue-specific* evidence on that alternative host instead of repeating Noteri's known blocker.
 
@@ -25,10 +25,10 @@ This revision **does not relax** the RAG acceptance. It emits one of the finite 
 
 A pesquisa RAG da issue #8 no Dell falhou com evidência insuficiente no run
 #40369704989. A PR Worker Pool #56 corrige apenas a pontuação dos trechos
-portugueses; foi integrada à main no SHA `047c77b6b867ff5d489bd74f6fd80989719ab85e`, com
+portugueses; foi integrada à main no SHA `be69b27455f99606a03ce5cba6ca809e1082f2b4`, com
 blob `d9b348f6f1e5c71f182940f4ec03fb94268d28c6` de `app/issue_rag_research.py`.
 A fonte `app/portfolio_bridge.py` mantém o Git blob anterior, e o
-proprietário publicou a autorização SHA-bound #6423646539 específica da nova
+proprietário publicou a autorização SHA-bound #6427072933 específica da nova
 main. Este canário usa somente o código integrado na main e exige readback
 da versão de pesquisa, sem segundo checkout experimental. O marcador físico
 único é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_PTBR_MERGED_ONCE`. A recusa do modelo continua bloqueando qualquer
@@ -66,7 +66,7 @@ O run físico [#40378386092](https://github.com/ericson-j-santos/desktop-pc24x7-
 
 O diagnóstico não modifica `research_issue`, seleção, ranking, prompts ou respostas do Qwen. Se o recibo apresentar recusa, identidade e SHA atuais, hash íntegro e processo atestado, registra somente fontes allowlisted, quantidade de fontes, número de chamadas do modelo e número de seleções tentadas. O caso `no_candidate_snippet` significa que nenhuma seleção de citação foi solicitada. `model_declined_candidate` significa que houve ao menos uma seleção sem citação aceita. Esses estados não comprovam quais linhas individuais foram apresentadas; uma investigação de candidatos requer telemetria posterior na fonte do Worker Pool. Nenhum texto de documento, prompt ou resposta bruta é publicado.
 
-A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de aprovação fica indisponível e não se publicam CAS, Validator ou PR de agente. A única nova autorização de teste via edição da PR é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE`, após checks realmente executados no HEAD atualizado e revalidação de owner/rules/runner/custo. Sem Docker, Neon, merge, deploy ou custo incremental.
+A regra de recusa permanece FAIL-CLOSED: a etapa física falha, o readback de aprovação fica indisponível e não se publicam CAS, Validator ou PR de agente. A única nova autorização de teste via edição da PR é `OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE`, após checks realmente executados no HEAD atualizado e revalidação de owner/rules/runner/custo. Sem Docker, Neon, merge, deploy ou custo incremental.
 
 ## Alinhamento de regras no preflight (26/10)
 

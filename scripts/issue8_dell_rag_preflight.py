@@ -21,12 +21,12 @@ from pathlib import Path
 
 HOST_REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
 WORKER_REPOSITORY = "ericson-j-santos/engineering-worker-pool"
-WORKER_SHA = "047c77b6b867ff5d489bd74f6fd80989719ab85e"
+WORKER_SHA = "be69b27455f99606a03ce5cba6ca809e1082f2b4"
 RULES_SHA = "8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8"
 SOURCE_PATH = "app/portfolio_bridge.py"
 SOURCE_BLOB_SHA = "d9a25c574163c49f695e774609949160d94f4490"
 ISSUE_NUMBER = 8
-OWNER_COMMENT_ID = 6423646539
+OWNER_COMMENT_ID = 6427072933
 MODEL_PIN = "dae161e27b0e"
 SHA40 = re.compile(r"[a-f0-9]{40}\Z")
 SHA64 = re.compile(r"[a-f0-9]{64}\Z")

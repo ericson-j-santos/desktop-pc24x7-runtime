@@ -48,9 +48,9 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.head.ref == 'feat/issue8-dell-native-rag-preflight-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -94,12 +94,12 @@ jobs:
             const main=await boundedAdmissionGet('desktop_main',()=>github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}));
             const wm=await boundedAdmissionGet('worker_main',()=>github.rest.repos.getBranch({owner,repo:worker,branch:'main'}));
             const rule=await boundedAdmissionGet('rules_main',()=>github.rest.repos.getBranch({owner,repo:'chatgpt-operational-rules',branch:'main'}));
-            const ownerComment=await boundedAdmissionGet('owner_comment',()=>github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}));
+            const ownerComment=await boundedAdmissionGet('owner_comment',()=>github.rest.issues.getComment({owner,repo:worker,comment_id:6427072933}));
             const issue=await boundedAdmissionGet('issue',()=>github.rest.issues.get({owner,repo:worker,issue_number:8}));
-            const file=await boundedAdmissionGet('source',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'}));
+            const file=await boundedAdmissionGet('source',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:'be69b27455f99606a03ce5cba6ca809e1082f2b4'}));
             const dellChecks=await boundedAdmissionGet('desktop_checks',()=>github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}));
-            const workerChecks=await boundedAdmissionGet('worker_checks',()=>github.rest.checks.listForRef({owner,repo:worker,ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e',per_page:100}));
-            const ragImplementation=await boundedAdmissionGet('rag_implementation',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:'047c77b6b867ff5d489bd74f6fd80989719ab85e'}));
+            const workerChecks=await boundedAdmissionGet('worker_checks',()=>github.rest.checks.listForRef({owner,repo:worker,ref:'be69b27455f99606a03ce5cba6ca809e1082f2b4',per_page:100}));
+            const ragImplementation=await boundedAdmissionGet('rag_implementation',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:'be69b27455f99606a03ce5cba6ca809e1082f2b4'}));
             const d=pr.data;
             if (d.state!=='open' || !d.draft ||
                 d.user?.login!==owner ||
@@ -107,7 +107,7 @@ jobs:
                 d.head.ref!=='feat/issue8-dell-native-rag-preflight-20261026' ||
                 d.head.sha!==sha || d.base.ref!=='main' ||
                 d.base.sha!==main.data.commit.sha ||
-                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_RAG_DIAGNOSTIC_ONCE')) {
+                !d.body?.includes('OWNER_ISSUE8_NATIVE_RAG_DELL_20261026_INTEGRATED_WORKER_ONCE')) {
               core.setFailed('ISSUE8_NOTERI_PR_OR_BASE_DRIFT'); return;
             }
             const files=(await github.rest.pulls.listFiles({
@@ -125,13 +125,13 @@ jobs:
                   ['added','modified'].includes(f.status))) {
               core.setFailed('ISSUE8_NOTERI_PR_SCOPE_CHANGED');return;
             }
-            if (wm.data.commit.sha!=='047c77b6b867ff5d489bd74f6fd80989719ab85e' ||
+            if (wm.data.commit.sha!=='be69b27455f99606a03ce5cba6ca809e1082f2b4' ||
                 rule.data.commit.sha!=='8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8' ||
                 issue.data.state!=='open' || !!issue.data.pull_request ||
                 ownerComment.data.user?.login!==owner ||
                 ownerComment.data.author_association!=='OWNER' ||
                 ownerComment.data.issue_url!=='https://api.github.com/repos/'+owner+'/'+worker+'/issues/8' ||
-                ownerComment.data.body!=='/local-agent authorize bridge.property.v1 sha:047c77b6b867ff5d489bd74f6fd80989719ab85e' ||
+                ownerComment.data.body!=='/local-agent authorize bridge.property.v1 sha:be69b27455f99606a03ce5cba6ca809e1082f2b4' ||
                 file.data.type!=='file' ||
                 file.data.sha!=='d9a25c574163c49f695e774609949160d94f4490' ||
                 ragImplementation.data.type!=='file' ||
@@ -143,7 +143,7 @@ jobs:
               c.conclusion==='success'&&c.started_at&&c.completed_at);
             if (!['Python compile and tests','Portable Linux compile and tests'].every(n=>passed(dellChecks,n,sha)) ||
                 !['test','candidate-canary'].every(n=>
-                  passed(workerChecks,n,'047c77b6b867ff5d489bd74f6fd80989719ab85e'))) {
+                  passed(workerChecks,n,'be69b27455f99606a03ce5cba6ca809e1082f2b4'))) {
               core.setFailed('ISSUE8_NOTERI_CURRENT_CI_NOT_EXECUTED');return;
             }
             core.info(JSON.stringify({
@@ -162,7 +162,7 @@ jobs:
       contents: read
     env:
       EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
-      WORKER_POOL_SHA: 047c77b6b867ff5d489bd74f6fd80989719ab85e
+      WORKER_POOL_SHA: be69b27455f99606a03ce5cba6ca809e1082f2b4
       RULES_SHA: 8af10e2cf85f18f14ba12fbbeb4afc8b8320bbe8
       AGENT_CORE_SHA: 1fc032d4c412bdb4ed202cf1193caf0cb49490ce
       CORRELATION_ID: issue8-dell-${{ github.run_id }}-${{ github.run_attempt }}
@@ -437,7 +437,7 @@ jobs:
             if (raw.length>10000) {core.setFailed('ISSUE8_RECEIPT_UNBOUNDED');return;}
             const r=JSON.parse(raw);
             const owner='ericson-j-santos',worker='engineering-worker-pool';
-            const workerSHA='047c77b6b867ff5d489bd74f6fd80989719ab85e';
+            const workerSHA='be69b27455f99606a03ce5cba6ca809e1082f2b4';
             const thisSHA=context.payload.pull_request.head.sha;
             if (r.result!=='ISSUE8_NATIVE_RAG_PREFLIGHT_VERIFIED' ||
                 r.schema_version!=='issue8.native.rag.readonly-v1' ||
@@ -490,7 +490,7 @@ jobs:
             const jobs=await boundedReadbackGet('jobs',()=>github.rest.actions.listJobsForWorkflowRun({owner,repo:context.repo.repo,run_id:context.runId,per_page:100}));
             const main=await boundedReadbackGet('desktop_main',()=>github.rest.repos.getBranch({owner,repo:context.repo.repo,branch:'main'}));
             const wm=await boundedReadbackGet('worker_main',()=>github.rest.repos.getBranch({owner,repo:worker,branch:'main'}));
-            const comment=await boundedReadbackGet('owner_comment',()=>github.rest.issues.getComment({owner,repo:worker,comment_id:6423646539}));
+            const comment=await boundedReadbackGet('owner_comment',()=>github.rest.issues.getComment({owner,repo:worker,comment_id:6427072933}));
             const issue=await boundedReadbackGet('issue',()=>github.rest.issues.get({owner,repo:worker,issue_number:8}));
             const source=await boundedReadbackGet('source',()=>github.rest.repos.getContent({owner,repo:worker,path:r.citation_path,ref:workerSHA}));
             const implementation=await boundedReadbackGet('rag_implementation',()=>github.rest.repos.getContent({owner,repo:worker,path:'app/issue_rag_research.py',ref:workerSHA}));
