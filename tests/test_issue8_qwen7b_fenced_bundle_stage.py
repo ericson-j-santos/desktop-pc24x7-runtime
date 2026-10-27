@@ -475,3 +475,32 @@ def test_bundle_checkpoint_precedes_destructive_sandbox_cleanup():
     assert point < buffered < cleanup
     assert source.count("_publish_github_step_outputs(staged)") == 1
     assert "_publish_github_step_outputs(result)" not in source
+
+def test_current_issue8_owner_and_fenced_workflow_source_pins_agree():
+    """Prevents stale one-shot worker SHA, owner comment and source workflow drift."""
+    from scripts import issue8_qwen7b_independent_bundle_validator as validator
+
+    worker = "87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e"
+    runtime = "005cc39d38f90e5d7ae4b3f6e23d4e119ce4120f"
+    rules = "3ffb7d2ab3269fb75ed37b9abbc2de562d156098"
+    owner = 6430299388
+    wf = (Path(__file__).resolve().parents[1] /
+          ".github/workflows/issue8-qwen7b-fenced-bundle-dev.yml").read_text("utf-8")
+    assert stage.WORKER_SHA == validator.BASE == worker
+    assert stage.RUNTIME_SHA == runtime
+    assert stage.RULES_SHA == rules
+    assert stage.OWNER_COMMENT == owner
+    for expected in (
+        worker, runtime, rules, str(owner),
+        "feat/issue8-fenced-qwen-bundle-20261026",
+        "OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE",
+        "agent/issue8-qwen-bundle-87a8de64ea5e",
+        "agent/issue8-qwen-quarantine-87a8de64ea5e",
+    ):
+        assert expected in wf
+    for forbidden in (
+        "21fd68dec6f0da92b3e7da201463401ac5429d64",
+        "a0437b0deb7db42fb91866fe8e77359844579cf6",
+        "6399359287", "feat/issue8-fenced-qwen-bundle-20261025",
+    ):
+        assert forbidden not in wf

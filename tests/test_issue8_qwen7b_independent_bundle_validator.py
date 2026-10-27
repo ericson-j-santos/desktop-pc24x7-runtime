@@ -19,7 +19,7 @@ def valid():
         "issue": 8,
         "source_repository": "ericson-j-santos/engineering-worker-pool",
         "base_sha": validator.BASE,
-        "owner_comment_id": 6399359287,
+        "owner_comment_id": 6430299388,
         "worker_pool_task_id": "cwp-" + "a" * 24,
         "produced_sha": "f" * 40,
         "model": "qwen2.5-coder:7b",

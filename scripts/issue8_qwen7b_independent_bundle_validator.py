@@ -16,7 +16,7 @@ import subprocess
 import sys
 import tempfile
 
-BASE = "21fd68dec6f0da92b3e7da201463401ac5429d64"
+BASE = "87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e"
 SOURCE_BLOB = "d9a25c574163c49f695e774609949160d94f4490"
 PATH = "app/portfolio_bridge.py"
 HEX40 = re.compile(r"[0-9a-f]{40}\Z")
@@ -62,7 +62,7 @@ def validate_receipt(receipt: dict, bundle: bytes) -> None:
             and receipt.get("source_repository") ==
             "ericson-j-santos/engineering-worker-pool"
             and receipt.get("base_sha") == BASE
-            and receipt.get("owner_comment_id") == 6399359287
+            and receipt.get("owner_comment_id") == 6430299388
             and type(receipt.get("produced_sha")) is str
             and HEX40.fullmatch(receipt["produced_sha"]) is not None
             and receipt["produced_sha"] != BASE
@@ -129,7 +129,7 @@ def execute(*, bundle_path: Path, receipt_base64: str,
         run_bridge_regressions, preflight_bridge_regressions,
     )
     binding = IssueBinding(
-        8, BASE, 6399359287,
+        8, BASE, 6430299388,
         "issue-" + hashlib.sha256(
             ("ericson-j-santos/engineering-worker-pool#8:"
              "bridge.property.v1:" + BASE).encode()
