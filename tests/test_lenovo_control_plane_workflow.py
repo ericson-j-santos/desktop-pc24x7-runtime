@@ -146,4 +146,6 @@ def test_prove_invokes_only_fixed_gateway_without_shell(
     assert "session-456" in command
     assert "--expected-source-sha" in command
     assert sha in command
+    assert command[command.index("--") + 1] == sys.executable
+    assert command[command.index("--") + 1] != "python"
     assert observed["kwargs"]["shell"] is False

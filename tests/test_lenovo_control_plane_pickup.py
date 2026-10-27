@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -157,3 +158,69 @@ def test_task_bound_metadata_rejects_runtime_split(tmp_path: Path) -> None:
     )
     with pytest.raises(m.PickupBlocked, match="metadata_runtime_contract_mismatch"):
         m.load_task_bound_installation(tmp_path.resolve(), sha)
+
+
+def test_missing_pywin32_writes_only_bounded_failure_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    sha = "a" * 40
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
+    monkeypatch.setenv("GITHUB_TOKEN", "must-never-appear")
+    monkeypatch.setattr(
+        m, "collect", lambda expected: (_ for _ in ()).throw(m.PickupBlocked("pywin32_required"))
+    )
+    monkeypatch.setattr(
+        sys, "argv", ["pickup.py", "--expected-source-sha", sha, "--evidence-file", m.EVIDENCE_REL]
+    )
+
+    assert m.main() == 3
+    evidence = tmp_path / "artifacts" / "lenovo-control-plane-pickup" / "evidence.json"
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    assert payload == {
+        "schema_version": "1",
+        "ok": False,
+        "result": "BLOCKED",
+        "reason": "pywin32_required",
+        "source_sha": sha,
+        "github_run_id": "123",
+        "github_run_attempt": "1",
+    }
+    assert "must-never-appear" not in evidence.read_text(encoding="utf-8")
+    assert json.loads(capsys.readouterr().out) == payload
+
+
+def test_failure_reason_with_untrusted_text_is_redacted(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        m, "collect", lambda expected: (_ for _ in ()).throw(m.PickupBlocked("secret=do-not-log"))
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["pickup.py", "--expected-source-sha", "a" * 40, "--evidence-file", m.EVIDENCE_REL],
+    )
+    assert m.main() == 3
+    payload = json.loads(
+        (tmp_path / "artifacts" / "lenovo-control-plane-pickup" / "evidence.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert payload["reason"] == "pickup_dependency_or_state_error"
+
+
+def test_probe_rejects_arbitrary_evidence_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(m, "collect", lambda expected: pytest.fail("probe must not run"))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["pickup.py", "--expected-source-sha", "a" * 40, "--evidence-file", "elsewhere.json"],
+    )
+    assert m.main() == 3
+    assert not (tmp_path / "elsewhere.json").exists()
