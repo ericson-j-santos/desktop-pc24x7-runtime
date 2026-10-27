@@ -371,7 +371,7 @@ def test_imported_module_from_other_checkout_is_rejected(monkeypatch, tmp_path):
     (200, b"x" * (probe.MAX_RESPONSE_BYTES + 1), "orchestrator_response_too_large"),
     (200, b"not-json", "orchestrator_readback_unavailable"),
     (200, b"[]", "orchestrator_response_invalid"),
-])
+], ids=["redirect", "oversize", "invalid-json", "invalid-type"])
 def test_loopback_reader_is_bounded_and_rejects_invalid_responses(
     monkeypatch, status, body, expected,
 ):
