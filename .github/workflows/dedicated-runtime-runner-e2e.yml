@@ -8,12 +8,17 @@ on:
         type: choice
         required: true
         default: runner-identity
-        options: [runner-identity, native-postgres-inventory, native-postgres-readback, native-wsl-postgres-qualification]
+        options: [runner-identity, native-postgres-inventory, native-postgres-readback, native-wsl-postgres-qualification, orchestrator-runner-preflight]
       lenovo_control_plane_pickup:
         description: Fixed DESKTOP-RP23OGS control-plane pickup; accepts no commands or targets
         type: boolean
         required: true
         default: false
+      orchestrator_source_sha:
+        description: Exact reviewed current main or same-repository open PR HEAD; required only for orchestrator preflight
+        type: string
+        required: false
+        default: ''
       inventory_source_sha:
         description: Full reviewed main SHA; required only for native inventory
         type: string
@@ -24,8 +29,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback' || inputs.diagnostic == 'native-wsl-postgres-qualification') && format('native-pg-inventory-954-{0}', github.run_id) || format('dedicated-runtime-runner-e2e-{0}', github.ref) }}
-  cancel-in-progress: ${{ (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification') }}
+  group: ${{ inputs.diagnostic == 'orchestrator-runner-preflight' && 'orchestrator-runner-preflight-desktop' || (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback' || inputs.diagnostic == 'native-wsl-postgres-qualification') && format('native-pg-inventory-954-{0}', github.run_id) || format('dedicated-runtime-runner-e2e-{0}', github.ref) }}
+  cancel-in-progress: ${{ (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification' && inputs.diagnostic != 'orchestrator-runner-preflight') }}
 
 jobs:
   resolve_rules:
@@ -35,10 +40,100 @@ jobs:
     permissions:
       contents: read
       actions: read
+      pull-requests: read
     outputs:
       rules_sha: ${{ steps.rules.outputs.sha }}
+      orchestrator_main_sha: ${{ steps.orchestrator_admission.outputs.main_sha }}
+      orchestrator_source_pr: ${{ steps.orchestrator_admission.outputs.source_pr }}
+      orchestrator_ci_run_id: ${{ steps.orchestrator_admission.outputs.ci_run_id }}
+      orchestrator_ci_attempt: ${{ steps.orchestrator_admission.outputs.ci_attempt }}
       inventory_admitted_at: ${{ steps.inventory_admission.outputs.admitted_at }}
     steps:
+      - name: Admit orchestrator preflight at current source and successful native CI
+        id: orchestrator_admission
+        if: inputs.diagnostic == 'orchestrator-runner-preflight'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          ORCHESTRATOR_SOURCE_SHA: ${{ inputs.orchestrator_source_sha }}
+        with:
+          script: |
+            const repository = 'ericson-j-santos/desktop-pc24x7-runtime';
+            const source = process.env.ORCHESTRATOR_SOURCE_SHA || '';
+            const branchName = context.ref.replace(/^refs\/heads\//, '');
+            if (context.eventName !== 'workflow_dispatch' || context.actor !== 'ericson-j-santos' ||
+                context.repo.owner + '/' + context.repo.repo !== repository ||
+                !context.ref.startsWith('refs/heads/') || process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                context.payload.inputs.lenovo_control_plane_pickup === 'true' ||
+                !/^[0-9a-f]{40}$/.test(source) || source !== context.sha) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_SCOPE_REJECTED');
+            }
+            const {data: main} = await github.rest.repos.getBranch({...context.repo, branch: 'main'});
+            const {data: current} = await github.rest.repos.getBranch({...context.repo, branch: branchName});
+            if (current.commit.sha !== source) throw new Error('ORCHESTRATOR_PREFLIGHT_HEAD_MOVED');
+            let sourcePr = 0;
+            if (branchName !== 'main') {
+              const {data: pulls} = await github.rest.pulls.list({
+                ...context.repo, state: 'open', base: 'main',
+                head: context.repo.owner + ':' + branchName, per_page: 100,
+              });
+              if (pulls.length !== 1 || pulls[0].head.sha !== source ||
+                  pulls[0].head.repo?.full_name !== repository ||
+                  pulls[0].base.repo?.full_name !== repository ||
+                  pulls[0].base.ref !== 'main' || pulls[0].base.sha !== main.commit.sha) {
+                throw new Error('ORCHESTRATOR_PREFLIGHT_CURRENT_PR_REQUIRED');
+              }
+              sourcePr = pulls[0].number;
+              const {data: comparison} = await github.rest.repos.compareCommits({
+                ...context.repo, base: main.commit.sha, head: source,
+              });
+              if (!['ahead', 'identical'].includes(comparison.status) ||
+                  comparison.merge_base_commit.sha !== main.commit.sha) {
+                throw new Error('ORCHESTRATOR_PREFLIGHT_CURRENT_MAIN_REQUIRED');
+              }
+            } else if (source !== main.commit.sha) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_MAIN_MOVED');
+            }
+            const {data: runs} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: source,
+              branch: branchName, event: 'push', per_page: 100,
+            });
+            const eligible = runs.workflow_runs.filter(item =>
+              item.head_sha === source && item.head_branch === branchName &&
+              item.event === 'push' && item.repository?.full_name === repository);
+            if (!eligible.length || eligible.some(item => !Number.isSafeInteger(item.id) || item.id <= 0 ||
+                !Number.isSafeInteger(item.run_attempt) || item.run_attempt <= 0 ||
+                !Number.isFinite(Date.parse(item.created_at)))) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_CI_METADATA_INVALID');
+            }
+            eligible.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
+            const run = eligible[0];
+            if (run.status !== 'completed' || run.conclusion !== 'success') {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_LATEST_CI_SUCCESS_REQUIRED');
+            }
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo, run_id: run.id, filter: 'latest', per_page: 100,
+            });
+            if (jobs.total_count !== jobs.jobs.length) throw new Error('ORCHESTRATOR_PREFLIGHT_CI_INCOMPLETE');
+            for (const [name, label] of [
+              ['Python compile and tests', 'windows-latest'],
+              ['Portable Linux compile and tests', 'ubuntu-latest'],
+            ]) {
+              const matches = jobs.jobs.filter(job => job.name === name);
+              const job = matches[0];
+              if (matches.length !== 1 || job.run_id !== run.id ||
+                  job.status !== 'completed' || job.conclusion !== 'success' ||
+                  !job.started_at || !job.completed_at || !job.labels?.includes(label) ||
+                  !['Compile', 'Unit and negative-control tests'].every(name =>
+                    job.steps?.some(step => step.name === name && step.status === 'completed' &&
+                    step.conclusion === 'success'))) {
+                throw new Error('ORCHESTRATOR_PREFLIGHT_REAL_CI_REQUIRED');
+              }
+            }
+            core.setOutput('main_sha', main.commit.sha);
+            core.setOutput('source_pr', String(sourcePr));
+            core.setOutput('ci_run_id', String(run.id));
+            core.setOutput('ci_attempt', String(run.run_attempt));
+
       - name: Admit fixed inventory from reviewed current main and successful native CI
         id: inventory_admission
         if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback' || inputs.diagnostic == 'native-wsl-postgres-qualification')
@@ -132,19 +227,56 @@ jobs:
               return;
             }
             const observed = match.slice(1).map(Number);
-            const required = [1, 6, 9];
+            const required = context.payload.inputs?.diagnostic === 'orchestrator-runner-preflight' ? [1, 6, 19] : [1, 6, 9];
             const sufficient = observed[0] > required[0]
               || (observed[0] === required[0] && observed[1] > required[1])
               || (observed[0] === required[0] && observed[1] === required[1] && observed[2] >= required[2]);
             if (!sufficient) {
-              core.setFailed(`RULES_1_6_9_REQUIRED:observed=${observed.join('.')}`);
+              core.setFailed(required[2] === 19 ? 'RULES_1_6_19_REQUIRED' : `RULES_1_6_9_REQUIRED:observed=${observed.join('.')}`);
               return;
             }
             core.setOutput('sha', sha);
 
-  e2e:
+  orchestrator_contract:
     needs: resolve_rules
-    if: inputs.lenovo_control_plane_pickup != true
+    if: inputs.diagnostic == 'orchestrator-runner-preflight'
+    name: Orchestrator preflight contract on exact SHA
+    runs-on: windows-latest
+    timeout-minutes: 5
+    outputs:
+      admitted_at: ${{ steps.admit.outputs.admitted_at }}
+    steps:
+      - name: Checkout exact runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Setup Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install existing test dependencies
+        shell: pwsh
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2 cryptography==50.0.2 PyYAML==6.0.3
+      - name: Focused preflight and workflow contract
+        shell: pwsh
+        run: python -m pytest -q tests/test_orchestrator_dev_runner_preflight.py tests/test_orchestrator_runner_preflight_workflow.py
+      - name: Admit bounded physical pickup after contract
+        id: admit
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            core.setOutput('admitted_at', new Date().toISOString());
+
+  e2e:
+    needs: [resolve_rules, orchestrator_contract]
+    if: ${{ !cancelled() && needs.resolve_rules.result == 'success' && inputs.lenovo_control_plane_pickup != true && (inputs.diagnostic != 'orchestrator-runner-preflight' || needs.orchestrator_contract.result == 'success') }}
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      orchestrator_receipt: ${{ steps.orchestrator_proof.outputs.receipt }}
     name: Pickup on dedicated Desktop runtime runner
     # Native inventory and readback require the Desktop identity label; do not
     # retag another runner or rely on the six shared runtime labels.
@@ -158,7 +290,46 @@ jobs:
       CORRELATION_ID: dedicated-runner-${{ github.run_id }}-${{ github.run_attempt }}
       EVIDENCE_REL: ${{ (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback' || inputs.diagnostic == 'native-wsl-postgres-qualification') && 'artifacts/native-pg-inventory/evidence.json' || 'artifacts/dedicated-runner-e2e/evidence.json' }}
       INVENTORY_ADMITTED_AT: ${{ needs.resolve_rules.outputs.inventory_admitted_at }}
+      ORCHESTRATOR_ADMITTED_AT: ${{ needs.orchestrator_contract.outputs.admitted_at }}
+      ORCHESTRATOR_MAIN_SHA: ${{ needs.resolve_rules.outputs.orchestrator_main_sha }}
+      ORCHESTRATOR_SOURCE_PR: ${{ needs.resolve_rules.outputs.orchestrator_source_pr }}
+      ORCHESTRATOR_CI_RUN_ID: ${{ needs.resolve_rules.outputs.orchestrator_ci_run_id }}
+      ORCHESTRATOR_CI_ATTEMPT: ${{ needs.resolve_rules.outputs.orchestrator_ci_attempt }}
     steps:
+      - name: Reject stale orchestrator pickup before checkout or bootstrap
+        if: inputs.diagnostic == 'orchestrator-runner-preflight'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const age = Date.now() - Date.parse(process.env.ORCHESTRATOR_ADMITTED_AT || '');
+            if (!Number.isFinite(age) || age < 0 || age > 300000 ||
+                process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
+                require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1') {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_PICKUP_EXPIRED_OR_WRONG_HOST');
+            }
+            const {data: current} = await github.rest.repos.getBranch({
+              ...context.repo, branch: context.ref.replace(/^refs\/heads\//, ''),
+            });
+            const {data: main} = await github.rest.repos.getBranch({...context.repo, branch: 'main'});
+            const {data: rules} = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos', repo: 'chatgpt-operational-rules', branch: 'main',
+            });
+            if (current.commit.sha !== context.sha || main.commit.sha !== process.env.ORCHESTRATOR_MAIN_SHA ||
+                rules.commit.sha !== process.env.RULES_SHA) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_ADMISSION_MOVED');
+            }
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo, run_id: context.runId, filter: 'latest', per_page: 100,
+            });
+            const matches = jobs.jobs.filter(job => job.name === 'Pickup on dedicated Desktop runtime runner');
+            if (jobs.total_count !== jobs.jobs.length || matches.length !== 1 ||
+                matches[0].run_id !== context.runId || matches[0].runner_id !== 2 ||
+                matches[0].runner_name !== 'DESKTOP-PDQK954-runtime' ||
+                matches[0].status !== 'in_progress') {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_RUNNER_2_REQUIRED');
+            }
+
       - name: Reject stale native pickup before checkout or bootstrap
         if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback' || inputs.diagnostic == 'native-wsl-postgres-qualification')
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
@@ -228,7 +399,7 @@ jobs:
           "RUNNER_DEPRECATION_API_STATUS=$($data.runner_version_preflight.deprecation_api_status)" | Add-Content $env:GITHUB_ENV
 
       - name: Prove exact host, repository, runner and version through Command Gateway
-        if: (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification')
+        if: (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification' && inputs.diagnostic != 'orchestrator-runner-preflight')
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
@@ -339,14 +510,159 @@ jobs:
           & python $gateway @gatewayArgs
           exit $LASTEXITCODE
 
+      - name: Prove orchestrator readonly preflight, negative SHA and replay through Command Gateway
+        id: orchestrator_proof
+        if: inputs.diagnostic == 'orchestrator-runner-preflight'
+        shell: python
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          import os, runpy
+          module = runpy.run_path(os.path.join(os.environ["GITHUB_WORKSPACE"], "scripts", "orchestrator_runner_preflight_workflow.py"))
+          module["prove"]()
+
       - name: Upload sanitized evidence
-        if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification') && steps.session.outputs.target_path != ''
+        if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification' && inputs.diagnostic != 'orchestrator-runner-preflight') && steps.session.outputs.target_path != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: dedicated-runner-e2e-${{ github.run_id }}
           path: ${{ steps.session.outputs.target_path }}/artifacts/dedicated-runner-e2e/evidence.json
           if-no-files-found: error
           retention-days: 30
+
+  orchestrator_preflight_readback:
+    needs: [resolve_rules, orchestrator_contract, e2e]
+    if: always() && inputs.diagnostic == 'orchestrator-runner-preflight'
+    name: Independent orchestrator preflight readback
+    runs-on: windows-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    env:
+      RECEIPT: ${{ needs.e2e.outputs.orchestrator_receipt }}
+      PHYSICAL_RESULT: ${{ needs.e2e.result }}
+      CONTRACT_RESULT: ${{ needs.orchestrator_contract.result }}
+      RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
+      ORCHESTRATOR_MAIN_SHA: ${{ needs.resolve_rules.outputs.orchestrator_main_sha }}
+      ORCHESTRATOR_SOURCE_PR: ${{ needs.resolve_rules.outputs.orchestrator_source_pr }}
+      ORCHESTRATOR_CI_RUN_ID: ${{ needs.resolve_rules.outputs.orchestrator_ci_run_id }}
+      ORCHESTRATOR_CI_ATTEMPT: ${{ needs.resolve_rules.outputs.orchestrator_ci_attempt }}
+    steps:
+      - name: Read actual jobs and require exact terminal preflight evidence
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            if (process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                process.env.PHYSICAL_RESULT !== 'success' || process.env.CONTRACT_RESULT !== 'success') {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_REQUIRED_JOB_FAILED');
+            }
+            const falseFields = [
+              'execution_authorized', 'registration_performed', 'registration_token_requested',
+              'runner_started', 'watchdog_changed', 'runner_version_preflight_proven',
+              'physical_pickup_proven', 'continuous_operation_proven',
+            ];
+            const receipt = JSON.parse(process.env.RECEIPT || '{}');
+            if (receipt.schema_version !== 1 || receipt.kind !== 'orchestrator-runner-readonly-preflight' ||
+                receipt.source_sha !== context.sha || receipt.rules_sha !== process.env.RULES_SHA ||
+                receipt.main_sha !== process.env.ORCHESTRATOR_MAIN_SHA ||
+                receipt.source_pr !== Number(process.env.ORCHESTRATOR_SOURCE_PR) ||
+                receipt.ci_run_id !== Number(process.env.ORCHESTRATOR_CI_RUN_ID) ||
+                receipt.ci_attempt !== Number(process.env.ORCHESTRATOR_CI_ATTEMPT) ||
+                receipt.run_id !== context.runId || receipt.run_attempt !== 1 ||
+                receipt.correlation_id !== 'dedicated-runner-' + context.runId + '-1' ||
+                receipt.host !== 'DESKTOP-PDQK954' || receipt.runner_name !== 'DESKTOP-PDQK954-runtime' ||
+                receipt.runner_id !== 2 || receipt.target_repository !== 'ericson-j-santos/reqsys-engineering-orchestrator' ||
+                receipt.target_environment !== 'dev' || receipt.negative_state !== 'source_sha_mismatch' ||
+                receipt.negative_exit_code !== 2 || receipt.replay_identical !== true ||
+                receipt.gateway_state_unchanged !== true || receipt.read_only !== true ||
+                !falseFields.every(key => receipt[key] === false) ||
+                !((receipt.registration_required === true && receipt.observed_target_runner_id === null) ||
+                  (receipt.registration_required === false &&
+                   Number.isSafeInteger(receipt.observed_target_runner_id) && receipt.observed_target_runner_id > 0))) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_RECEIPT_REJECTED');
+            }
+            const branchName = context.ref.replace(/^refs\/heads\//, '');
+            const {data: current} = await github.rest.repos.getBranch({...context.repo, branch: branchName});
+            const {data: main} = await github.rest.repos.getBranch({...context.repo, branch: 'main'});
+            const {data: rules} = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos', repo: 'chatgpt-operational-rules', branch: 'main',
+            });
+            if (current.commit.sha !== context.sha || main.commit.sha !== receipt.main_sha ||
+                rules.commit.sha !== receipt.rules_sha) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_READBACK_MOVED');
+            }
+            if (receipt.source_pr > 0) {
+              const {data: pull} = await github.rest.pulls.get({...context.repo, pull_number: receipt.source_pr});
+              if (pull.state !== 'open' || pull.head.sha !== context.sha || pull.head.ref !== branchName ||
+                  pull.head.repo?.full_name !== 'ericson-j-santos/desktop-pc24x7-runtime' ||
+                  pull.base.ref !== 'main' || pull.base.sha !== receipt.main_sha) {
+                throw new Error('ORCHESTRATOR_PREFLIGHT_READBACK_PR_MOVED');
+              }
+            } else if (branchName !== 'main' || receipt.source_sha !== receipt.main_sha) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_READBACK_MAIN_REQUIRED');
+            }
+            const {data: latestRuns} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: context.sha,
+              branch: branchName, event: 'push', per_page: 100,
+            });
+            const latestEligible = latestRuns.workflow_runs.filter(item =>
+              item.head_sha === context.sha && item.head_branch === branchName &&
+              item.event === 'push' &&
+              item.repository?.full_name === 'ericson-j-santos/desktop-pc24x7-runtime');
+            if (!latestEligible.length || latestEligible.some(item =>
+                !Number.isSafeInteger(item.id) || item.id <= 0 ||
+                !Number.isSafeInteger(item.run_attempt) || item.run_attempt <= 0 ||
+                !Number.isFinite(Date.parse(item.created_at)))) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_READBACK_CI_METADATA_INVALID');
+            }
+            latestEligible.sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
+            const latest = latestEligible[0];
+            if (latest.id !== receipt.ci_run_id || latest.run_attempt !== receipt.ci_attempt ||
+                latest.status !== 'completed' || latest.conclusion !== 'success') {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_READBACK_LATEST_CI_CHANGED');
+            }
+            const {data: ci} = await github.rest.actions.getWorkflowRun({
+              ...context.repo, run_id: receipt.ci_run_id,
+            });
+            if (ci.head_sha !== context.sha || ci.head_branch !== branchName ||
+                ci.event !== 'push' || ci.status !== 'completed' || ci.conclusion !== 'success' ||
+                ci.run_attempt !== receipt.ci_attempt) {
+              throw new Error('ORCHESTRATOR_PREFLIGHT_READBACK_CI_CHANGED');
+            }
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo, run_id: context.runId, filter: 'latest', per_page: 100,
+            });
+            if (jobs.total_count !== jobs.jobs.length) throw new Error('ORCHESTRATOR_PREFLIGHT_READBACK_INCOMPLETE');
+            const required = [
+              ['Pickup on dedicated Desktop runtime runner', [
+                'Reject stale orchestrator pickup before checkout or bootstrap',
+                'Bootstrap governed session and runner version preflight',
+                'Prove orchestrator readonly preflight, negative SHA and replay through Command Gateway',
+              ]],
+              ['Orchestrator preflight contract on exact SHA', ['Focused preflight and workflow contract']],
+            ];
+            for (const [name, steps] of required) {
+              const matches = jobs.jobs.filter(job => job.name === name);
+              const job = matches[0];
+              if (matches.length !== 1 || job.run_id !== context.runId ||
+                  job.status !== 'completed' || job.conclusion !== 'success' ||
+                  !job.started_at || !job.completed_at ||
+                  !steps.every(name => job.steps?.some(step => step.name === name &&
+                    step.status === 'completed' && step.conclusion === 'success')) ||
+                  (name.startsWith('Pickup') && (job.runner_id !== 2 || job.runner_name !== 'DESKTOP-PDQK954-runtime')) ||
+                  (name.startsWith('Orchestrator') && !job.labels?.includes('windows-latest'))) {
+                throw new Error('ORCHESTRATOR_PREFLIGHT_REAL_TERMINAL_EVIDENCE_REQUIRED');
+              }
+            }
+            core.info('ORCHESTRATOR_PREFLIGHT_INDEPENDENT_READBACK_OK:' + JSON.stringify(receipt));
+            await core.summary.addHeading('Orchestrator read-only preflight — execution still pending')
+              .addCodeBlock(JSON.stringify(receipt, null, 2), 'json').write();
 
   lenovo_pickup:
     needs: resolve_rules
@@ -404,7 +720,8 @@ jobs:
           retention-days: 30
 
   queue_watchdog:
-    needs: resolve_rules
+    needs: [resolve_rules, orchestrator_contract]
+    if: ${{ !cancelled() && needs.resolve_rules.result == 'success' && (inputs.diagnostic != 'orchestrator-runner-preflight' || needs.orchestrator_contract.result == 'success') }}
     name: Dedicated runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 7

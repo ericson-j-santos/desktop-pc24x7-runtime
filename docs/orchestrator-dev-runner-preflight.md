@@ -61,3 +61,28 @@ Essas etapas continuam pendentes: autorização administrativa do alvo DEV,
 registro exclusivo, pickup independente, scanner real e recuperação da
 supervisão sem substituir o runner Runtime. Também não é comprovada nesta
 capability a execução do handler de remediação até o resultado terminal.
+
+## Rota governada de qualificação
+
+O workflow existente dedicated-runtime-runner-e2e.yml oferece o diagnóstico
+fechado orchestrator-runner-preflight. Selecionar a branch revisada e informar
+orchestrator_source_sha com o HEAD completo atual. A admissão exige main atual
+como ancestral, PR aberta do próprio repositório quando aplicável e a execução
+mais recente do CI de push aprovada no mesmo SHA em Windows e Linux.
+
+O contrato hosted executa os testes específicos antes de liberar o runner
+Runtime ID 2. O primeiro passo físico revalida host, runner, HEAD, main, regras
+e a janela de pickup de cinco minutos. Session Launcher e Gateway permanecem
+obrigatórios. O novo modo limpa GH_TOKEN/GITHUB_TOKEN no transporte do probe
+para usar a autenticação local existente do gh; falta de acesso bloqueia a
+leitura, sem provisionar credenciais nem ampliar permissões.
+
+O helper executa um SHA negativo e duas leituras iguais. Um job hosted separado
+confere o recibo sanitizado, jobs e etapas reais, tentativa atual e a execução
+mais recente do CI. Cancelamento do operador interrompe os jobs físicos.
+O recibo não contém o caminho local planejado. Os uploads dos diagnósticos
+anteriores e o bloco Lenovo permanecem preservados.
+
+Esta rota comprova somente o preflight quando todas as verificações passarem.
+Cadastro do novo runner, pickup do scanner, supervisão contínua e remediação
+até estado terminal continuam gates separados.
