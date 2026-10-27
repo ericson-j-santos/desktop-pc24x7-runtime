@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import socket
 import sys
 import xml.etree.ElementTree as ET
@@ -22,6 +23,7 @@ import desktop_control_plane_watchdog_uac_launcher as uac
 EXPECTED_HOST = "DESKTOP-RP23OGS"
 EXPECTED_RUNNER = "DESKTOP-RP23OGS-runtime"
 EXPECTED_REPOSITORY = "ericson-j-santos/desktop-pc24x7-runtime"
+EVIDENCE_REL = "artifacts/lenovo-control-plane-pickup/evidence.json"
 
 
 class PickupBlocked(RuntimeError):
@@ -183,12 +185,35 @@ def main() -> int:
     parser.add_argument("--expected-source-sha", required=True)
     parser.add_argument("--evidence-file", type=Path, required=True)
     args = parser.parse_args()
+    if str(args.evidence_file).replace("\\", "/") != EVIDENCE_REL:
+        print(json.dumps({"result": "BLOCKED", "reason": "evidence_path_mismatch"}))
+        return 3
+    evidence_path = Path.cwd() / "artifacts" / "lenovo-control-plane-pickup" / "evidence.json"
     try:
         payload = collect(args.expected_source_sha)
-        watchdog.atomic_json(args.evidence_file.resolve(), payload)
     except (PickupBlocked, watchdog.WatchdogError, OSError, ValueError, json.JSONDecodeError) as exc:
-        print(json.dumps({"result": "BLOCKED", "reason": str(exc)[:200]}, sort_keys=True))
+        reason = str(exc)
+        if not isinstance(exc, PickupBlocked) or not re.fullmatch(r"[a-z][a-z0-9_]{0,79}", reason):
+            reason = "pickup_dependency_or_state_error"
+        run_id = str(os.environ.get("GITHUB_RUN_ID") or "")
+        run_attempt = str(os.environ.get("GITHUB_RUN_ATTEMPT") or "")
+        payload = {
+            "schema_version": "1",
+            "ok": False,
+            "result": "BLOCKED",
+            "reason": reason,
+            "source_sha": (
+                args.expected_source_sha
+                if re.fullmatch(r"[0-9a-f]{40}", args.expected_source_sha)
+                else ""
+            ),
+            "github_run_id": run_id if run_id.isdigit() else "",
+            "github_run_attempt": run_attempt if run_attempt.isdigit() else "",
+        }
+        watchdog.atomic_json(evidence_path, payload)
+        print(json.dumps(payload, sort_keys=True))
         return 3
+    watchdog.atomic_json(evidence_path, payload)
     print(json.dumps(payload, sort_keys=True))
     return 0
 

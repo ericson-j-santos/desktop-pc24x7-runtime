@@ -181,7 +181,7 @@ def prove() -> None:
         "--expected-head",
         anchor_sha,
         "--",
-        "python",
+        sys.executable,
         "-B",
         str(probe),
         "--expected-source-sha",
