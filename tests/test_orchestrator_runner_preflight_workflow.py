@@ -435,11 +435,17 @@ def test_preserved_desktop_bootstrap_parses_in_native_powershell_51():
         "$tokens=$null;$errors=$null;"
         "[System.Management.Automation.Language.Parser]::ParseInput("
         "[Console]::In.ReadToEnd(),[ref]$tokens,[ref]$errors) | Out-Null;"
-        "if ($errors.Count -gt 0) { exit 3 }"
+        "if ($errors.Count -gt 0) { "
+        "$errors | ForEach-Object { [Console]::Error.WriteLine($_.Message) }; exit 3 }"
     )
+    template = step("Bootstrap governed session and runner version preflight")["run"]
+    expression = "$" + "{{ github.sha }}"
+    assert template.count(expression) == 1
+    rendered = template.replace(expression, HEAD)
+    assert "$" + "{{" not in rendered, "Resolve every GitHub expression before native parsing."
     result = subprocess.run(
         [executable, "-NoProfile", "-NonInteractive", "-Command", parser],
-        input=step("Bootstrap governed session and runner version preflight")["run"],
+        input=rendered,
         text=True, capture_output=True, timeout=20, check=False,
     )
-    assert result.returncode == 0, "Existing governed PowerShell bootstrap failed native parsing."
+    assert result.returncode == 0, result.stderr or "Existing governed PowerShell bootstrap failed native parsing."
