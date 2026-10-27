@@ -377,59 +377,20 @@ jobs:
 
       - name: Bootstrap governed Lenovo session and runner version preflight
         id: lenovo_session
-        shell: powershell
+        shell: python
         run: |
-          $ErrorActionPreference = "Stop"
-          if ($env:RUNNER_NAME -ne 'DESKTOP-RP23OGS-runtime' -or
-              [System.Net.Dns]::GetHostName().ToUpperInvariant() -ne 'DESKTOP-RP23OGS') {
-            throw 'LENOVO_PHYSICAL_IDENTITY_MISMATCH'
-          }
-          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
-          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
-          $anchorSha = "${{ github.sha }}"
-          $syncRef = "origin/$env:GITHUB_REF_NAME"
-          $raw = & python $launcher `
-            --policy $policy `
-            --repo $env:GITHUB_WORKSPACE `
-            --session-prefix lenovo-control-plane-pickup `
-            --correlation-id $env:CORRELATION_ID `
-            --expected-head $anchorSha `
-            --sync-ref $syncRef `
-            --require-runner-version-preflight
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $data = @($raw)[-1] | ConvertFrom-Json
-          if ($data.result -ne 'SESSION_LAUNCH_OK' -or $data.state_validated -ne $true -or
-              $data.head -ne $anchorSha -or $data.runner_version_preflight.ok -ne $true) {
-            throw 'LENOVO_SESSION_LAUNCH_BLOCKED'
-          }
-          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
-          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
-          "anchor_sha=$anchorSha" | Add-Content $env:GITHUB_OUTPUT
+          from scripts.lenovo_control_plane_workflow import bootstrap
+          bootstrap()
 
       - name: Prove Lenovo control-plane pickup through Command Gateway
-        shell: powershell
+        shell: python
         env:
           TARGET_PATH: ${{ steps.lenovo_session.outputs.target_path }}
           SESSION_ID: ${{ steps.lenovo_session.outputs.session_id }}
           ANCHOR_SHA: ${{ steps.lenovo_session.outputs.anchor_sha }}
         run: |
-          $ErrorActionPreference = "Stop"
-          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
-          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
-          $probe = Join-Path $env:TARGET_PATH "scripts\lenovo_control_plane_pickup.py"
-          & python $gateway `
-            --policy $policy `
-            --correlation-id $env:CORRELATION_ID `
-            run `
-            --cwd $env:TARGET_PATH `
-            --session-id $env:SESSION_ID `
-            --risk 1 `
-            --timeout 60 `
-            --expected-head $env:ANCHOR_SHA `
-            -- python -B $probe `
-              --expected-source-sha $env:GITHUB_SHA `
-              --evidence-file $env:EVIDENCE_REL
-          exit $LASTEXITCODE
+          from scripts.lenovo_control_plane_workflow import prove
+          prove()
 
       - name: Upload Lenovo pickup evidence
         if: always() && steps.lenovo_session.outputs.target_path != ''
