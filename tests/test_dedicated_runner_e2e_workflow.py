@@ -66,8 +66,9 @@ def test_lenovo_pickup_is_exact_sha_host_runner_and_artifact_bound() -> None:
     assert lenovo.count("shell: python") == 2
     assert "shell: powershell" not in lenovo
     assert "shell: cmd" not in lenovo
-    assert "scripts.lenovo_control_plane_workflow" in lenovo
-    assert "bootstrap()" in lenovo
-    assert "prove()" in lenovo
+    assert lenovo.count("runpy.run_path") == 2
+    assert lenovo.count('os.environ["GITHUB_WORKSPACE"]') == 2
+    assert 'module["bootstrap"]()' in lenovo
+    assert 'module["prove"]()' in lenovo
     assert "lenovo-control-plane-pickup/evidence.json" in raw
     assert "process.env.EXPECTED_RUNNER" in raw

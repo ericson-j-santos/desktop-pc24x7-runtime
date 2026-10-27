@@ -16,6 +16,28 @@ m = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(m)
 
 
+def test_workflow_module_loads_from_actions_temp_directory(tmp_path: Path) -> None:
+    temp_script = tmp_path / "actions-temp.py"
+    temp_script.write_text(
+        "import os, runpy\n"
+        "module = runpy.run_path(os.path.join(os.environ['GITHUB_WORKSPACE'], "
+        "'scripts', 'lenovo_control_plane_workflow.py'))\n"
+        "assert callable(module['bootstrap'])\n"
+        "assert callable(module['prove'])\n",
+        encoding="utf-8",
+    )
+    completed = subprocess.run(
+        [sys.executable, str(temp_script)],
+        cwd=tmp_path,
+        env={**__import__("os").environ, "GITHUB_WORKSPACE": str(ROOT)},
+        capture_output=True,
+        text=True,
+        timeout=10,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+
+
 def valid_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sha: str) -> None:
     values = {
         "GITHUB_ACTIONS": "true",

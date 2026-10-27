@@ -379,8 +379,9 @@ jobs:
         id: lenovo_session
         shell: python
         run: |
-          from scripts.lenovo_control_plane_workflow import bootstrap
-          bootstrap()
+          import os, runpy
+          module = runpy.run_path(os.path.join(os.environ["GITHUB_WORKSPACE"], "scripts", "lenovo_control_plane_workflow.py"))
+          module["bootstrap"]()
 
       - name: Prove Lenovo control-plane pickup through Command Gateway
         shell: python
@@ -389,8 +390,9 @@ jobs:
           SESSION_ID: ${{ steps.lenovo_session.outputs.session_id }}
           ANCHOR_SHA: ${{ steps.lenovo_session.outputs.anchor_sha }}
         run: |
-          from scripts.lenovo_control_plane_workflow import prove
-          prove()
+          import os, runpy
+          module = runpy.run_path(os.path.join(os.environ["GITHUB_WORKSPACE"], "scripts", "lenovo_control_plane_workflow.py"))
+          module["prove"]()
 
       - name: Upload Lenovo pickup evidence
         if: always() && steps.lenovo_session.outputs.target_path != ''
