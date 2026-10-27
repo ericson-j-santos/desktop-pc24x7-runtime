@@ -14,7 +14,6 @@ import stat
 import subprocess
 from http.client import HTTPConnection, HTTPException
 from pathlib import Path
-from types import MappingProxyType
 from typing import Any
 
 import bootstrap_dedicated_runtime_runner as bootstrap
@@ -27,17 +26,8 @@ SOURCE_PATHS = (
     "scripts/desktop_control_plane_watchdog.py",
     "scripts/pc24x7_host_policy.py",
 )
-PROFILE = MappingProxyType({
-    "target": "orchestrator-dev",
-    "environment": "dev",
-    "host": "DESKTOP-PDQK954",
-    "repository": "ericson-j-santos/reqsys-engineering-orchestrator",
-    "runner_name": "DESKTOP-PDQK954-orchestrator-dev",
-    "directory": "EngineeringOrchestratorDEV",
-})
-REQUIRED_LABELS = frozenset({
-    "self-hosted", "Windows", "X64", "orchestrator-dev", "desktop-pdqk954",
-})
+PROFILE = host_policy.ORCHESTRATOR_DEV_RUNNER_PROFILE
+REQUIRED_LABELS = host_policy.ORCHESTRATOR_DEV_RUNNER_REQUIRED_LABELS
 MAX_RESPONSE_BYTES = 262144
 MAX_METADATA_BYTES = 65536
 SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -189,8 +179,8 @@ def require_orchestrator() -> None:
         raise blocked("orchestrator_desktop_worker_not_ready")
 
 
-def registry_snapshot() -> dict[str, Any] | None:
-    token = os.environ.get("GH_TOKEN", "").strip() or None
+def registry_snapshot(*, local_auth_only: bool = False) -> dict[str, Any] | None:
+    token = None if local_auth_only else os.environ.get("GH_TOKEN", "").strip() or None
     payload = bootstrap.api_json(
         f"/repos/{PROFILE['repository']}/actions/runners?per_page=100",
         method="GET",
@@ -272,14 +262,16 @@ def require_local_binding(home: Path, remote: dict[str, Any] | None) -> None:
         raise blocked("runner_labels_mismatch")
 
 
-def preflight(*, expected_sha: str, correlation_id: str) -> dict[str, Any]:
+def preflight(
+    *, expected_sha: str, correlation_id: str, local_auth_only: bool = False,
+) -> dict[str, Any]:
     if not CORRELATION_RE.fullmatch(correlation_id):
         raise blocked("correlation_id_invalid")
     require_source(expected_sha)
     if bootstrap.validate_host().casefold() != PROFILE["host"].casefold():
         raise blocked("orchestrator_runner_host_not_authorized")
     home = runner_home()
-    remote = registry_snapshot()
+    remote = registry_snapshot(local_auth_only=True) if local_auth_only else registry_snapshot()
     require_local_binding(home, remote)
     require_orchestrator()
     return {
