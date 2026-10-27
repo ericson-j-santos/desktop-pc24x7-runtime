@@ -131,8 +131,13 @@ relido. Custo adicional autorizado permanece R$ 0,00.
 
 Sob lock Windows exclusivo no diretório do perfil, o aplicador relê o plano,
 baixa o pacote oficial para staging temporário, comprova tamanho e SHA-256,
-extrai sem escape de caminho e executa --version do binário novo. Versão
-inesperada, falha de execução ou depreciação inválida bloqueia o cadastro.
+extrai sem escape de caminho e confere um manifesto de todos os arquivos e
+diretórios, inclusive dependências. Links, reparse points e hardlinks são
+rejeitados. Caminhos e tipos inesperados são rejeitados antes de ler conteúdo.
+A sonda --version executa uma cópia temporária previamente conferida contra o
+manifesto, pois o runner cria _diag durante a inicialização. O pacote original
+é novamente conferido e somente esse payload íntegro pode ser instalado.
+Versão inesperada, falha de execução ou depreciação inválida bloqueia o cadastro.
 Não desabilita App Control ou outro controle do host.
 
 O diretório de destino deve estar ausente ou vazio. A instalação usa rename
@@ -141,6 +146,8 @@ de registro concorrente são conferidos novamente antes do POST fixo de registro
 O token efêmero fica somente no ambiente do processo de configuração,
 ACTIONS_RUNNER_INPUT_TOKEN, e é removido em finally. Todos os inputs herdados
 ACTIONS_RUNNER_INPUT_* e tokens do workflow são excluídos desse ambiente.
+RUNNER_PERFLOG e GITHUB_ACTIONS_RUNNER_HTTPTRACE herdados também são removidos
+para impedir logs fora do staging e rastreamento de conteúdo sensível.
 Processos temporários preservam RUNNER_TRACKING_ID para o encerramento pelo job.
 A configuração chama diretamente Runner.Listener.exe configure, sem cmd.exe,
 Unblock-File ou alteração de App Control. A remoção do tracking permanece
@@ -160,6 +167,8 @@ o digest atual e o solicitado e não atribui a criação a essa tentativa.
 
 Falha antes do cadastro não autoriza apagar dados existentes. Staging temporário
 é descartado; um pacote que já tenha sido instalado é preservado e reportado.
+O efeito da instalação é registrado imediatamente após o rename, antes de
+qualquer pós-check que possa falhar.
 Se a configuração foi invocada e o efeito não puder ser comprovado,
 registration_performed é null, e o ID remoto eventualmente observado é publicado
 sem atribuir sua criação à tentativa. Não há DELETE ou unregister automático.
@@ -186,3 +195,28 @@ reconciliação, sem remover por nome.
 Fontes oficiais: [release v2.338.2](https://github.com/actions/runner/releases/tag/v2.338.2),
 [protocolo de configuração](https://github.com/actions/runner/blob/v2.338.2/src/Runner.Listener/CommandSettings.cs)
 e [API de runners](https://docs.github.com/en/rest/actions/self-hosted-runners).
+
+
+## Inventário local quando o preflight permanece bloqueado
+
+Nos bloqueios fechados de autenticação ou readiness, o probe revalida fonte e
+host e coleta observações locais independentes. Não realiza login, repete a
+autenticação GitHub nem contorna o inventário remoto.
+
+O watchdog fornece leitores fixos da instalação, estado, tarefa e processos.
+As respostas de /readyz e /v1/workers são observadas separadamente. Uma falha
+de componente não suprime os demais. Não há execução do Listener ou leitura
+do conteúdo de .runner/arquivos de credenciais durante essa coleta.
+
+O helper projeta o suplemento em esquema público fechado e imprime
+ORCHESTRATOR_LOCAL_INVENTORY. Enums, booleanos, contagens, PID e hashes são
+permitidos; paths de usuário, principal, SID, XML, metadata/status integrais
+e respostas brutas não são publicados. O envelope do Gateway, SHA,
+correlação, sessão, risco e ausência de mudança são validados antes da projeção.
+
+O preflight continua bloqueado, sem recibo final de sucesso ou autorização.
+Metadata ausente refere-se somente ao caminho fixo no LOCALAPPDATA da sessão;
+não prova ausência em outros perfis do host. Consulta da tarefa indisponível
+não distingue inexistência de acesso negado. Componentes não observados são
+mantidos como desconhecidos, e nenhuma dessas leituras comprova operação
+contínua, recuperação ou cadastro do novo runner.

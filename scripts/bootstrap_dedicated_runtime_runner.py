@@ -503,7 +503,7 @@ def orchestrator_dev_plan(*, source_sha: str, correlation_id: str) -> dict[str, 
 
 
 def _orchestrator_clean_env() -> dict[str, str]:
-    excluded = {"gh_token", "github_token"}
+    excluded = {"gh_token", "github_token", "runner_perflog", "github_actions_runner_httptrace"}
     return {
         key: value for key, value in os.environ.items()
         if key.casefold() not in excluded
@@ -650,26 +650,89 @@ def _orchestrator_download_package(staging: Path) -> Path:
     return extracted
 
 
-def _orchestrator_binary_manifest(root: Path) -> dict[str, str]:
+def _orchestrator_binary_manifest(
+    root: Path, *, expected: dict[str, str] | None = None,
+) -> dict[str, str]:
+    """Hash the entire regular layout; reject unexpected paths before reading bytes."""
+    import stat
+
     probe = _orchestrator_probe()
-    result = {}
-    for relative in ("config.cmd", "run.cmd", "bin/Runner.Listener.exe"):
-        path = root / relative
+    kinds: dict[str, str] = {}
+    files: dict[str, tuple[Path, Any]] = {}
+
+    def inspect(directory: Path) -> None:
+        # Validate each directory and its ancestors before descending.
+        probe.checked_path(directory, directory=True)
+        with os.scandir(directory) as iterator:
+            children = sorted(iterator, key=lambda entry: entry.name)
+        for child in children:
+            path = Path(child.path)
+            info = path.lstat()
+            if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+                raise BootstrapError("orchestrator_package_link_rejected", "orchestrator_package_link_rejected")
+            relative = path.relative_to(root).as_posix()
+            if stat.S_ISDIR(info.st_mode):
+                kinds[relative + "/"] = "directory"
+                inspect(path)
+            elif stat.S_ISREG(info.st_mode):
+                if info.st_nlink != 1:
+                    raise BootstrapError("orchestrator_package_link_rejected", "orchestrator_package_link_rejected")
+                kinds[relative] = "file"
+                files[relative] = (path, info)
+            else:
+                raise BootstrapError("orchestrator_package_entry_invalid", "orchestrator_package_entry_invalid")
+
+    inspect(root)
+    if expected is not None:
+        expected_kinds = {
+            relative: "directory" if value == "directory" else "file"
+            for relative, value in expected.items()
+        }
+        if kinds != expected_kinds:
+            raise BootstrapError("orchestrator_package_changed", "orchestrator_package_changed")
+
+    result = {relative: kind for relative, kind in kinds.items() if kind == "directory"}
+    for relative, (path, before) in sorted(files.items()):
         probe.checked_path(path, directory=False)
-        result[relative] = sha256_file(path)
-    return result
+        digest = sha256_file(path)
+        after = path.lstat()
+        attributes = ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink")
+        if (
+            any(getattr(before, field) != getattr(after, field) for field in attributes)
+            or getattr(after, "st_file_attributes", 0) & 0x400
+        ):
+            raise BootstrapError("orchestrator_package_changed", "orchestrator_package_changed")
+        result[relative] = digest
+    return dict(sorted(result.items()))
 
 
-def _orchestrator_install_package(package_root: Path, home: Path) -> None:
+def _orchestrator_verify_version_copy(
+    package_root: Path, manifest: dict[str, str],
+) -> str:
+    # --version creates _diag before parsing command arguments in the official
+    # runner. Execute an identical disposable copy, never the install payload.
+    version_root = package_root.parent / "version-probe"
+    shutil.copytree(package_root, version_root, symlinks=True)
+    if _orchestrator_binary_manifest(version_root, expected=manifest) != manifest:
+        raise BootstrapError("orchestrator_package_changed", "orchestrator_package_changed")
+    version = _orchestrator_version_probe(version_root)
+    if _orchestrator_binary_manifest(package_root, expected=manifest) != manifest:
+        raise BootstrapError("orchestrator_package_changed", "orchestrator_package_changed")
+    return version
+
+
+def _orchestrator_install_package(
+    package_root: Path, home: Path, *, progress: dict[str, Any],
+) -> None:
     probe = _orchestrator_probe()
     present = probe.checked_path(home, directory=True, allow_missing_tail=True)
     if present:
         if any(home.iterdir()):
             raise BootstrapError("runner_home_not_empty", "runner_home_not_empty")
-        # The fixed, empty target is removed only to permit an atomic Windows rename.
-        # No existing runner or other populated directory can enter this branch.
         home.rmdir()
     os.replace(package_root, home)
+    # The effect already happened. Record it before any fallible readback.
+    progress["package_installed"] = True
     probe.checked_path(home, directory=True)
 
 
@@ -683,7 +746,7 @@ def _orchestrator_pre_registration(
     orchestrator_dev_runner_profile(validate_host())
     if probe.runner_home() != home:
         raise BootstrapError("orchestrator_runner_home_changed", "orchestrator_runner_home_changed")
-    if _orchestrator_binary_manifest(home) != manifest:
+    if _orchestrator_binary_manifest(home, expected=manifest) != manifest:
         raise BootstrapError("orchestrator_package_changed", "orchestrator_package_changed")
     for name in (".runner", ".credentials", ".credentials_rsaparams", ".service", ".env", ".path"):
         if probe.checked_path(home / name, directory=False, allow_missing_tail=True):
@@ -751,13 +814,12 @@ def apply_orchestrator_dev_plan(
             with tempfile.TemporaryDirectory(prefix="runner-package-", dir=home.parent) as temporary:
                 package_root = _orchestrator_download_package(Path(temporary))
                 manifest = _orchestrator_binary_manifest(package_root)
-                _orchestrator_version_probe(package_root)
+                _orchestrator_verify_version_copy(package_root, manifest)
                 progress["runner_binary_version_proven"] = True
                 current = orchestrator_dev_plan(source_sha=source_sha, correlation_id=correlation_id)
                 if current["plan_sha256"] != expected_plan_sha256:
                     raise BootstrapError("orchestrator_plan_changed", "orchestrator_plan_changed")
-                _orchestrator_install_package(package_root, home)
-                progress["package_installed"] = True
+                _orchestrator_install_package(package_root, home, progress=progress)
             _orchestrator_pre_registration(home=home, source_sha=source_sha, manifest=manifest)
             progress["registration_token_requested"] = True
             token = _orchestrator_registration_token()

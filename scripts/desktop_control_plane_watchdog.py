@@ -1249,6 +1249,248 @@ def status(runtime_root: Path) -> dict[str, Any]:
     }
 
 
+def _inventory_path(path: Path, *, directory: bool) -> None:
+    """Check existing components without following a reparse point."""
+    import stat
+    if not path.is_absolute() or ".." in path.parts or path.drive.startswith("\\\\"):
+        raise WatchdogError("inventory_path_rejected")
+    for part in (*reversed(path.parents), path):
+        info = part.lstat()
+        if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
+            raise WatchdogError("inventory_link_rejected")
+        valid = stat.S_ISDIR(info.st_mode) if part != path or directory else stat.S_ISREG(info.st_mode)
+        if not valid:
+            raise WatchdogError("inventory_path_type_rejected")
+
+
+def _inventory_bytes(path: Path, limit: int = 2097152) -> bytes:
+    _inventory_path(path, directory=False)
+    with path.open("rb") as stream:
+        raw = stream.read(limit + 1)
+    if len(raw) > limit:
+        raise WatchdogError("inventory_file_too_large")
+    return raw
+
+
+def _inventory_json(path: Path) -> tuple[dict[str, Any], str]:
+    def unique(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate_key")
+            result[key] = value
+        return result
+    raw = _inventory_bytes(path, 65536)
+    value = json.loads(raw.decode("utf-8-sig"), object_pairs_hook=unique)
+    if not isinstance(value, dict):
+        raise ValueError("object_required")
+    return value, hashlib.sha256(raw).hexdigest()
+
+
+def _inventory_same_path(value: Any, expected: Path) -> bool:
+    return (
+        isinstance(value, str) and Path(value).is_absolute()
+        and ".." not in Path(value).parts
+        and os.path.normcase(str(Path(value))) == os.path.normcase(str(expected))
+    )
+
+
+def _inventory_failure(exc: Exception) -> str:
+    if isinstance(exc, FileNotFoundError):
+        return "missing"
+    if isinstance(exc, (ValueError, UnicodeError)):
+        return "invalid"
+    if isinstance(exc, WatchdogError):
+        return "blocked"
+    return "unavailable"
+
+
+def _inventory_task_identity(installation: dict[str, Any] | None) -> dict[str, Any]:
+    """Read only the fixed task; keep principal, SID and action text private."""
+    import win32api  # type: ignore
+    import win32com.client  # type: ignore
+    import win32security  # type: ignore
+
+    service = win32com.client.Dispatch("Schedule.Service")
+    service.Connect()
+    task = service.GetFolder(TASK_FOLDER).GetTask(TASK_LEAF)
+    definition = task.Definition
+    principal = str(definition.Principal.UserId)
+    if principal.startswith("S-"):
+        task_sid = str(win32security.ConvertSidToStringSid(
+            win32security.ConvertStringSidToSid(principal)
+        ))
+    else:
+        task_sid = current_user_sid(principal)
+    token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), 0x0008)
+    try:
+        process_sid = str(win32security.ConvertSidToStringSid(
+            win32security.GetTokenInformation(token, win32security.TokenUser)[0]
+        ))
+    finally:
+        token.Close()
+    result = {
+        "process_user_matches_task_principal": process_sid == task_sid,
+        "task_s4u": int(definition.Principal.LogonType) == TASK_LOGON_S4U,
+        "task_limited": int(definition.Principal.RunLevel) == TASK_RUNLEVEL_LUA,
+        "task_action_matches_installation": None,
+    }
+    if installation is not None:
+        matches = False
+        if int(definition.Actions.Count) == 1:
+            action = definition.Actions.Item(1)
+            matches = (
+                int(action.Type) == TASK_ACTION_EXEC
+                and _inventory_same_path(str(action.Path), installation["python_executable"])
+                and str(action.Arguments) == f'"{installation["launcher"]}"'
+                and _inventory_same_path(str(action.WorkingDirectory), installation["runtime_root"])
+            )
+        result["task_action_matches_installation"] = matches
+    return result
+
+
+def readonly_local_inventory() -> dict[str, Any]:
+    """Fixed PDQ inventory. Never starts, stops, configures or authenticates."""
+    from pc24x7_host_policy import orchestrator_dev_runner_profile
+
+    host = require_windows_desktop()
+    profile = orchestrator_dev_runner_profile(host)
+    result: dict[str, Any] = {
+        "paths_status": "unavailable",
+        "metadata_status": "unavailable", "installed_source_sha": None,
+        "metadata_sha256": None, "watchdog_sha256": None, "uac_sha256": None,
+        "launcher_sha256": None, "host_policy_sha256": None,
+        "metadata_host_matches": None, "metadata_runner_home_matches": None,
+        "metadata_release_matches": None, "metadata_python_exists": None,
+        "task_query_status": "unavailable", "task_registered_observed": None,
+        "task_at_startup": None, "task_runtime_status": "unavailable",
+        "task_state": None, "task_enabled": None,
+        "task_identity_status": "unavailable", "task_s4u": None, "task_limited": None,
+        "process_user_matches_task_principal": None,
+        "task_action_matches_installation": None,
+        "state_status": "unavailable", "state_ok": None,
+        "state_source_matches_installation": None, "state_fresh_300s": None,
+        "runtime_home_status": "unavailable", "runtime_listener_pid": None,
+        "runtime_unresolved_process_count": None,
+        "orchestrator_home_status": "unavailable",
+        "orchestrator_home_empty": None, "orchestrator_config_present": None,
+    }
+    root = primary = extra = None
+    installation = None
+    try:
+        local = Path(os.environ.get("LOCALAPPDATA") or "")
+        _inventory_path(local, directory=True)
+        root = default_runtime_root()
+        primary = local / "DesktopPC24x7" / "GitHubRunner"
+        extra = local / profile["directory"] / "GitHubRunner"
+        result["paths_status"] = "observed"
+    except Exception as exc:
+        result["paths_status"] = _inventory_failure(exc)
+
+    if root is not None:
+        try:
+            metadata, fingerprint = _inventory_json(root / "metadata.json")
+            result["metadata_sha256"] = fingerprint
+            source = metadata.get("source_sha")
+            if not isinstance(source, str) or len(source) != 40 or any(c not in "0123456789abcdefABCDEF" for c in source):
+                raise ValueError("installed_sha_invalid")
+            source = source.lower()
+            result["installed_source_sha"] = source
+            release = root / "releases" / source
+            result["metadata_host_matches"] = str(metadata.get("host", "")).casefold() == host.casefold()
+            result["metadata_runner_home_matches"] = _inventory_same_path(metadata.get("runner_home"), primary)
+            result["metadata_release_matches"] = _inventory_same_path(metadata.get("release_root"), release)
+            if not (
+                _inventory_same_path(metadata.get("runtime_root"), root)
+                and result["metadata_host_matches"]
+                and result["metadata_runner_home_matches"]
+                and result["metadata_release_matches"]
+            ):
+                raise ValueError("metadata_scope_mismatch")
+            python = metadata.get("python_executable")
+            if not isinstance(python, str):
+                raise ValueError("python_path_invalid")
+            _inventory_path(Path(python), directory=False)
+            result["metadata_python_exists"] = True
+            for field, path in (
+                ("watchdog_sha256", release / "scripts" / "desktop_control_plane_watchdog.py"),
+                ("uac_sha256", release / "scripts" / UAC_LAUNCHER_SCRIPT),
+                ("host_policy_sha256", release / "scripts" / HOST_POLICY_SCRIPT),
+                ("launcher_sha256", root / "run.py"),
+            ):
+                try:
+                    result[field] = hashlib.sha256(_inventory_bytes(path)).hexdigest()
+                except Exception:
+                    result[field] = None
+            candidate = load_installed_metadata(root / "metadata.json")
+            after, after_fingerprint = _inventory_json(root / "metadata.json")
+            if candidate["metadata"] != metadata or after != metadata or after_fingerprint != fingerprint:
+                raise ValueError("metadata_changed_during_read")
+            installation = candidate
+            result["metadata_status"] = "observed"
+        except Exception as exc:
+            result["metadata_status"] = _inventory_failure(exc)
+        try:
+            state, _ = _inventory_json(root / "state.json")
+            result["state_ok"] = state.get("ok") if type(state.get("ok")) is bool else None
+            if result["installed_source_sha"] is not None:
+                result["state_source_matches_installation"] = state.get("source_sha") == result["installed_source_sha"]
+            generated = datetime.fromisoformat(str(state.get("generated_at", "")).replace("Z", "+00:00"))
+            if generated.tzinfo is None:
+                raise ValueError("state_time_invalid")
+            age = (datetime.now(timezone.utc) - generated.astimezone(timezone.utc)).total_seconds()
+            result["state_fresh_300s"] = 0 <= age <= 300
+            result["state_status"] = "observed"
+        except Exception as exc:
+            result["state_status"] = _inventory_failure(exc)
+
+    try:
+        task = task_status()
+        result["task_registered_observed"] = task.get("exists") is True
+        result["task_at_startup"] = task.get("trigger_at_startup") is True
+        result["task_query_status"] = "observed" if task.get("exists") is True else "unavailable"
+    except Exception as exc:
+        result["task_query_status"] = _inventory_failure(exc)
+    try:
+        task_runtime = task_runtime_snapshot()
+        result["task_state"] = task_runtime["state"]
+        result["task_enabled"] = task_runtime["enabled"]
+        result["task_runtime_status"] = "observed"
+    except Exception as exc:
+        result["task_runtime_status"] = _inventory_failure(exc)
+    try:
+        result.update(_inventory_task_identity(installation))
+        result["task_identity_status"] = "observed"
+    except Exception as exc:
+        result["task_identity_status"] = _inventory_failure(exc)
+
+    if primary is not None:
+        try:
+            _inventory_path(primary, directory=True)
+            for parts in RUNNER_REQUIRED:
+                _inventory_path(primary.joinpath(*parts), directory=False)
+            process = runner_process_snapshot(primary)
+            matching = process["matching_pids"]
+            result["runtime_listener_pid"] = matching[0] if len(matching) == 1 else None
+            result["runtime_unresolved_process_count"] = len(process["unresolved_pids"])
+            result["runtime_home_status"] = "observed"
+        except Exception as exc:
+            result["runtime_home_status"] = _inventory_failure(exc)
+    if extra is not None:
+        try:
+            _inventory_path(extra, directory=True)
+            result["orchestrator_home_empty"] = not any(extra.iterdir())
+            try:
+                _inventory_path(extra / ".runner", directory=False)
+                result["orchestrator_config_present"] = True
+            except FileNotFoundError:
+                result["orchestrator_config_present"] = False
+            result["orchestrator_home_status"] = "observed"
+        except Exception as exc:
+            result["orchestrator_home_status"] = _inventory_failure(exc)
+    return result
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers(dest="command", required=True)

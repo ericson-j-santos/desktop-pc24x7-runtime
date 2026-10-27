@@ -297,6 +297,93 @@ def preflight(
     }
 
 
+LOCAL_INVENTORY_BLOCK_STATES = frozenset({
+    "github_local_auth_required", "github_local_api_failed",
+    "orchestrator_readback_unavailable", "orchestrator_http_not_ready",
+    "orchestrator_not_ready", "orchestrator_desktop_worker_not_unique",
+    "orchestrator_desktop_worker_not_ready",
+})
+
+
+def local_failure_inventory(
+    *, expected_sha: str, correlation_id: str, preflight_state: str,
+) -> dict[str, Any]:
+    """Supplement a blocked preflight without granting any execution."""
+    if preflight_state not in LOCAL_INVENTORY_BLOCK_STATES:
+        raise blocked("inventory_reason_rejected")
+    if not CORRELATION_RE.fullmatch(correlation_id):
+        raise blocked("correlation_id_invalid")
+    require_source(expected_sha)
+    if bootstrap.validate_host().casefold() != PROFILE["host"].casefold():
+        raise blocked("orchestrator_runner_host_not_authorized")
+    result: dict[str, Any] = {
+        "schema_version": 1, "kind": "orchestrator-runner-local-inventory",
+        "source_sha": expected_sha, "correlation_id": correlation_id,
+        "preflight_state": preflight_state, "read_only": True,
+        "execution_authorized": False, "registration_performed": False,
+        "registration_token_requested": False,
+        "runner_started": False, "watchdog_changed": False,
+        "github_cli_status": "unavailable",
+        "github_owner_validation": "not_checked_by_inventory",
+        "readyz_status": "unavailable", "loopback_ready": None,
+        "workers_status": "unavailable", "desktop_worker_matches": None,
+        "desktop_worker_fresh": None, "desktop_worker_controller_online": None,
+        "desktop_worker_auth_valid": None, "desktop_worker_normal_profile": None,
+        "watchdog_inventory_status": "unavailable",
+    }
+    try:
+        result["github_cli_status"] = "located" if bootstrap.find_gh() is not None else "not_located"
+    except (OSError, ValueError):
+        pass
+    if preflight_state == "github_local_auth_required":
+        result["github_owner_validation"] = "not_validated"
+    elif preflight_state == "github_local_api_failed":
+        result["github_owner_validation"] = "validated_before_endpoint_failure"
+    error_states = {
+        "orchestrator_http_not_ready": "http_not_ready",
+        "orchestrator_response_too_large": "invalid_response",
+        "orchestrator_response_invalid": "invalid_response",
+    }
+    for path, field in (("/readyz", "readyz_status"), ("/v1/workers", "workers_status")):
+        try:
+            response = read_loopback(path)
+            if path == "/readyz":
+                ready = response.get("ready")
+                result["loopback_ready"] = ready if type(ready) is bool else None
+                result[field] = "observed" if type(ready) is bool else "invalid_response"
+            else:
+                workers = response.get("workers")
+                if not isinstance(workers, list):
+                    result[field] = "invalid_response"
+                    continue
+                matching = [
+                    worker for worker in workers if isinstance(worker, dict)
+                    and str(worker.get("device_name") or "").casefold() == PROFILE["host"].casefold()
+                ]
+                result["desktop_worker_matches"] = len(matching)
+                if len(matching) == 1:
+                    worker = matching[0]
+                    for source, target in (
+                        ("fresh", "desktop_worker_fresh"),
+                        ("controller_online", "desktop_worker_controller_online"),
+                        ("auth_valid", "desktop_worker_auth_valid"),
+                    ):
+                        value = worker.get(source)
+                        result[target] = value if type(value) is bool else None
+                    result["desktop_worker_normal_profile"] = str(worker.get("profile") or "").upper() == "NORMAL"
+                result[field] = "observed"
+        except bootstrap.BootstrapError as exc:
+            result[field] = error_states.get(exc.state, "unavailable")
+        except Exception:
+            result[field] = "unavailable"
+    try:
+        result.update(bootstrap.watchdog.readonly_local_inventory())
+        result["watchdog_inventory_status"] = "observed"
+    except Exception:
+        result["watchdog_inventory_status"] = "unavailable"
+    return result
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-sha", required=True)
@@ -318,6 +405,16 @@ def main(argv: list[str] | None = None) -> int:
             "runner_version_preflight_proven": False,
             "physical_pickup_proven": False,
         }
+        if exc.state in LOCAL_INVENTORY_BLOCK_STATES:
+            try:
+                result["local_inventory"] = local_failure_inventory(
+                    expected_sha=args.expected_sha,
+                    correlation_id=args.correlation_id,
+                    preflight_state=exc.state,
+                )
+            except Exception:
+                # Preserve the original block; never print raw diagnostic errors.
+                result["local_inventory"] = None
         print(json.dumps(result, sort_keys=True))
         return 2
     print(json.dumps(result, sort_keys=True))

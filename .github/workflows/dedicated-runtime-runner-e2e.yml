@@ -261,7 +261,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check pytest==8.4.2 cryptography==50.0.2 PyYAML==6.0.3
       - name: Focused preflight and workflow contract
         shell: pwsh
-        run: python -m pytest -q tests/test_orchestrator_dev_runner_preflight.py tests/test_orchestrator_runner_preflight_workflow.py
+        run: python -m pytest -q tests/test_orchestrator_dev_runner_preflight.py tests/test_orchestrator_runner_preflight_workflow.py tests/test_orchestrator_local_inventory.py
       - name: Admit bounded physical pickup after contract
         id: admit
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea

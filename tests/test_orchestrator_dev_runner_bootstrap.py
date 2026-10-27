@@ -246,7 +246,11 @@ def test_binary_version_gate_rejects_bad_process_result(monkeypatch, tmp_path, c
 def apply_environment(monkeypatch, tmp_path):
     home = tmp_path / "EngineeringOrchestratorDEV" / "GitHubRunner"
     home.parent.mkdir()
-    state = {"registered": False, "calls": []}
+    state = {
+        "registered": False,
+        "calls": [],
+        "real_pre_registration": bootstrap._orchestrator_pre_registration,
+    }
     plan = {
         "plan_sha256": DIGEST, "runner_home": str(home),
         "registration_required": True, "observed_runner_id": None,
@@ -261,7 +265,10 @@ def apply_environment(monkeypatch, tmp_path):
         state["calls"].append("download")
         root = staging / "package"
         (root / "bin").mkdir(parents=True)
-        for relative in ("config.cmd", "run.cmd", "bin/Runner.Listener.exe"):
+        for relative in (
+            "config.cmd", "run.cmd", "bin/Runner.Listener.exe",
+            "bin/Runner.Listener.dll", "bin/Runner.Listener.deps.json",
+        ):
             (root / relative).write_text("official-package-test-double", encoding="utf-8")
         return root
 
@@ -512,6 +519,8 @@ def test_orchestrator_environment_drops_inherited_credentials_and_input_override
         'PATH': 'tool-path', 'LOCALAPPDATA': 'profile-root', 'KEEP': 'safe',
         'GH_TOKEN': 'inherited-one', 'github_token': 'inherited-two',
         'Runner_Tracking_Id': 'inherited-three',
+        'RUNNER_PERFLOG': 'outside-profile',
+        'GitHub_Actions_Runner_HttpTrace': 'true',
         'ACTIONS_RUNNER_INPUT_TOKEN': 'inherited-four',
         'actions_runner_input_url': 'https://wrong.invalid',
         'AcTiOnS_RuNnEr_InPuT_RePlAcE': 'true',
@@ -686,3 +695,226 @@ def test_legacy_runtime_cli_still_dispatches_only_legacy_bootstrap(monkeypatch, 
     assert b.main() == 0
     assert called == [{'source_sha': 'b' * 40, 'evidence_file': None}]
     assert json.loads(capsys.readouterr().out)['state'] == 'legacy-contract-test'
+
+
+def manifest_tree(root: Path) -> None:
+    (root / "bin").mkdir(parents=True)
+    (root / "externals" / "empty").mkdir(parents=True)
+    for relative in (
+        "config.cmd", "run.cmd", "bin/Runner.Listener.exe",
+        "bin/Runner.Listener.dll", "bin/Runner.Listener.deps.json",
+    ):
+        (root / relative).write_bytes(("verified:" + relative).encode("utf-8"))
+
+
+def test_complete_manifest_covers_auxiliary_files_and_empty_directories(tmp_path):
+    root = tmp_path / "package"
+    manifest_tree(root)
+    manifest = bootstrap._orchestrator_binary_manifest(root)
+    assert set(manifest) == {
+        "bin/", "externals/", "externals/empty/",
+        "config.cmd", "run.cmd", "bin/Runner.Listener.exe",
+        "bin/Runner.Listener.dll", "bin/Runner.Listener.deps.json",
+    }
+    assert manifest["externals/empty/"] == "directory"
+    assert manifest["bin/Runner.Listener.dll"] == hashlib.sha256(
+        b"verified:bin/Runner.Listener.dll"
+    ).hexdigest()
+    assert bootstrap._orchestrator_binary_manifest(root, expected=manifest) == manifest
+
+
+@pytest.mark.parametrize("kind", ["symlink", "reparse", "hardlink"])
+def test_manifest_rejects_links_before_descending_or_hashing(monkeypatch, tmp_path, kind):
+    import stat
+
+    root = tmp_path / "package"
+    manifest_tree(root)
+    bad_path = root / "bin" if kind != "hardlink" else root / "bin" / "Runner.Listener.dll"
+    original_lstat = Path.lstat
+    original_scandir = os.scandir
+    descended = []
+
+    def linked(path, *args, **kwargs):
+        info = original_lstat(path, *args, **kwargs)
+        if path != bad_path:
+            return info
+        attributes = {
+            field: getattr(info, field)
+            for field in ("st_dev", "st_ino", "st_mode", "st_size", "st_mtime_ns", "st_ctime_ns", "st_nlink")
+        }
+        attributes["st_file_attributes"] = getattr(info, "st_file_attributes", 0)
+        if kind == "symlink":
+            attributes["st_mode"] = stat.S_IFLNK | 0o777
+        elif kind == "reparse":
+            attributes["st_file_attributes"] |= 0x400
+        else:
+            attributes["st_nlink"] = 2
+        return SimpleNamespace(**attributes)
+
+    def scan(path):
+        descended.append(Path(path))
+        return original_scandir(path)
+
+    def forbidden_hash(path):
+        pytest.fail("linked layout must be rejected before hashing file contents")
+
+    monkeypatch.setattr(Path, "lstat", linked)
+    monkeypatch.setattr(bootstrap.os, "scandir", scan)
+    monkeypatch.setattr(bootstrap, "sha256_file", forbidden_hash)
+    with pytest.raises(bootstrap.BootstrapError) as error:
+        bootstrap._orchestrator_binary_manifest(root)
+    assert error.value.state == "orchestrator_package_link_rejected"
+    if kind != "hardlink":
+        assert bad_path not in descended
+
+
+def test_manifest_rejects_extra_credential_before_any_content_read(monkeypatch, tmp_path):
+    root = tmp_path / "package"
+    manifest_tree(root)
+    expected = bootstrap._orchestrator_binary_manifest(root)
+
+    (root / ".credentials").write_bytes(b"synthetic-secret-must-not-be-read")
+
+    def forbidden_hash(path):
+        pytest.fail("path-set mismatch must fail before hashing any file")
+
+    monkeypatch.setattr(bootstrap, "sha256_file", forbidden_hash)
+    with pytest.raises(bootstrap.BootstrapError) as error:
+        bootstrap._orchestrator_binary_manifest(root, expected=expected)
+    assert error.value.state == "orchestrator_package_changed"
+
+
+def test_version_uses_identical_disposable_copy_without_diag_exclusion(monkeypatch, tmp_path):
+    root = tmp_path / "package"
+    manifest_tree(root)
+    manifest = bootstrap._orchestrator_binary_manifest(root)
+    observed = []
+
+    def version(version_root):
+        observed.append(version_root)
+        assert version_root != root
+        assert bootstrap._orchestrator_binary_manifest(version_root, expected=manifest) == manifest
+        diag = version_root / "_diag"
+        diag.mkdir()
+        (diag / "Runner_20261027-235959-utc.log").write_text("version-probe-log", encoding="utf-8")
+        return "2.338.2"
+
+    monkeypatch.setattr(bootstrap, "_orchestrator_version_probe", version)
+    assert bootstrap._orchestrator_verify_version_copy(root, manifest) == "2.338.2"
+    assert observed == [tmp_path / "version-probe"]
+    assert not (root / "_diag").exists()
+    assert bootstrap._orchestrator_binary_manifest(root, expected=manifest) == manifest
+    with pytest.raises(bootstrap.BootstrapError) as error:
+        bootstrap._orchestrator_binary_manifest(observed[0], expected=manifest)
+    assert error.value.state == "orchestrator_package_changed"
+
+
+def test_version_copy_drift_blocks_before_execution(monkeypatch, tmp_path):
+    root = tmp_path / "package"
+    manifest_tree(root)
+    manifest = bootstrap._orchestrator_binary_manifest(root)
+    original_copytree = bootstrap.shutil.copytree
+
+    def corrupt_copy(source, target, *args, **kwargs):
+        result = original_copytree(source, target, *args, **kwargs)
+        if Path(target) == tmp_path / "version-probe":
+            (Path(target) / "bin" / "Runner.Listener.dll").write_bytes(b"tampered-copy")
+        return result
+
+    def forbidden_version(*args):
+        pytest.fail("tampered version copy must never execute")
+
+    monkeypatch.setattr(bootstrap.shutil, "copytree", corrupt_copy)
+    monkeypatch.setattr(bootstrap, "_orchestrator_version_probe", forbidden_version)
+    with pytest.raises(bootstrap.BootstrapError) as error:
+        bootstrap._orchestrator_verify_version_copy(root, manifest)
+    assert error.value.state == "orchestrator_package_changed"
+
+
+def test_original_payload_drift_during_version_is_not_adopted(monkeypatch, tmp_path):
+    root = tmp_path / "package"
+    manifest_tree(root)
+    manifest = bootstrap._orchestrator_binary_manifest(root)
+
+    def version(version_root):
+        (root / "bin" / "Runner.Listener.dll").write_bytes(b"changed-original")
+        return "2.338.2"
+
+    monkeypatch.setattr(bootstrap, "_orchestrator_version_probe", version)
+    with pytest.raises(bootstrap.BootstrapError) as error:
+        bootstrap._orchestrator_verify_version_copy(root, manifest)
+    assert error.value.state == "orchestrator_package_changed"
+
+
+@pytest.mark.parametrize("change", ["dll", "extra", "credential", "type", "empty_directory"])
+def test_installed_layout_drift_blocks_before_token(
+    apply_environment, monkeypatch, change,
+):
+    home, state, _ = apply_environment
+    install = bootstrap._orchestrator_install_package
+
+    def changed_install(package_root, target, *, progress):
+        install(package_root, target, progress=progress)
+        if change == "dll":
+            (target / "bin" / "Runner.Listener.dll").write_bytes(b"tampered")
+        elif change == "extra":
+            (target / "bin" / "Injected.dll").write_bytes(b"unexpected")
+        elif change == "credential":
+            (target / ".credentials").write_bytes(b"must-not-be-read")
+        elif change == "type":
+            path = target / "bin" / "Runner.Listener.deps.json"
+            path.unlink()
+            path.mkdir()
+        else:
+            (target / "unexpected-empty-directory").mkdir()
+
+    original_hash = bootstrap.sha256_file
+
+    def guarded_hash(path):
+        if Path(path).name == ".credentials":
+            pytest.fail("unexpected credential content was read")
+        return original_hash(path)
+
+    monkeypatch.setattr(bootstrap, "_orchestrator_install_package", changed_install)
+    monkeypatch.setattr(bootstrap, "_orchestrator_pre_registration", state["real_pre_registration"])
+    monkeypatch.setattr(bootstrap, "sha256_file", guarded_hash)
+    monkeypatch.setattr(bootstrap, "validate_host", lambda: "DESKTOP-PDQK954")
+    monkeypatch.setattr(probe, "require_source", lambda *args: None)
+    monkeypatch.setattr(probe, "runner_home", lambda: home)
+    monkeypatch.setattr(probe, "registry_snapshot", lambda **kwargs: None)
+    monkeypatch.setattr(probe, "require_orchestrator", lambda: None)
+    monkeypatch.setattr(bootstrap, "_orchestrator_package_policy", lambda: {})
+
+    result = apply()
+    assert result["ok"] is False
+    assert result["state"] == "orchestrator_package_changed"
+    assert result["package_installed"] is True
+    assert result["partial_installation_preserved"] is True
+    assert result["registration_token_requested"] is False
+    assert result["registration_command_invoked"] is False
+    assert "token" not in state["calls"]
+    assert "configure" not in state["calls"]
+
+
+def test_post_rename_readback_failure_keeps_installation_truthful(
+    apply_environment, monkeypatch,
+):
+    home, state, _ = apply_environment
+    original = probe.checked_path
+
+    def fail_after_rename(path, *, directory, allow_missing_tail=False):
+        if path == home and not allow_missing_tail:
+            raise bootstrap.BootstrapError("runner_path_unavailable", "safe")
+        return original(path, directory=directory, allow_missing_tail=allow_missing_tail)
+
+    monkeypatch.setattr(probe, "checked_path", fail_after_rename)
+    result = apply()
+    assert result["ok"] is False
+    assert result["state"] == "runner_path_unavailable"
+    assert home.is_dir()
+    assert (home / "bin" / "Runner.Listener.dll").is_file()
+    assert result["package_installed"] is True
+    assert result["partial_installation_preserved"] is True
+    assert result["registration_token_requested"] is False
+    assert result["registration_command_invoked"] is False
+    assert "token" not in state["calls"]

@@ -37,6 +37,82 @@ def require(condition: bool, state: str) -> None:
         raise WorkflowBlocked(state)
 
 
+INVENTORY_STATUS_FIELDS = (
+    "paths_status", "metadata_status", "task_query_status", "task_runtime_status",
+    "task_identity_status", "state_status", "runtime_home_status",
+    "orchestrator_home_status", "watchdog_inventory_status",
+)
+INVENTORY_BOOL_FIELDS = (
+    "loopback_ready", "desktop_worker_fresh", "desktop_worker_controller_online",
+    "desktop_worker_auth_valid", "desktop_worker_normal_profile",
+    "metadata_host_matches", "metadata_runner_home_matches", "metadata_release_matches",
+    "metadata_python_exists", "task_registered_observed", "task_at_startup",
+    "task_enabled", "task_s4u", "task_limited",
+    "process_user_matches_task_principal", "task_action_matches_installation",
+    "state_ok", "state_source_matches_installation", "state_fresh_300s",
+    "orchestrator_home_empty", "orchestrator_config_present",
+)
+INVENTORY_DIGEST_FIELDS = (
+    "metadata_sha256", "watchdog_sha256", "uac_sha256",
+    "launcher_sha256", "host_policy_sha256",
+)
+INVENTORY_FALSE_FIELDS = (
+    "execution_authorized", "registration_performed", "registration_token_requested",
+    "runner_started", "watchdog_changed",
+)
+
+
+def public_local_inventory(value, *, sha: str, correlation: str, state: str):
+    """Project a verified failure supplement to a closed public schema."""
+    if not (
+        isinstance(value, dict) and type(value.get("schema_version")) is int
+        and value.get("schema_version") == 1
+        and value.get("kind") == "orchestrator-runner-local-inventory"
+        and value.get("source_sha") == sha
+        and value.get("correlation_id") == correlation
+        and value.get("preflight_state") == state
+        and state in PREFLIGHT_BLOCK_STATES
+        and value.get("read_only") is True
+        and all(value.get(key) is False for key in INVENTORY_FALSE_FIELDS)
+    ):
+        return None
+    public = {
+        "schema_version": 1, "kind": "orchestrator-runner-local-inventory",
+        "source_sha": sha, "correlation_id": correlation,
+        "preflight_state": state, "preflight_remains_blocked": True,
+        "read_only": True, **{key: False for key in INVENTORY_FALSE_FIELDS},
+    }
+    statuses = {"observed", "missing", "invalid", "blocked", "unavailable"}
+    for key in INVENTORY_STATUS_FIELDS:
+        candidate = value.get(key)
+        public[key] = candidate if isinstance(candidate, str) and candidate in statuses else "unavailable"
+    for key in INVENTORY_BOOL_FIELDS:
+        candidate = value.get(key)
+        public[key] = candidate if type(candidate) is bool else None
+    for key in INVENTORY_DIGEST_FIELDS:
+        candidate = value.get(key)
+        public[key] = candidate if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f]{64}", candidate) else None
+    source = value.get("installed_source_sha")
+    public["installed_source_sha"] = source if isinstance(source, str) and SHA.fullmatch(source) else None
+    for key, minimum, maximum in (
+        ("desktop_worker_matches", 0, 10000), ("runtime_unresolved_process_count", 0, 10000),
+        ("runtime_listener_pid", 1, 0xFFFFFFFF), ("task_state", 0, 4),
+    ):
+        candidate = value.get(key)
+        public[key] = candidate if type(candidate) is int and minimum <= candidate <= maximum else None
+    for key, allowed in (
+        ("github_cli_status", {"located", "not_located", "unavailable"}),
+        ("github_owner_validation", {"not_validated", "validated_before_endpoint_failure", "not_checked_by_inventory"}),
+        ("readyz_status", {"observed", "http_not_ready", "invalid_response", "unavailable"}),
+        ("workers_status", {"observed", "http_not_ready", "invalid_response", "unavailable"}),
+    ):
+        candidate = value.get(key)
+        public[key] = candidate if isinstance(candidate, str) and candidate in allowed else (
+            "not_checked_by_inventory" if key == "github_owner_validation" else "unavailable"
+        )
+    return public
+
+
 def gateway_payload(completed, *, sha: str, correlation: str, session: str, negative: bool) -> dict:
     expected_exit = 2 if negative or completed.returncode == 2 else 0
     try:
@@ -67,6 +143,13 @@ def gateway_payload(completed, *, sha: str, correlation: str, session: str, nega
             and payload.get("registration_token_requested") is False
         )
         if readonly_block and isinstance(state, str) and state in PREFLIGHT_BLOCK_STATES:
+            inventory = public_local_inventory(
+                payload.get("local_inventory"), sha=sha, correlation=correlation, state=state,
+            )
+            if inventory is not None:
+                print("ORCHESTRATOR_LOCAL_INVENTORY:" + json.dumps(
+                    inventory, sort_keys=True, separators=(",", ":"),
+                ))
             raise WorkflowBlocked("preflight_blocked:" + state)
         raise WorkflowBlocked("preflight_blocked:unclassified")
     if negative:
