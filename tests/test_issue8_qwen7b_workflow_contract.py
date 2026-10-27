@@ -58,12 +58,12 @@ def test_same_owner_and_one_time_pr_admission():
     assert "github.event.pull_request.draft == true" in text
     assert "github.event.pull_request.head.repo.full_name == github.repository" in text
     assert "!contains(github.event.changes.body.from," in text
-    assert "OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE" in text
-    assert "comment_id:6399359287" in text
+    assert "OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE" in text
+    assert "comment_id:6430299388" in text
     assert "ISSUE8_OWNER_OR_SOURCE_UNVERIFIED" in text
     assert "ISSUE8_REQUIRED_CI_NOT_EXECUTED" in text
     assert "cancel-in-progress: false" in text
-    assert "21fd68dec6f0da92b3e7da201463401ac5429d64" in text
+    assert "87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e" in text
 
 
 def test_gateway_and_worker_restrictions_are_retained():
@@ -78,7 +78,7 @@ def test_gateway_and_worker_restrictions_are_retained():
     assert "shell: pwsh" not in text
     assert "GH_TOKEN: \"\"" in text and "GITHUB_TOKEN: \"\"" in text
     assert "Native Python venv through governed Gateway" in text
-    assert "source='21fd68dec6f0da92b3e7da201463401ac5429d64'" in text
+    assert "source='87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e'" in text
     assert "actions/upload-artifact" not in text
     assert "actions/download-artifact" not in text
     assert "300000" in text
@@ -96,7 +96,7 @@ def test_privileged_job_separate_from_model_and_validator():
     assert "contents: write" in writer and "contents: write" not in model
     assert "contents: read" in model
     assert "contents: write" not in model
-    assert "OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE" in writer
+    assert "OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE" in writer
     assert "ISSUE8_CAS_INDEPENDENT_READBACK_MISSING" in writer
     assert "ISSUE8_VALIDATOR_CAS_READBACK_INVALID" in text
     assert '"ready_for_pr": False' in (ROOT /
