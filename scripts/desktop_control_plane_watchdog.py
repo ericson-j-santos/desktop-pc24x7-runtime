@@ -363,6 +363,9 @@ def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
     # GitHub Actions mata no cleanup processos que herdaram RUNNER_TRACKING_ID.
     # O listener é um serviço persistente do host, não um processo do job.
     child_env.pop("RUNNER_TRACKING_ID", None)
+    # Credenciais temporárias do instalador/job não pertencem ao listener.
+    child_env.pop("GH_TOKEN", None)
+    child_env.pop("GITHUB_TOKEN", None)
     try:
         process = subprocess.Popen(
             [str(cmd), "/d", "/s", "/c", str(run_cmd)],
