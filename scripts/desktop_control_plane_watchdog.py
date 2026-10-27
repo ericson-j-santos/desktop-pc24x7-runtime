@@ -1040,6 +1040,50 @@ def run_watchdog_task() -> dict[str, Any]:
     return {"run_returncode": completed.returncode}
 
 
+def task_runtime_snapshot() -> dict[str, Any]:
+    if os.name != "nt":
+        raise WatchdogError("Windows Task Scheduler obrigatório")
+    try:
+        import win32com.client  # type: ignore
+
+        service = win32com.client.Dispatch("Schedule.Service")
+        service.Connect()
+        task = service.GetFolder(TASK_FOLDER).GetTask(TASK_LEAF)
+        return {
+            "state": int(task.State),
+            "last_task_result": int(task.LastTaskResult),
+            "enabled": bool(task.Enabled),
+        }
+    except Exception as exc:
+        raise WatchdogError("leitura runtime da tarefa watchdog falhou") from exc
+
+
+def stop_watchdog_task(*, timeout_seconds: int = 15) -> dict[str, Any]:
+    before = task_runtime_snapshot()
+    if before["state"] != 4:
+        return {"stopped": False, "state_before": before["state"]}
+    try:
+        import win32com.client  # type: ignore
+
+        service = win32com.client.Dispatch("Schedule.Service")
+        service.Connect()
+        task = service.GetFolder(TASK_FOLDER).GetTask(TASK_LEAF)
+        task.Stop(0)
+    except Exception as exc:
+        raise WatchdogError("tarefa watchdog não pôde ser parada") from exc
+    deadline = time.monotonic() + max(1, min(timeout_seconds, 30))
+    while time.monotonic() < deadline:
+        observed = task_runtime_snapshot()
+        if observed["state"] != 4:
+            return {
+                "stopped": True,
+                "state_before": before["state"],
+                "state_after": observed["state"],
+            }
+        time.sleep(0.25)
+    raise WatchdogError("tarefa watchdog permaneceu em execução após Stop")
+
+
 def task_status() -> dict[str, Any]:
     if os.name != "nt":
         return {"exists": False, "trigger_at_startup": False}
