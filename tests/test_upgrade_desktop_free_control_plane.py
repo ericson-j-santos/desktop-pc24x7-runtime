@@ -86,9 +86,15 @@ def test_apply_upgrade_starts_fixed_launcher_and_requires_pickup(
 
     calls: list[str] = []
 
-    def stop() -> dict:
+    def stop(runtime_root: Path) -> dict:
+        assert runtime_root == ctx["runtime_root"]
         calls.append("stop")
-        return {"stopped": True, "state_before": 4, "state_after": 3}
+        return {
+            "stopped": True,
+            "state_before": 4,
+            "state_after": 3,
+            "lock_release": {"released": True, "attempts": 2},
+        }
 
     def start_recorded() -> dict:
         calls.append("start")
@@ -145,9 +151,15 @@ def test_failed_upgrade_without_target_state_restores_active_files(
     calls: list[str] = []
     starts = 0
 
-    def stop() -> dict:
+    def stop(runtime_root: Path) -> dict:
+        assert runtime_root == ctx["runtime_root"]
         calls.append("stop")
-        return {"stopped": True, "state_before": 4, "state_after": 3}
+        return {
+            "stopped": True,
+            "state_before": 4,
+            "state_after": 3,
+            "lock_release": {"released": True, "attempts": 2},
+        }
 
     def start() -> dict:
         nonlocal starts

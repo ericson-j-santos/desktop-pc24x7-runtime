@@ -212,7 +212,7 @@ def apply_upgrade(context: dict[str, Any], *, timeout_seconds: int = 30) -> dict
     handover = {"stopped": False}
     try:
         if was_running:
-            handover = watchdog.stop_watchdog_task()
+            handover = watchdog.stop_watchdog_task(runtime_root)
             if handover.get("stopped") is not True:
                 raise UpgradeBlocked("watchdog_task_handover_not_proven")
         watchdog.run_watchdog_task()
@@ -275,7 +275,7 @@ def apply_upgrade(context: dict[str, Any], *, timeout_seconds: int = 30) -> dict
         if was_running:
             try:
                 if watchdog.task_runtime_snapshot().get("state") == 4:
-                    watchdog.stop_watchdog_task()
+                    watchdog.stop_watchdog_task(runtime_root)
                 watchdog.run_watchdog_task()
                 deadline = time.monotonic() + max(5, min(timeout_seconds, 60))
                 while time.monotonic() < deadline:
