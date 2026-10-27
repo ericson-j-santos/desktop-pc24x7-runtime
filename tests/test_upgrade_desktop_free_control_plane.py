@@ -51,6 +51,7 @@ def context(tmp_path: Path) -> dict:
         "metadata_path": runtime / "metadata.json",
         "metadata": metadata,
         "task": {"exists": True, "trigger_at_startup": True, "logon_type": "S4U"},
+        "task_runtime": {"state": 4, "enabled": True, "last_task_result": 267009},
         "runner_home": tmp_path / "runner",
         "runner_process": {"matching_pids": [4321], "unresolved_pids": []},
         "registry": {
@@ -83,7 +84,24 @@ def test_apply_upgrade_starts_fixed_launcher_and_requires_pickup(
         )
         return {"run_returncode": 0}
 
-    monkeypatch.setattr(m.watchdog, "run_watchdog_task", start)
+    calls: list[str] = []
+
+    def stop(runtime_root: Path) -> dict:
+        assert runtime_root == ctx["runtime_root"]
+        calls.append("stop")
+        return {
+            "stopped": True,
+            "state_before": 4,
+            "state_after": 3,
+            "lock_release": {"released": True, "attempts": 2},
+        }
+
+    def start_recorded() -> dict:
+        calls.append("start")
+        return start()
+
+    monkeypatch.setattr(m.watchdog, "stop_watchdog_task", stop)
+    monkeypatch.setattr(m.watchdog, "run_watchdog_task", start_recorded)
     monkeypatch.setattr(
         m.watchdog,
         "runner_process_snapshot",
@@ -101,6 +119,11 @@ def test_apply_upgrade_starts_fixed_launcher_and_requires_pickup(
         },
     )
     monkeypatch.setattr(m.watchdog, "task_status", lambda: ctx["task"])
+    monkeypatch.setattr(
+        m.watchdog,
+        "task_runtime_snapshot",
+        lambda: {"state": 4, "enabled": True, "last_task_result": 267009},
+    )
 
     result = m.apply_upgrade(ctx, timeout_seconds=5)
 
@@ -108,6 +131,8 @@ def test_apply_upgrade_starts_fixed_launcher_and_requires_pickup(
     assert result["runner_process_preserved"] is True
     assert result["github_pickup_proven"] is False
     assert result["watchdog_state"]["source_sha"] == "b" * 40
+    assert result["watchdog_task_handover"]["stopped"] is True
+    assert calls == ["stop", "start"]
     launcher = (ctx["runtime_root"] / "run.py").read_text(encoding="utf-8")
     assert "sys.path.insert(0, str(script_dir))" in launcher
     metadata = json.loads(ctx["metadata_path"].read_text(encoding="utf-8"))
@@ -123,10 +148,42 @@ def test_failed_upgrade_without_target_state_restores_active_files(
     ctx = context(tmp_path)
     old_metadata = ctx["metadata_path"].read_bytes()
     old_launcher = (ctx["runtime_root"] / "run.py").read_bytes()
+    calls: list[str] = []
+    starts = 0
+
+    def stop(runtime_root: Path) -> dict:
+        assert runtime_root == ctx["runtime_root"]
+        calls.append("stop")
+        return {
+            "stopped": True,
+            "state_before": 4,
+            "state_after": 3,
+            "lock_release": {"released": True, "attempts": 2},
+        }
+
+    def start() -> dict:
+        nonlocal starts
+        starts += 1
+        calls.append("start")
+        if starts == 1:
+            raise m.watchdog.WatchdogError("synthetic_start_failure")
+        metadata = json.loads(ctx["metadata_path"].read_text(encoding="utf-8"))
+        m.watchdog.atomic_json(
+            ctx["runtime_root"] / "state.json",
+            {
+                "ok": True,
+                "source_sha": metadata["source_sha"],
+                "runner_recovery_ok": True,
+            },
+        )
+        return {"run_returncode": 0}
+
+    monkeypatch.setattr(m.watchdog, "stop_watchdog_task", stop)
+    monkeypatch.setattr(m.watchdog, "run_watchdog_task", start)
     monkeypatch.setattr(
         m.watchdog,
-        "run_watchdog_task",
-        lambda: (_ for _ in ()).throw(m.watchdog.WatchdogError("synthetic_start_failure")),
+        "task_runtime_snapshot",
+        lambda: {"state": 3, "enabled": True, "last_task_result": 0},
     )
 
     with pytest.raises(m.watchdog.WatchdogError, match="synthetic_start_failure"):
@@ -134,6 +191,7 @@ def test_failed_upgrade_without_target_state_restores_active_files(
 
     assert ctx["metadata_path"].read_bytes() == old_metadata
     assert (ctx["runtime_root"] / "run.py").read_bytes() == old_launcher
+    assert calls == ["stop", "start", "start"]
 
 
 def test_upgrade_contract_does_not_register_runner_task_or_credentials() -> None:

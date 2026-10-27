@@ -71,6 +71,9 @@ def inspect_active_installation(
     task = watchdog.task_status()
     if not uac.task_headless_ready(task):
         raise UpgradeBlocked("atstartup_s4u_required")
+    task_runtime = watchdog.task_runtime_snapshot()
+    if task_runtime.get("enabled") is not True:
+        raise UpgradeBlocked("watchdog_task_disabled")
 
     release_root = Path(installation["release_root"])
     installed_watchdog = repair.fixed_release_file(
@@ -112,6 +115,7 @@ def inspect_active_installation(
         "metadata_path": metadata_path,
         "metadata": metadata,
         "task": task,
+        "task_runtime": task_runtime,
         "runner_home": runner_home,
         "runner_process": process,
         "registry": registry,
@@ -204,10 +208,14 @@ def apply_upgrade(context: dict[str, Any], *, timeout_seconds: int = 30) -> dict
     )
     repair.atomic_bytes(runtime_root / "run.py", watchdog.launcher_bytes())
     watchdog.atomic_json(context["metadata_path"], metadata)
-    started = False
+    was_running = context["task_runtime"].get("state") == 4
+    handover = {"stopped": False}
     try:
+        if was_running:
+            handover = watchdog.stop_watchdog_task(runtime_root)
+            if handover.get("stopped") is not True:
+                raise UpgradeBlocked("watchdog_task_handover_not_proven")
         watchdog.run_watchdog_task()
-        started = True
         deadline = time.monotonic() + max(5, min(timeout_seconds, 60))
         observed_state = None
         while time.monotonic() < deadline:
@@ -253,6 +261,7 @@ def apply_upgrade(context: dict[str, Any], *, timeout_seconds: int = 30) -> dict
             "runner_id": registry_after["id"],
             "runner_name": context["profile"].runner_name,
             "runner_process_preserved": True,
+            "watchdog_task_handover": handover,
             "github_pickup_proven": False,
             "credentials_created": False,
             "todo_gateway_installed": False,
@@ -261,10 +270,29 @@ def apply_upgrade(context: dict[str, Any], *, timeout_seconds: int = 30) -> dict
         }
         watchdog.atomic_json(runtime_root / "upgrade-evidence.json", result)
         return result
-    except Exception:
-        if not started or not (read_state(runtime_root) or {}).get("source_sha") == target_sha:
-            restore_active_files(runtime_root, backup_root)
-        raise
+    except Exception as exc:
+        restore_active_files(runtime_root, backup_root)
+        if was_running:
+            try:
+                if watchdog.task_runtime_snapshot().get("state") == 4:
+                    watchdog.stop_watchdog_task(runtime_root)
+                watchdog.run_watchdog_task()
+                deadline = time.monotonic() + max(5, min(timeout_seconds, 60))
+                while time.monotonic() < deadline:
+                    restored_state = read_state(runtime_root)
+                    if (
+                        restored_state
+                        and restored_state.get("source_sha") == context["previous_sha"]
+                        and restored_state.get("ok") is True
+                        and restored_state.get("runner_recovery_ok") is True
+                    ):
+                        break
+                    time.sleep(1)
+                else:
+                    raise UpgradeBlocked("watchdog_rollback_state_not_proven")
+            except Exception as rollback_exc:
+                raise UpgradeBlocked("watchdog_upgrade_rollback_failed") from rollback_exc
+        raise exc
 
 
 def preflight_result(context: dict[str, Any]) -> dict[str, Any]:
@@ -275,6 +303,7 @@ def preflight_result(context: dict[str, Any]) -> dict[str, Any]:
         "source_sha": context["target_sha"],
         "previous_source_sha": context["previous_sha"],
         "watchdog_task": context["task"],
+        "watchdog_task_runtime": context["task_runtime"],
         "runner_id": context["registry"]["id"],
         "runner_name": context["profile"].runner_name,
         "runner_status": context["registry"]["status"],

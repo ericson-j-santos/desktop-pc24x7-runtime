@@ -59,6 +59,54 @@ def test_launcher_adds_release_scripts_to_import_path(tmp_path: Path) -> None:
     assert "sys.path.insert(0, str(script_dir))" in launcher.read_text(encoding="utf-8")
 
 
+def test_wait_watchdog_lock_released_waits_for_process_teardown(
+    monkeypatch, tmp_path: Path
+) -> None:
+    attempts = 0
+
+    class Handle:
+        closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    handle = Handle()
+
+    def acquire(runtime_root: Path):
+        nonlocal attempts
+        assert runtime_root == tmp_path
+        attempts += 1
+        if attempts < 3:
+            raise m.WatchdogError("outro watchdog já está ativo")
+        return handle
+
+    monkeypatch.setattr(m, "_acquire_watch_lock", acquire)
+    monkeypatch.setattr(m.time, "sleep", lambda seconds: None)
+
+    result = m.wait_watchdog_lock_released(tmp_path, timeout_seconds=5)
+
+    assert result == {"released": True, "attempts": 3}
+    assert handle.closed is True
+
+
+def test_wait_watchdog_lock_released_fails_closed_on_timeout(
+    monkeypatch, tmp_path: Path
+) -> None:
+    ticks = iter([0.0, 0.1, 2.0])
+    monkeypatch.setattr(m.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(m.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(
+        m,
+        "_acquire_watch_lock",
+        lambda runtime_root: (_ for _ in ()).throw(
+            m.WatchdogError("outro watchdog já está ativo")
+        ),
+    )
+
+    with pytest.raises(m.WatchdogError, match="watchdog.lock permaneceu ocupado"):
+        m.wait_watchdog_lock_released(tmp_path, timeout_seconds=1)
+
+
 def test_rejects_other_host(monkeypatch) -> None:
     monkeypatch.setattr(m.os, "name", "nt")
     monkeypatch.setattr(m.socket, "gethostname", lambda: "UNKNOWN-HOST")
