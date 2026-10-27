@@ -449,3 +449,69 @@ def test_preserved_desktop_bootstrap_parses_in_native_powershell_51():
         text=True, capture_output=True, timeout=20, check=False,
     )
     assert result.returncode == 0, result.stderr or "Existing governed PowerShell bootstrap failed native parsing."
+
+
+def test_allowlisted_readonly_block_survives_valid_gateway_envelope():
+    payload = negative_payload()
+    payload["state"] = "github_local_auth_required"
+    completed = gateway_completion(payload, negative=True)
+    with pytest.raises(m.WorkflowBlocked, match=r"^preflight_blocked:github_local_auth_required$"):
+        m.gateway_payload(
+            completed, sha=HEAD, correlation="dedicated-runner-77-1",
+            session="session-77", negative=False,
+        )
+
+
+def test_arbitrary_block_reason_and_raw_streams_are_never_reported():
+    payload = negative_payload()
+    payload["state"] = "private-value-must-not-be-reported"
+    completed = gateway_completion(payload, negative=True)
+    completed.stderr = "private-stderr-must-not-be-reported"
+    with pytest.raises(m.WorkflowBlocked) as error:
+        m.gateway_payload(
+            completed, sha=HEAD, correlation="dedicated-runner-77-1",
+            session="session-77", negative=False,
+        )
+    assert str(error.value) == "preflight_blocked:unclassified"
+    assert "private" not in str(error.value)
+
+
+@pytest.mark.parametrize("invalid", ["source", "correlation", "risk", "read_only"])
+def test_allowlisted_reason_requires_valid_scope_and_readonly_receipt(invalid):
+    payload = negative_payload()
+    payload["state"] = "github_local_auth_required"
+    if invalid == "read_only":
+        payload["read_only"] = False
+    completed = gateway_completion(payload, negative=True)
+    event = json.loads(completed.stdout)
+    if invalid == "source":
+        event["after"]["head"] = "d" * 40
+    elif invalid == "correlation":
+        event["correlation_id"] = "other-correlation"
+    elif invalid == "risk":
+        event["risk"] = True
+    completed.stdout = json.dumps(event)
+    with pytest.raises(m.WorkflowBlocked) as error:
+        m.gateway_payload(
+            completed, sha=HEAD, correlation="dedicated-runner-77-1",
+            session="session-77", negative=False,
+        )
+    assert "github_local_auth_required" not in str(error.value)
+
+
+def test_allowlisted_physical_block_does_not_publish_success(physical, monkeypatch):
+    calls = 0
+
+    def run(command, **kwargs):
+        nonlocal calls
+        calls += 1
+        payload = negative_payload()
+        if calls > 1:
+            payload["state"] = "orchestrator_not_ready"
+        return gateway_completion(payload, negative=True)
+
+    monkeypatch.setattr(m.subprocess, "run", run)
+    with pytest.raises(m.WorkflowBlocked, match=r"^preflight_blocked:orchestrator_not_ready$"):
+        m.prove()
+    assert calls == 2
+    assert not (physical / "output.txt").exists()

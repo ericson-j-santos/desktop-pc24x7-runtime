@@ -15,6 +15,12 @@ HOST = "DESKTOP-PDQK954"
 RUNNER = "DESKTOP-PDQK954-runtime"
 TARGET = "ericson-j-santos/reqsys-engineering-orchestrator"
 SHA = re.compile(r"^[0-9a-f]{40}$")
+PREFLIGHT_BLOCK_STATES = frozenset({
+    "github_local_auth_required", "github_local_api_failed",
+    "orchestrator_readback_unavailable", "orchestrator_http_not_ready",
+    "orchestrator_not_ready", "orchestrator_desktop_worker_not_unique",
+    "orchestrator_desktop_worker_not_ready",
+})
 FALSE_FIELDS = (
     "execution_authorized", "registration_performed", "registration_token_requested",
     "runner_started", "watchdog_changed", "runner_version_preflight_proven",
@@ -32,26 +38,37 @@ def require(condition: bool, state: str) -> None:
 
 
 def gateway_payload(completed, *, sha: str, correlation: str, session: str, negative: bool) -> dict:
-    expected_exit = 2 if negative else 0
+    expected_exit = 2 if negative or completed.returncode == 2 else 0
     try:
         event = json.loads(completed.stdout.strip().splitlines()[-1])
         payload = json.loads(event["stdout"])
         require(
             completed.returncode == expected_exit
             and event["action"] == "run"
-            and event["risk"] == 1
+            and type(event["risk"]) is int and event["risk"] == 1
             and event["session_id"] == session
             and event["correlation_id"] == correlation
             and event["gateway_exit_code"] == expected_exit
             and event["command_exit_code"] == expected_exit
             and event["state_changed"] is False
-            and event["result"] == ("command_failed" if negative else "ok")
+            and event["result"] == ("command_failed" if expected_exit == 2 else "ok")
             and event["before"]["head"] == sha == event["after"]["head"]
             and isinstance(payload, dict),
             "gateway_readback_rejected",
         )
     except (ValueError, KeyError, IndexError, TypeError, AttributeError):
         raise WorkflowBlocked("gateway_readback_invalid") from None
+    if not negative and expected_exit == 2:
+        state = payload.get("state")
+        readonly_block = (
+            payload.get("ok") is False and payload.get("read_only") is True
+            and payload.get("execution_authorized") is False
+            and payload.get("registration_performed") is False
+            and payload.get("registration_token_requested") is False
+        )
+        if readonly_block and isinstance(state, str) and state in PREFLIGHT_BLOCK_STATES:
+            raise WorkflowBlocked("preflight_blocked:" + state)
+        raise WorkflowBlocked("preflight_blocked:unclassified")
     if negative:
         require(
             payload.get("ok") is False
