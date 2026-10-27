@@ -17,7 +17,7 @@ jobs:
     name: Issue8 bundle transport contract
     if: >-
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.head.ref == 'feat/issue8-fenced-qwen-bundle-20261025'
+      github.event.pull_request.head.ref == 'feat/issue8-fenced-qwen-bundle-20261026'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -45,11 +45,11 @@ jobs:
       github.event.action == 'edited' &&
       github.actor == 'ericson-j-santos' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
-      github.event.pull_request.head.ref == 'feat/issue8-fenced-qwen-bundle-20261025' &&
+      github.event.pull_request.head.ref == 'feat/issue8-fenced-qwen-bundle-20261026' &&
       github.event.pull_request.draft == true &&
-      contains(github.event.pull_request.body, 'OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE') &&
+      contains(github.event.pull_request.body, 'OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE') &&
       github.event.changes.body.from != null &&
-      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE')
+      !contains(github.event.changes.body.from, 'OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE')
     runs-on: ubuntu-latest
     timeout-minutes: 4
     permissions:
@@ -63,8 +63,8 @@ jobs:
         with:
           script: |
             const owner='ericson-j-santos',worker='engineering-worker-pool';
-            const source='21fd68dec6f0da92b3e7da201463401ac5429d64';
-            const runtime='a0437b0deb7db42fb91866fe8e77359844579cf6';
+            const source='87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e';
+            const runtime='005cc39d38f90e5d7ae4b3f6e23d4e119ce4120f';
             const sha=context.payload.pull_request.head.sha;
             const pr=(await github.rest.pulls.get({
               owner,repo:context.repo.repo,pull_number:context.payload.pull_request.number
@@ -76,16 +76,16 @@ jobs:
               owner,repo:worker,branch:'main'
             })).data;
             if (!pr.draft || pr.state!=='open' || pr.head.sha!==sha ||
-                pr.head.ref!=='feat/issue8-fenced-qwen-bundle-20261025' ||
+                pr.head.ref!=='feat/issue8-fenced-qwen-bundle-20261026' ||
                 pr.head.repo?.full_name!==owner+'/'+context.repo.repo ||
-                !pr.body?.includes('OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE') ||
+                !pr.body?.includes('OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE') ||
                 pr.base.sha!==runtime || runtimeMain.commit.sha!==runtime ||
                 workerMain.commit.sha!==source) {
               core.setFailed('ISSUE8_NATIVE_BASE_OR_PR_DRIFT');return;
             }
             const [issue,comment,sourceFile,workerChecks,runtimeChecks]=await Promise.all([
               github.rest.issues.get({owner,repo:worker,issue_number:8}),
-              github.rest.issues.getComment({owner,repo:worker,comment_id:6399359287}),
+              github.rest.issues.getComment({owner,repo:worker,comment_id:6430299388}),
               github.rest.repos.getContent({owner,repo:worker,path:'app/portfolio_bridge.py',ref:source}),
               github.rest.checks.listForRef({owner,repo:worker,ref:source,per_page:100}),
               github.rest.checks.listForRef({owner,repo:context.repo.repo,ref:sha,per_page:100}),
@@ -120,8 +120,8 @@ jobs:
       bundle_b64: ${{ steps.model.outputs.bundle_b64 }}
       receipt_b64: ${{ steps.model.outputs.receipt_b64 }}
     env:
-      EXPECTED_WORKER_SHA: 21fd68dec6f0da92b3e7da201463401ac5429d64
-      RULES_SHA: 4e6091a133f8d7d157abe6f83c31ca597812e0a4
+      EXPECTED_WORKER_SHA: 87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e
+      RULES_SHA: 3ffb7d2ab3269fb75ed37b9abbc2de562d156098
       NATIVE_OLLAMA_DEV: "1"
       NATIVE_MODEL_DIGEST_PREFIX: dae161e27b0e
       EXPECTED_RUNTIME_SHA: ${{ github.event.pull_request.head.sha }}
@@ -161,7 +161,7 @@ jobs:
             '--session-prefix','issue8-qwen-fenced',
             '--correlation-id',$env:CORRELATION_ID,
             '--expected-head',$env:EXPECTED_RUNTIME_SHA,
-            '--sync-ref','origin/feat/issue8-fenced-qwen-bundle-20261025',
+            '--sync-ref','origin/feat/issue8-fenced-qwen-bundle-20261026',
             '--require-runner-version-preflight')
           $raw = & python $launcher @args
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -242,8 +242,8 @@ jobs:
           script: |
             const {createHash}=require('crypto');
             const owner='ericson-j-santos',repo='desktop-pc24x7-runtime';
-            const base='a0437b0deb7db42fb91866fe8e77359844579cf6';
-            const worker='21fd68dec6f0da92b3e7da201463401ac5429d64';
+            const base='005cc39d38f90e5d7ae4b3f6e23d4e119ce4120f';
+            const worker='87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e';
             const branch='agent/issue8-qwen-bundle-'+worker.slice(0,12);
             const raw64=String(process.env.BUNDLE_B64||'');
             const receipt64=String(process.env.RECEIPT_B64||'');
@@ -261,7 +261,7 @@ jobs:
                 blob.toString('base64')!==raw64 ||
                 r.result!=='ISSUE8_BUNDLE_STAGED_UNPUBLISHED' ||
                 r.base_sha!==worker || r.source_repository!=='ericson-j-santos/engineering-worker-pool' ||
-                r.issue!==8 || r.owner_comment_id!==6399359287 ||
+                r.issue!==8 || r.owner_comment_id!==6430299388 ||
                 !/^[0-9a-f]{40}$/.test(r.produced_sha||'') ||
                 r.produced_sha===worker ||
                 r.model!=='qwen2.5-coder:7b' ||
@@ -279,10 +279,10 @@ jobs:
             const main=(await github.rest.repos.getBranch({owner,repo,branch:'main'})).data;
             if (pr.state!=='open' || !pr.draft ||
                 pr.head.sha!==context.payload.pull_request.head.sha ||
-                pr.head.ref!=='feat/issue8-fenced-qwen-bundle-20261025' ||
+                pr.head.ref!=='feat/issue8-fenced-qwen-bundle-20261026' ||
                 pr.head.repo?.full_name!==owner+'/'+repo ||
                 pr.base.sha!==base || main.commit.sha!==base ||
-                !pr.body?.includes('OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE')) {
+                !pr.body?.includes('OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE')) {
               core.setFailed('ISSUE8_PUBLISH_PR_OR_MAIN_DRIFT');return;
             }
             const path='evidence/issue8/sha256/'+digest.slice(0,2)+'/'+digest+'.bundle';
@@ -357,7 +357,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/engineering-worker-pool
-          ref: 21fd68dec6f0da92b3e7da201463401ac5429d64
+          ref: 87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e
           path: external/engineering-worker-pool
           persist-credentials: false
       - name: Python 3.12
@@ -370,8 +370,8 @@ jobs:
           script: |
             const fs=require('fs'),{createHash}=require('crypto');
             const owner='ericson-j-santos',repo='desktop-pc24x7-runtime';
-            const base='a0437b0deb7db42fb91866fe8e77359844579cf6';
-            const branch='agent/issue8-qwen-bundle-21fd68dec6f0';
+            const base='005cc39d38f90e5d7ae4b3f6e23d4e119ce4120f';
+            const branch='agent/issue8-qwen-bundle-87a8de64ea5e';
             const expected=String(process.env.EXPECTED_BUNDLE_SHA256||'');
             if (!/^[0-9a-f]{64}$/.test(expected)) {
               core.setFailed('ISSUE8_VALIDATOR_DIGEST_MISSING');return;
@@ -432,8 +432,8 @@ jobs:
           script: |
             const {createHash}=require('crypto');
             const owner='ericson-j-santos',repo='desktop-pc24x7-runtime';
-            const base='a0437b0deb7db42fb91866fe8e77359844579cf6';
-            const worker='21fd68dec6f0da92b3e7da201463401ac5429d64';
+            const base='005cc39d38f90e5d7ae4b3f6e23d4e119ce4120f';
+            const worker='87a8de64ea5ed2e4aef1a9cde51861edb61ffe5e';
             const branch='agent/issue8-qwen-quarantine-'+worker.slice(0,12);
             const raw64=String(process.env.BUNDLE_B64||'');
             const receipt64=String(process.env.RECEIPT_B64||'');
@@ -452,7 +452,7 @@ jobs:
                 r.result!=='ISSUE8_BUNDLE_STAGED_UNPUBLISHED' ||
                 r.base_sha!==worker ||
                 r.source_repository!=='ericson-j-santos/engineering-worker-pool' ||
-                r.issue!==8 || r.owner_comment_id!==6399359287 ||
+                r.issue!==8 || r.owner_comment_id!==6430299388 ||
                 !/^[0-9a-f]{40}$/.test(r.produced_sha||'') ||
                 r.produced_sha===worker || !/^dae161e27b0e[0-9a-f]{52}$/.test(r.model_digest||'') ||
                 r.model!=='qwen2.5-coder:7b' ||
@@ -476,7 +476,7 @@ jobs:
                 pr.data.head.sha!==context.payload.pull_request.head.sha ||
                 pr.data.head.repo?.full_name!==owner+'/'+repo ||
                 pr.data.base.sha!==base ||
-                !pr.data.body?.includes('OWNER_ISSUE8_FENCED_BUNDLE_20261025_ONCE') ||
+                !pr.data.body?.includes('OWNER_ISSUE8_FENCED_BUNDLE_20261026_ONCE') ||
                 physical?.conclusion!=='failure') {
               core.setFailed('ISSUE8_QUARANTINE_PHYSICAL_OR_PR_DRIFT');return;
             }
@@ -547,8 +547,8 @@ jobs:
           script: |
             const {createHash}=require('crypto');
             const owner='ericson-j-santos',repo='desktop-pc24x7-runtime';
-            const base='a0437b0deb7db42fb91866fe8e77359844579cf6';
-            const branch='agent/issue8-qwen-quarantine-21fd68dec6f0';
+            const base='005cc39d38f90e5d7ae4b3f6e23d4e119ce4120f';
+            const branch='agent/issue8-qwen-quarantine-87a8de64ea5e';
             const digest=String(process.env.QUARANTINE_DIGEST||'');
             const expectedHead=String(process.env.QUARANTINE_HEAD||'');
             if (!/^[0-9a-f]{64}$/.test(digest) ||
