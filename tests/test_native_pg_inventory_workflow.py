@@ -4,6 +4,8 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+
+import yaml
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -111,6 +113,33 @@ def execute(data, step=ADMISSION, source=None):
     return json.loads(completed.stdout)
 
 
+NATIVE_MODES = (
+    "native-postgres-inventory",
+    "native-postgres-readback",
+    "native-wsl-postgres-qualification",
+)
+
+
+def workflow_config():
+    return yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+
+
+def workflow_expression(value):
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    value = value.strip()
+    if value.startswith("$" + "{{") and value.endswith("}}"):
+        return value[3:-2].strip()
+    return value
+
+
+def workflow_step(job, name):
+    matches = [step for step in job["steps"] if step.get("name") == name]
+    if len(matches) != 1:
+        raise AssertionError("Expected one fixed step in its job: " + name)
+    return matches[0]
+
+
 class NativeInventoryWorkflowTests(unittest.TestCase):
     def test_exact_native_ci_admitted(self):
         result = execute(fixture())
@@ -186,17 +215,43 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         data = fixture()
         data["env"]["INVENTORY_ADMITTED_AT"] = "2000-01-01T00:00:00Z"
         self.assertFalse(execute(data, PICKUP)["ok"])
-        raw = WORKFLOW.read_text(encoding="utf-8")
-        self.assertLess(raw.index(PICKUP), raw.index("Checkout exact runtime SHA"))
+
+        job = workflow_config()["jobs"]["e2e"]
+        workflow_step(job, PICKUP)
+        workflow_step(job, "Checkout exact runtime SHA")
+        workflow_step(job, "Bootstrap governed session and runner version preflight")
+        names = [step["name"] for step in job["steps"]]
+        self.assertLess(names.index(PICKUP), names.index("Checkout exact runtime SHA"))
+        self.assertLess(
+            names.index(PICKUP),
+            names.index("Bootstrap governed session and runner version preflight"),
+        )
 
     def test_manual_only_fixed_modes_and_no_free_command(self):
-        raw = WORKFLOW.read_text(encoding="utf-8")
-        trigger = raw.split("\npermissions:", 1)[0]
-        self.assertIn("default: runner-identity", trigger)
-        self.assertIn("options: [runner-identity, native-postgres-inventory, native-postgres-readback, native-wsl-postgres-qualification]", trigger)
-        for forbidden in ("\n  push:", "\n  schedule:", "\n  pull_request:", "\n      command:",
-                          "\n      host:", "\n      path:", "\n      url:"):
-            self.assertNotIn(forbidden, trigger)
+        config = workflow_config()
+        # PyYAML's YAML 1.1 loader may interpret the unquoted "on" key as True.
+        trigger = config.get("on", config.get(True))
+        self.assertIsInstance(trigger, dict)
+        self.assertEqual(set(trigger), {"workflow_dispatch"})
+
+        inputs = trigger["workflow_dispatch"]["inputs"]
+        self.assertEqual(
+            set(inputs),
+            {
+                "diagnostic",
+                "lenovo_control_plane_pickup",
+                "orchestrator_source_sha",
+                "inventory_source_sha",
+            },
+        )
+        diagnostic = inputs["diagnostic"]
+        self.assertEqual(diagnostic["type"], "choice")
+        self.assertIs(diagnostic["required"], True)
+        self.assertEqual(diagnostic["default"], "runner-identity")
+        self.assertEqual(
+            diagnostic["options"],
+            ["runner-identity", *NATIVE_MODES, "orchestrator-runner-preflight"],
+        )
 
     def test_gateway_and_session_preserved(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
@@ -211,12 +266,63 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         self.assertNotIn("native_windows_pg_inventory.py --", raw)
 
     def test_native_mode_cannot_cancel_other_work(self):
-        raw = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("format('native-pg-inventory-954-{0}', github.run_id)", raw)
-        self.assertIn("cancel-in-progress: $" + "{{ (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification') }}", raw)
-        cancel = raw.split("      - name: Fail closed and cancel stalled canary", 1)[1]
-        self.assertIn("if: steps.watchdog.outcome == 'failure' && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification')", cancel)
-        self.assertIn("NATIVE_INVENTORY_PICKUP_EXPIRED_NO_COLLECTION_ALLOWED", raw)
+        config = workflow_config()
+        concurrency = config["concurrency"]
+        watchdog = config["jobs"]["queue_watchdog"]
+        cancel = workflow_step(watchdog, "Fail closed and cancel stalled canary")
+        report = workflow_step(
+            watchdog, "Report expired native pickup without cancellation",
+        )
+        self.assertIn(
+            "NATIVE_INVENTORY_PICKUP_EXPIRED_NO_COLLECTION_ALLOWED",
+            report["with"]["script"],
+        )
+        source = (
+            "const steps = {watchdog: {outcome: 'failure'}};"
+            "core.setOutput('group', ("
+            + workflow_expression(concurrency["group"]) + "));"
+            "core.setOutput('cancel_in_progress', ("
+            + workflow_expression(concurrency["cancel-in-progress"]) + "));"
+            "core.setOutput('cancel_workflow', ("
+            + workflow_expression(cancel["if"]) + "));"
+            "core.setOutput('report_expiry', ("
+            + workflow_expression(report["if"]) + "));"
+        )
+        for mode in NATIVE_MODES:
+            for run_id in ("100", "101"):
+                with self.subTest(mode=mode, run_id=run_id):
+                    data = {
+                        **fixture(),
+                        "inputs": {"diagnostic": mode},
+                        "run_id": run_id,
+                        "ref": "refs/heads/main",
+                    }
+                    result = execute(data, source=source)
+                    self.assertTrue(result["ok"])
+                    outputs = result["outputs"]
+                    self.assertEqual(
+                        outputs["group"], "native-pg-inventory-954-" + run_id,
+                    )
+                    self.assertIs(outputs["cancel_in_progress"], False)
+                    self.assertIs(outputs["cancel_workflow"], False)
+                    self.assertIs(outputs["report_expiry"], True)
+
+        # Positive control: the existing canary retains its cancellation route.
+        data = {
+            **fixture(),
+            "inputs": {"diagnostic": "runner-identity"},
+            "run_id": "102",
+            "ref": "refs/heads/main",
+        }
+        result = execute(data, source=source)
+        self.assertTrue(result["ok"])
+        self.assertEqual(
+            result["outputs"]["group"],
+            "dedicated-runtime-runner-e2e-refs/heads/main",
+        )
+        self.assertIs(result["outputs"]["cancel_in_progress"], True)
+        self.assertIs(result["outputs"]["cancel_workflow"], True)
+        self.assertIs(result["outputs"]["report_expiry"], False)
 
     def test_native_groups_are_unique_and_legacy_behavior_is_unchanged(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
@@ -248,10 +354,30 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
             self.assertNotIn(mutation, body)
 
     def test_native_artifact_local_only_and_no_storage_charge_assumption(self):
-        raw = WORKFLOW.read_text(encoding="utf-8")
-        self.assertIn("artifacts/native-pg-inventory/evidence.json", raw)
-        upload = raw.split("      - name: Upload sanitized evidence", 1)[1].split("  queue_watchdog:", 1)[0]
-        self.assertIn("if: always() && (inputs.diagnostic != 'native-postgres-inventory' && inputs.diagnostic != 'native-postgres-readback' && inputs.diagnostic != 'native-wsl-postgres-qualification')", upload)
+        job = workflow_config()["jobs"]["e2e"]
+        self.assertIn(
+            "artifacts/native-pg-inventory/evidence.json",
+            job["env"]["EVIDENCE_REL"],
+        )
+        upload = workflow_step(job, "Upload sanitized evidence")
+        condition = workflow_expression(upload["if"])
+        source = (
+            "const always = () => true;"
+            "const steps = {session: {outputs: {target_path: 'fixed-evidence-root'}}};"
+            "core.setOutput('upload', (" + condition + "));"
+        )
+        for mode in (*NATIVE_MODES, "orchestrator-runner-preflight"):
+            with self.subTest(mode=mode):
+                data = {**fixture(), "inputs": {"diagnostic": mode}}
+                result = execute(data, source=source)
+                self.assertTrue(result["ok"])
+                self.assertIs(result["outputs"]["upload"], False)
+
+        # Positive control: the existing identity diagnostic keeps its upload.
+        data = {**fixture(), "inputs": {"diagnostic": "runner-identity"}}
+        result = execute(data, source=source)
+        self.assertTrue(result["ok"])
+        self.assertIs(result["outputs"]["upload"], True)
 
     def test_native_inventory_routing_requires_exact_desktop_identity_label(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
@@ -303,18 +429,58 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
         self.assertFalse(execute(pickup_fixture(age_ms=300_001), PICKUP)["ok"])
 
     def test_identity_guard_is_first_native_step_and_cannot_be_ignored(self):
-        raw = WORKFLOW.read_text(encoding="utf-8")
-        job = raw.split("\n  e2e:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
-        steps = job.split("    steps:\n", 1)[1]
-        self.assertTrue(steps.startswith("      - name: " + PICKUP + "\n"))
-        guard = steps.split("\n      - name:", 1)[0]
-        self.assertIn("if: (inputs.diagnostic == 'native-postgres-inventory' || inputs.diagnostic == 'native-postgres-readback' || inputs.diagnostic == 'native-wsl-postgres-qualification')", guard)
-        self.assertNotIn("continue-on-error", guard)
-        self.assertIn("process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime'", guard)
-        self.assertIn("hostname().toUpperCase() !== 'DESKTOP-PDQK954'", guard)
-        self.assertIn("age > 300000", guard)
-        self.assertNotIn("permissions:", job)
-        self.assertNotIn("listSelfHostedRunners", raw)
+        config = workflow_config()
+        job = config["jobs"]["e2e"]
+        guard = workflow_step(job, PICKUP)
+        names = [step["name"] for step in job["steps"]]
+        preceding = job["steps"][:names.index(PICKUP)]
+
+        for mode in NATIVE_MODES:
+            with self.subTest(mode=mode):
+                data = {**fixture(), "inputs": {"diagnostic": mode}}
+                # A preceding step is allowed only when inactive in this mode.
+                for earlier in preceding:
+                    self.assertIn("if", earlier)
+                    result = execute(
+                        data,
+                        source="core.setOutput('enabled', ("
+                        + workflow_expression(earlier["if"]) + "));",
+                    )
+                    self.assertTrue(result["ok"])
+                    self.assertIs(result["outputs"]["enabled"], False)
+
+                result = execute(
+                    data,
+                    source="core.setOutput('enabled', ("
+                    + workflow_expression(guard["if"]) + "));",
+                )
+                self.assertTrue(result["ok"])
+                self.assertIs(result["outputs"]["enabled"], True)
+
+        for mode in ("runner-identity", "orchestrator-runner-preflight"):
+            data = {**fixture(), "inputs": {"diagnostic": mode}}
+            result = execute(
+                data,
+                source="core.setOutput('enabled', ("
+                + workflow_expression(guard["if"]) + "));",
+            )
+            self.assertTrue(result["ok"])
+            self.assertIs(result["outputs"]["enabled"], False)
+
+        self.assertIs(guard.get("continue-on-error", False), False)
+        self.assertIs(job.get("continue-on-error", False), False)
+        body = guard["with"]["script"]
+        self.assertIn(
+            "process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime'", body,
+        )
+        self.assertIn("hostname().toUpperCase() !== 'DESKTOP-PDQK954'", body)
+        self.assertIn("age > 300000", body)
+        self.assertEqual(
+            job["permissions"], {"contents": "read", "actions": "read"},
+        )
+        self.assertNotIn(
+            "listSelfHostedRunners", WORKFLOW.read_text(encoding="utf-8"),
+        )
 
     def test_readback_identity_label_excludes_other_host_with_shared_runtime_labels(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
