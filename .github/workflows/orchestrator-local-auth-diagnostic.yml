@@ -1,0 +1,200 @@
+name: Orchestrator local auth diagnostic
+on:
+  push:
+    branches: [feat/orchestrator-dev-runner-preflight-20261027]
+    paths:
+      - .github/workflows/orchestrator-local-auth-diagnostic.yml
+      - scripts/orchestrator_local_gh_auth_diagnostic.py
+permissions:
+  contents: read
+concurrency:
+  group: orchestrator-local-auth-diagnostic-desktop
+  cancel-in-progress: false
+jobs:
+  admit:
+    name: Admit diagnostic
+    runs-on: windows-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - name: Verify current PR, main and rules
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const branch = 'feat/orchestrator-dev-runner-preflight-20261027';
+            const repo = 'ericson-j-santos/desktop-pc24x7-runtime';
+            if (context.eventName !== 'push' || context.ref !== 'refs/heads/' + branch ||
+                context.repo.owner + '/' + context.repo.repo !== repo ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1') throw new Error('DIAGNOSTIC_SCOPE_REJECTED');
+            const {data: current} = await github.rest.repos.getBranch({...context.repo, branch});
+            const {data: main} = await github.rest.repos.getBranch({...context.repo, branch:'main'});
+            const {data: rules} = await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'});
+            const {data: pulls} = await github.rest.pulls.list({
+              ...context.repo,state:'open',base:'main',
+              head:context.repo.owner + ':' + branch,per_page:100});
+            if (current.commit.sha !== context.sha ||
+                main.commit.sha !== '18fb89dc2c788d0c0e268908971c24215c4872f3' ||
+                rules.commit.sha !== 'd6af41001bf641727a35a990e7c93b4c757538cb' ||
+                pulls.length !== 1 || pulls[0].number !== 113 ||
+                pulls[0].head.sha !== context.sha ||
+                pulls[0].base.sha !== main.commit.sha ||
+                pulls[0].head.repo?.full_name !== repo) throw new Error('DIAGNOSTIC_STATE_MOVED');
+      - name: Checkout exact SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Execute negative controls
+        shell: pwsh
+        run: python -B -m unittest discover -s tests -p test_orchestrator_local_gh_auth_diagnostic.py -v
+  diagnose:
+    name: Governed diagnostic on Desktop runtime runner
+    needs: admit
+    runs-on: ${{ fromJSON('["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    env:
+      CORRELATION_ID: orchestrator-auth-diag-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Verify pickup identity and freshness
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo,run_id:context.runId,per_page:100});
+            const matches = jobs.jobs.filter(j => j.name === 'Governed diagnostic on Desktop runtime runner');
+            const {data: current} = await github.rest.repos.getBranch({
+              ...context.repo,branch:'feat/orchestrator-dev-runner-preflight-20261027'});
+            const {data: rules} = await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'});
+            if (matches.length !== 1 || jobs.total_count !== jobs.jobs.length ||
+                matches[0].runner_id !== 2 ||
+                matches[0].runner_name !== 'DESKTOP-PDQK954-runtime' ||
+                matches[0].status !== 'in_progress' ||
+                process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
+                require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954' ||
+                (!Number.isFinite(Date.parse(matches[0].started_at)) || Date.now() - Date.parse(matches[0].started_at) > 300000) ||
+                current.commit.sha !== context.sha ||
+                rules.commit.sha !== 'd6af41001bf641727a35a990e7c93b4c757538cb') {
+              throw new Error('DIAGNOSTIC_PICKUP_REJECTED');
+            }
+      - name: Checkout exact runtime SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout canonical rules SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: d6af41001bf641727a35a990e7c93b4c757538cb
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Require governed session
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $raw = & python $launcher --policy $policy --repo $env:GITHUB_WORKSPACE --session-prefix desktop-runner --correlation-id $env:CORRELATION_ID --expected-head "${{ github.sha }}" --sync-ref "origin/$env:GITHUB_REF_NAME" --require-runner-version-preflight
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $data = @($raw)[-1] | ConvertFrom-Json
+          if ($data.result -ne "SESSION_LAUNCH_OK" -or $data.state_validated -ne $true -or $data.head -ne "${{ github.sha }}" -or $data.runner_version_preflight.ok -ne $true) { throw "SESSION_LAUNCH_BLOCKED" }
+          "target_path=$($data.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($data.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Diagnose through Command Gateway
+        shell: powershell
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_local_gh_auth_diagnostic.py"
+          & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 180 --expected-head "${{ github.sha }}" -- python -B $script --expected-sha "${{ github.sha }}" --correlation-id $env:CORRELATION_ID
+          exit $LASTEXITCODE
+      - name: Dispatch fixed preflight once after repaired auth and CI
+        if: github.event.before == '7e51a578a59afa7ee955139c2f6bc3df72509ef6'
+        shell: powershell
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_preflight_dispatch_once.py"
+          & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 600 --expected-head "${{ github.sha }}" -- python -B $script --expected-sha "${{ github.sha }}" --correlation-id $env:CORRELATION_ID
+          exit $LASTEXITCODE
+  queue_watchdog:
+    name: Diagnostic pickup watchdog
+    needs: admit
+    runs-on: windows-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+    steps:
+      - name: Stop run when physical pickup expires
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const sleep = ms => new Promise(resolve => setTimeout(resolve,ms));
+            const until = Date.now() + 300000;
+            while (true) {
+              const {data} = await github.rest.actions.listJobsForWorkflowRun({
+                ...context.repo,run_id:context.runId,per_page:100});
+              const job = data.jobs.find(j => j.name === 'Governed diagnostic on Desktop runtime runner');
+              if (data.total_count !== data.jobs.length) throw new Error('DIAGNOSTIC_JOBS_INCOMPLETE');
+              if (job && job.runner_id === 2 &&
+                  job.runner_name === 'DESKTOP-PDQK954-runtime' &&
+                  ['in_progress','completed'].includes(job.status)) return;
+              if (Date.now() >= until) {
+                await github.rest.actions.cancelWorkflowRun({...context.repo,run_id:context.runId});
+                throw new Error('DIAGNOSTIC_PICKUP_EXPIRED');
+              }
+              await sleep(15000);
+            }
+  readback:
+    name: Independent diagnostic readback
+    needs: [admit, diagnose, queue_watchdog]
+    if: ${{ always() && needs.admit.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+    steps:
+      - name: Verify real physical job and governed steps
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo,run_id:context.runId,filter:'latest',per_page:100});
+            const matches = data.jobs.filter(j => j.name === 'Governed diagnostic on Desktop runtime runner');
+            if (data.total_count !== data.jobs.length || matches.length !== 1 ||
+                matches[0].runner_id !== 2 ||
+                matches[0].runner_name !== 'DESKTOP-PDQK954-runtime' ||
+                matches[0].status !== 'completed' ||
+                matches[0].conclusion !== 'success' ||
+                !['Verify pickup identity and freshness','Require governed session',
+                  'Diagnose through Command Gateway',
+                  ...(context.payload.before === '7e51a578a59afa7ee955139c2f6bc3df72509ef6'
+                    ? ['Dispatch fixed preflight once after repaired auth and CI'] : [])].every(name =>
+                    matches[0].steps?.some(s => s.name === name &&
+                      s.status === 'completed' && s.conclusion === 'success'))) {
+              throw new Error('DIAGNOSTIC_INDEPENDENT_READBACK_BLOCKED');
+            }
+            core.info('DIAGNOSTIC_INDEPENDENT_READBACK_OK');
