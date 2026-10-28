@@ -147,5 +147,39 @@ class ApplySafetyTests(unittest.TestCase):
         self.assertNotIn('auth login', source)
 
 
+
+class ScannerSourceTests(unittest.TestCase):
+    def answers(self):
+        return [
+            {"commit": {"sha": "d" * 40}},
+            {"merged": True, "head": {"sha": deploy.SCANNER_HEAD}, "merge_commit_sha": "d" * 40},
+            {"commit": {"sha": deploy.RULES_SHA}},
+            {"tree": {"sha": deploy.SCANNER_TREE}},
+        ]
+
+    def test_exact_reviewed_pr_merge_and_tree(self):
+        with patch.object(deploy.bootstrap, "api_json", side_effect=self.answers()):
+            self.assertEqual(deploy.scanner_guard("opaque-test"), "d" * 40)
+
+    def test_unmerged_changed_head_main_or_rules_rejected(self):
+        for item, key, value in (
+            (1, "merged", False), (1, "head", {"sha": "e" * 40}),
+            (0, "commit", {"sha": "e" * 40}), (2, "commit", {"sha": "e" * 40}),
+        ):
+            answers = self.answers()
+            answers[item][key] = value
+            with self.subTest(item=item, key=key), \
+                 patch.object(deploy.bootstrap, "api_json", side_effect=answers), \
+                 self.assertRaisesRegex(deploy.Blocked, "scanner_source_or_rules_moved"):
+                deploy.scanner_guard("opaque-test")
+
+    def test_tree_divergence_rejected(self):
+        answers = self.answers()
+        answers[3] = {"tree": {"sha": "e" * 40}}
+        with patch.object(deploy.bootstrap, "api_json", side_effect=answers), \
+             self.assertRaisesRegex(deploy.Blocked, "scanner_tree_mismatch"):
+            deploy.scanner_guard("opaque-test")
+
+
 if __name__ == "__main__":
     unittest.main()

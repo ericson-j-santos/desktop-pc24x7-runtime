@@ -26,9 +26,10 @@ import desktop_control_plane_watchdog as watchdog
 import orchestrator_dev_runner_preflight as preflight
 
 ORCHESTRATOR = "ericson-j-santos/reqsys-engineering-orchestrator"
-SCANNER_MAIN = "1eed56b1a96a4f4ecfcd1a292bd95223a18fc0f2"
-SCANNER_TREE = "3f865e0cec6e9ad683a91fcc178fdb03ca0310f1"
-RULES_SHA = "25a72d6220d8432c92dfbe6e783aa64dc3891330"
+SCANNER_PR = 64
+SCANNER_HEAD = "2b7a943408eb3adce64d58637d4c9107213300a4"
+SCANNER_TREE = "95d0b8dc9339cf4a45faf40651508343706c0466"
+RULES_SHA = "682bba2858e09c161e7d3a477896ba7e326e83bd"
 TASK_NAME = r"\Automation\DesktopPc24x7RuntimeWatchdog"
 CONFIRM = "ACTIVATE-ORCHESTRATOR-DEV-SUPERVISION"
 SOURCE_FILES = ("desktop_control_plane_watchdog.py", "pc24x7_host_policy.py",
@@ -170,14 +171,16 @@ def source_guard(sha):
 def scanner_guard(token):
     prefix = "/repos/" + ORCHESTRATOR
     main = bootstrap.api_json(prefix + "/branches/main", token=token)
-    pr = bootstrap.api_json(prefix + "/pulls/63", token=token)
-    commit = bootstrap.api_json(prefix + "/git/commits/" + SCANNER_MAIN, token=token)
+    pr = bootstrap.api_json(prefix + "/pulls/" + str(SCANNER_PR), token=token)
     rules = bootstrap.api_json("/repos/ericson-j-santos/chatgpt-operational-rules/branches/main", token=token)
-    require(main.get("commit", {}).get("sha") == SCANNER_MAIN
-            and pr.get("merged") is True and pr.get("merge_commit_sha") == SCANNER_MAIN
-            and pr.get("head", {}).get("sha") == "ec65cd97c5272ac76f31cee23d5b7dcdf3b8034a"
-            and commit.get("tree", {}).get("sha") == SCANNER_TREE
+    merged = pr.get("merge_commit_sha")
+    require(pr.get("merged") is True and pr.get("head", {}).get("sha") == SCANNER_HEAD
+            and isinstance(merged, str) and bool(preflight.SHA_RE.fullmatch(merged))
+            and main.get("commit", {}).get("sha") == merged
             and rules.get("commit", {}).get("sha") == RULES_SHA, "scanner_source_or_rules_moved")
+    commit = bootstrap.api_json(prefix + "/git/commits/" + merged, token=token)
+    require(commit.get("tree", {}).get("sha") == SCANNER_TREE, "scanner_tree_mismatch")
+    return merged
 
 
 def registration():
@@ -229,7 +232,7 @@ def build_plan(sha, correlation):
     source_guard(sha)
     require(bool(preflight.CORRELATION_RE.fullmatch(correlation)), "correlation_invalid")
     token = bootstrap.local_git_owner_token()
-    scanner_guard(token)
+    scanner_main = scanner_guard(token)
     token = ""
     preflight.require_orchestrator()
     remote = registration()
@@ -252,7 +255,7 @@ def build_plan(sha, correlation):
     plan = {
         "schema_version": 1, "kind": "orchestrator-dev-supervised-activation-plan",
         "source_sha": sha, "rules_sha": RULES_SHA, "correlation_id": correlation,
-        "host": "DESKTOP-PDQK954", "runner_id": 21, "scanner_main_sha": SCANNER_MAIN,
+        "host": "DESKTOP-PDQK954", "runner_id": 21, "scanner_main_sha": scanner_main,
         "runner_home": str(home), "watchdog_root": str(root),
         "old_source_sha": installed["source_sha"], "source_files": hashes,
         "old_metadata_sha256": file_hash(root / "metadata.json"),
@@ -481,7 +484,7 @@ def apply(sha, correlation, expected_digest, confirmation):
     receipt = {"kind": "orchestrator-dev-supervised-activation", "source_sha": sha,
                "plan_sha256": expected_digest, "runner_id": 21, "runner_registered_again": False,
                "host_reboot_performed": False, "additional_cost_authorized_brl": 0,
-               "scanner_main_sha": SCANNER_MAIN, "rdc_used": False, "replayed": False}
+               "scanner_main_sha": plan["scanner_main_sha"], "rdc_used": False, "replayed": False}
     try:
         require(workflow_state(token).get("state") == "active", "scanner_not_active_before_maintenance")
         restore_required = True
