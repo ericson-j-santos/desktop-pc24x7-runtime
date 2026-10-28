@@ -1,4 +1,4 @@
-name: Orchestrator registration plan review at approved source
+name: Orchestrator authorized DEV runner registration
 on:
   push:
     branches: [ops/orchestrator-dev-plan-2232022f-20261028]
@@ -24,14 +24,14 @@ jobs:
           script: |
             if (context.repo.owner !== 'ericson-j-santos' || context.repo.repo !== 'desktop-pc24x7-runtime' ||
                 context.ref !== 'refs/heads/ops/orchestrator-dev-plan-2232022f-20261028' ||
-                context.eventName !== 'push' || process.env.GITHUB_RUN_ATTEMPT !== '1') throw new Error('PLAN_SCOPE_REJECTED');
+                context.eventName !== 'push' || process.env.GITHUB_RUN_ATTEMPT !== '1' || context.payload.before !== '18899c80b43e03b075e4b074bef3e67efab0e0d9') throw new Error('PLAN_SCOPE_REJECTED');
             const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:113});
             const {data: main} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
             const {data: rules} = await github.rest.repos.getBranch({owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'});
             const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo,run_id:40613511020});
             const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:40613511020,per_page:100,filter:'latest'});
-            if (pr.state !== 'open' || pr.head.sha !== '2232022f310970df54299263f0ea93f48ee2a56a' ||
-                main.commit.sha !== '18fb89dc2c788d0c0e268908971c24215c4872f3' ||
+            if (!pr.merged || pr.merge_commit_sha !== 'c1f224b79a26fe927686e69523f3a4f7cc37ba81' || pr.head.sha !== '2232022f310970df54299263f0ea93f48ee2a56a' ||
+                main.commit.sha !== 'c1f224b79a26fe927686e69523f3a4f7cc37ba81' ||
                 rules.commit.sha !== '25a72d6220d8432c92dfbe6e783aa64dc3891330' ||
                 run.head_sha !== pr.head.sha || run.run_attempt !== 1 ||
                 run.status !== 'completed' || run.conclusion !== 'success' ||
@@ -39,23 +39,50 @@ jobs:
                 ![122570745898,122571032492].every(id => jobs.jobs.some(j => j.id === id && j.status === 'completed' && j.conclusion === 'success'))) {
               throw new Error('PLAN_SOURCE_OR_PREFLIGHT_NOT_CURRENT');
             }
+      - name: Verify tree-equivalent merged source and actual post-merge CI
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data: source} = await github.rest.git.getCommit({...context.repo,commit_sha:'2232022f310970df54299263f0ea93f48ee2a56a'});
+            const {data: merged} = await github.rest.git.getCommit({...context.repo,commit_sha:'c1f224b79a26fe927686e69523f3a4f7cc37ba81'});
+            const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo,run_id:40618376351});
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:40618376351,per_page:100,filter:'latest'});
+            if (source.tree.sha !== merged.tree.sha || source.tree.sha !== '9c31d4309c27446e32ae39d181220ec76e08ba52' ||
+                run.head_sha !== 'c1f224b79a26fe927686e69523f3a4f7cc37ba81' ||
+                run.status !== 'completed' || run.conclusion !== 'success' ||
+                jobs.total_count !== jobs.jobs.length) throw new Error('MERGED_SOURCE_OR_CI_REJECTED');
+            for (const name of ['Python compile and tests','Portable Linux compile and tests']) {
+              const matches = jobs.jobs.filter(j => j.name === name);
+              if (matches.length !== 1 || matches[0].status !== 'completed' || matches[0].conclusion !== 'success' ||
+                  !['Compile','Unit and negative-control tests'].every(n => matches[0].steps.some(s => s.name === n && s.conclusion === 'success'))) throw new Error('MERGED_CI_NOT_EXECUTED');
+            }
+      - name: Verify reviewed digest evidence before authorized application
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo,run_id:40614145344});
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:40614145344,per_page:100,filter:'latest'});
+            if (run.run_attempt !== 1 || run.status !== 'completed' || run.conclusion !== 'success' ||
+                jobs.total_count !== jobs.jobs.length ||
+                ![122572690302,122573004844].every(id => jobs.jobs.some(j => j.id === id && j.conclusion === 'success'))) throw new Error('APPROVED_DIGEST_EVIDENCE_MISSING');
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - name: Test private identity comparison and negative task control
+      - name: Test exact approval binding and rejected effect changes
         shell: pwsh
-        run: python -B -m unittest discover -s tests -p test_orchestrator_registration_review.py -v
+        run: python -B -m unittest discover -s tests -p test_orchestrator_registration_apply_authorized.py -v
   plan:
-    name: Read registration plan on Desktop at approved source
+    name: Apply authorized registration on Desktop
     needs: admit
     runs-on: ${{ fromJSON('["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
-    timeout-minutes: 10
+    timeout-minutes: 18
     permissions:
       contents: read
       actions: read
     outputs:
       receipt: ${{ steps.plan.outputs.receipt }}
+      readback: ${{ steps.local_readback.outputs.readback }}
     env:
       CORRELATION_ID: orchestrator-plan-review-${{ github.run_id }}-1
       GH_TOKEN: ''
@@ -66,7 +93,7 @@ jobs:
         with:
           script: |
             const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
-            const job = data.jobs.find(j => j.name === 'Read registration plan on Desktop at approved source');
+            const job = data.jobs.find(j => j.name === 'Apply authorized registration on Desktop');
             if (data.total_count !== data.jobs.length || job?.runner_id !== 2 ||
                 process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
                 require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954' ||
@@ -103,29 +130,52 @@ jobs:
           "target_path=$($h.target_path)" | Add-Content $env:GITHUB_OUTPUT
           "session_id=$($h.session_id)" | Add-Content $env:GITHUB_OUTPUT
           "source_path=$($s.target_path)" | Add-Content $env:GITHUB_OUTPUT
-      - name: Compute plan digest and compare task identity through Gateway
+          "source_session_id=$($s.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Apply exact approved registration through canonical Risk3
         id: plan
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
           SESSION_ID: ${{ steps.session.outputs.session_id }}
           APPROVED_SOURCE_ROOT: ${{ steps.session.outputs.source_path }}
+          SOURCE_SESSION_ID: ${{ steps.session.outputs.source_session_id }}
         run: |
           $ErrorActionPreference = "Stop"
           $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
-          $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_registration_review.py"
-          $raw = & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 180 --expected-head "${{ github.sha }}" -- python -B $script
+          $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_registration_apply_authorized.py"
+          $env:CANONICAL_RULES_ROOT = Join-Path $env:GITHUB_WORKSPACE "_rules"
+          $raw = & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:APPROVED_SOURCE_ROOT --session-id $env:SOURCE_SESSION_ID --risk 2 --timeout 720 --expected-head "2232022f310970df54299263f0ea93f48ee2a56a" -- python -B $script
           $exitCode = $LASTEXITCODE
           $raw | Write-Output
           if ($exitCode -ne 0) { exit $exitCode }
           $event = @($raw)[-1] | ConvertFrom-Json
           if ($event.result -ne "ok" -or $event.state_changed -ne $false -or $event.command_exit_code -ne 0) { throw "PLAN_GATEWAY_READBACK_REJECTED" }
           $receipt = $event.stdout | ConvertFrom-Json
-          if ($receipt.ok -ne $true -or $receipt.registration_performed -ne $false) { throw "PLAN_BLOCKED" }
+          if ($receipt.ok -ne $true -or $receipt.registration_performed -ne $true -or $receipt.authorization_entry_removed -ne $true) { throw "AUTHORIZED_REGISTRATION_BLOCKED" }
           "receipt=$($event.stdout.Trim())" | Add-Content $env:GITHUB_OUTPUT
+      - name: Independent local registration readback through Gateway
+        id: local_readback
+        shell: powershell
+        env:
+          APPROVED_SOURCE_ROOT: ${{ steps.session.outputs.source_path }}
+          SOURCE_SESSION_ID: ${{ steps.session.outputs.source_session_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:APPROVED_SOURCE_ROOT "scripts\orchestrator_dev_runner_preflight.py"
+          $raw = & python $gateway --policy $policy --correlation-id "$($env:CORRELATION_ID)-readback" run --cwd $env:APPROVED_SOURCE_ROOT --session-id $env:SOURCE_SESSION_ID --risk 1 --timeout 120 --expected-head 2232022f310970df54299263f0ea93f48ee2a56a -- python -B $script --expected-sha 2232022f310970df54299263f0ea93f48ee2a56a --correlation-id orchestrator-registration-independent-2232022f
+          $exitCode = $LASTEXITCODE
+          $raw | Write-Output
+          if ($exitCode -ne 0) { exit $exitCode }
+          $event = @($raw)[-1] | ConvertFrom-Json
+          if ($event.result -ne "ok" -or $event.state_changed -ne $false) { throw "REGISTRATION_GATEWAY_READBACK_BLOCKED" }
+          $proof = $event.stdout | ConvertFrom-Json
+          if ($proof.registration_required -ne $false -or $proof.observed_runner_id -le 0) { throw "REGISTRATION_NOT_OBSERVED" }
+          "readback=$($event.stdout.Trim())" | Add-Content $env:GITHUB_OUTPUT
   readback:
-    name: Independent registration plan digest readback
+    name: Independent authorized registration readback
     needs: [admit, plan]
     if: ${{ always() && needs.admit.result == 'success' }}
     runs-on: windows-latest
@@ -136,38 +186,49 @@ jobs:
       pull-requests: read
     env:
       RECEIPT: ${{ needs.plan.outputs.receipt }}
+      LOCAL_READBACK: ${{ needs.plan.outputs.readback }}
     steps:
       - name: Verify actual physical job and source remain current
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
             const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
-            const job = data.jobs.find(j => j.name === 'Read registration plan on Desktop at approved source');
+            const job = data.jobs.find(j => j.name === 'Apply authorized registration on Desktop');
             const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:113});
             if (data.total_count !== data.jobs.length || job?.runner_id !== 2 ||
                 job.status !== 'completed' || job.conclusion !== 'success' ||
                 pr.head.sha !== '2232022f310970df54299263f0ea93f48ee2a56a' ||
-                !job.steps.some(s => s.name === 'Compute plan digest and compare task identity through Gateway' && s.conclusion === 'success')) throw new Error('PLAN_PHYSICAL_READBACK_BLOCKED');
-      - name: Recompute canonical digest independently
+                !['Apply exact approved registration through canonical Risk3','Independent local registration readback through Gateway'].every(name => job.steps.some(s => s.name === name && s.conclusion === 'success'))) throw new Error('PLAN_PHYSICAL_READBACK_BLOCKED');
+      - name: Validate independent registration and preservation receipts
         shell: python
         run: |
-          import hashlib, json, os
+          import json, os
           receipt = json.loads(os.environ["RECEIPT"])
-          plan = receipt["registration_plan"]
-          keys = ("schema_version","kind","source_sha","correlation_id","profile","runner_home","required_labels","package","version_policy","registration_required","observed_runner_id","administrative_effects","listener_start_planned","watchdog_change_planned","windows_task_change_planned","additional_cost_authorized_brl","runtime_runner_change_planned")
-          canonical = {key: plan[key] for key in keys}
-          digest = hashlib.sha256(json.dumps(canonical,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
-          assert plan["plan_sha256"] == digest
-          assert plan["source_sha"] == "2232022f310970df54299263f0ea93f48ee2a56a"
-          assert plan["profile"]["host"] == "DESKTOP-PDQK954"
-          assert plan["profile"]["repository"] == "ericson-j-santos/reqsys-engineering-orchestrator"
-          assert plan["read_only"] is True and plan["registration_performed"] is False
-          assert plan["registration_token_requested"] is False
-          assert plan["listener_start_planned"] is False and plan["watchdog_change_planned"] is False
-          assert plan["additional_cost_authorized_brl"] == 0
-          print("REGISTRATION_PLAN_INDEPENDENT_READBACK_OK:" + digest)
+          proof = json.loads(os.environ["LOCAL_READBACK"])
+          assert receipt["ok"] is True
+          assert receipt["source_sha"] == proof["source_sha"] == "2232022f310970df54299263f0ea93f48ee2a56a"
+          assert receipt["plan_sha256"] == "8f22292df61738635cd4eea583e142999816e8a1dedf862feeb7b60aef9a262f"
+          assert receipt["state"] == "RUNNER_REGISTERED_ACTIVATION_PENDING"
+          assert receipt["registration_performed"] is True
+          assert type(receipt["registered_runner_id"]) is int and receipt["registered_runner_id"] > 0
+          assert proof["registration_required"] is False
+          assert receipt["registered_runner_id"] == proof["observed_runner_id"]
+          assert receipt["registered_runner_name"] == "DESKTOP-PDQK954-orchestrator-dev"
+          assert receipt["binary_version"] == "2.338.2"
+          assert receipt["merged_tree_equivalent"] is True
+          assert receipt["main_sha"] == "c1f224b79a26fe927686e69523f3a4f7cc37ba81"
+          assert receipt["local_remote_binding_validated"] is True
+          assert receipt["runtime_metadata_unchanged"] is True
+          assert receipt["new_listener_matching_processes"] == 0
+          assert receipt["runner_started"] is False and receipt["watchdog_changed"] is False
+          assert receipt["windows_task_changed"] is False
+          assert receipt["additional_cost_authorized_brl"] == 0
+          assert receipt["authorization_entry_removed"] is True
+          assert receipt["risk3_authorization"]["broad_development_mode_changed"] is False
+          assert receipt["risk3_authorization"]["git_head"] == receipt["source_sha"]
+          print("REGISTRATION_INDEPENDENT_READBACK_OK:" + json.dumps(receipt,sort_keys=True))
   queue_watchdog:
-    name: Registration plan pickup watchdog
+    name: Authorized registration pickup watchdog
     needs: admit
     runs-on: windows-latest
     timeout-minutes: 7
@@ -180,7 +241,7 @@ jobs:
             const deadline = Date.now() + 300000;
             while (true) {
               const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
-              const job = data.jobs.find(j => j.name === 'Read registration plan on Desktop at approved source');
+              const job = data.jobs.find(j => j.name === 'Apply authorized registration on Desktop');
               if (data.total_count !== data.jobs.length) throw new Error('PLAN_JOB_LIST_INCOMPLETE');
               if (job?.runner_id === 2 && ['in_progress','completed'].includes(job.status)) return;
               if (Date.now() >= deadline) {
