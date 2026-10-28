@@ -24,23 +24,23 @@ jobs:
           script: |
             if (context.repo.owner !== 'ericson-j-santos' || context.repo.repo !== 'desktop-pc24x7-runtime' ||
                 context.ref !== 'refs/heads/ops/orchestrator-dev-plan-2232022f-20261028' ||
-                context.eventName !== 'push' || process.env.GITHUB_RUN_ATTEMPT !== '1' || context.payload.before !== 'acf1fe1d87082f0ebdb8941b1e30fb81830eb236') throw new Error('PLAN_SCOPE_REJECTED');
+                context.eventName !== 'push' || process.env.GITHUB_RUN_ATTEMPT !== '1' || context.payload.before !== '424136fe25e63f6fe0811828735dc3b3e8f82b20') throw new Error('PLAN_SCOPE_REJECTED');
             const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:115});
             const {data: main} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
             const {data: rules} = await github.rest.repos.getBranch({owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'});
-            if (pr.head.sha !== '84109661b6f6b20d4be81487ab0d3b8cc481c979' || main.commit.sha !== 'c542b95186d1255a3c2c12bad7087f25dbb3e86a' ||
-                rules.commit.sha !== '25a72d6220d8432c92dfbe6e783aa64dc3891330') throw new Error('PLAN_SOURCE_OR_RULES_CHANGED');
+            if (!pr.merged || pr.head.sha !== '674c0d9e89b7b64de643ae1ea1e9761aa482df40' || pr.merge_commit_sha !== 'e0c40bccf0d99858a21beab0d62d0f143e969608' || main.commit.sha !== 'e0c40bccf0d99858a21beab0d62d0f143e969608' ||
+                rules.commit.sha !== '682bba2858e09c161e7d3a477896ba7e326e83bd') throw new Error('PLAN_SOURCE_OR_RULES_CHANGED');
             const deadline = Date.now()+180000;
             while (true) {
-              const {data} = await github.rest.actions.listWorkflowRunsForRepo({...context.repo,head_sha:pr.head.sha,event:'push',per_page:30});
-              const runs = data.workflow_runs.filter(r => r.path === '.github/workflows/ci.yml' && r.head_sha === pr.head.sha);
+              const {data} = await github.rest.actions.listWorkflowRunsForRepo({...context.repo,head_sha:main.commit.sha,event:'push',per_page:30});
+              const runs = data.workflow_runs.filter(r => r.path === '.github/workflows/ci.yml' && r.head_sha === main.commit.sha);
               if (runs.some(r => r.status === 'completed' && r.conclusion === 'success' && r.run_attempt === 1)) break;
               if (runs.some(r => r.status === 'completed' && r.conclusion !== 'success') || Date.now()>=deadline) throw new Error('SOURCE_CI_NOT_POSITIVE');
               await new Promise(resolve => setTimeout(resolve,15000));
             }
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: 84109661b6f6b20d4be81487ab0d3b8cc481c979
+          ref: e0c40bccf0d99858a21beab0d62d0f143e969608
           persist-credentials: false
       - name: Test closed supervision deployment contracts
         shell: pwsh
@@ -73,14 +73,14 @@ jobs:
       - name: Checkout exact supervised activation source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: 84109661b6f6b20d4be81487ab0d3b8cc481c979
+          ref: e0c40bccf0d99858a21beab0d62d0f143e969608
           fetch-depth: 1
           persist-credentials: false
       - name: Checkout exact canonical rules
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: 25a72d6220d8432c92dfbe6e783aa64dc3891330
+          ref: 682bba2858e09c161e7d3a477896ba7e326e83bd
           path: _rules
           fetch-depth: 1
           persist-credentials: false
@@ -91,12 +91,12 @@ jobs:
           $ErrorActionPreference = "Stop"
           $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
-          $raw = & python -B $launcher --policy $policy --repo $env:GITHUB_WORKSPACE --session-prefix supervision-source --correlation-id $env:CORRELATION_ID --expected-head 84109661b6f6b20d4be81487ab0d3b8cc481c979 --sync-ref origin/feat/orchestrator-dev-supervision-20261028 --require-runner-version-preflight
+          $raw = & python -B $launcher --policy $policy --repo $env:GITHUB_WORKSPACE --session-prefix supervision-source --correlation-id $env:CORRELATION_ID --expected-head e0c40bccf0d99858a21beab0d62d0f143e969608 --sync-ref origin/main --require-runner-version-preflight
           $exitCode = $LASTEXITCODE
           $raw | Write-Output
           if ($exitCode -ne 0) { exit $exitCode }
           $s = @($raw)[-1] | ConvertFrom-Json
-          if ($s.result -ne "SESSION_LAUNCH_OK" -or $s.state_validated -ne $true -or $s.head -ne "84109661b6f6b20d4be81487ab0d3b8cc481c979" -or $s.runner_version_preflight.ok -ne $true) { throw "SOURCE_SESSION_BLOCKED" }
+          if ($s.result -ne "SESSION_LAUNCH_OK" -or $s.state_validated -ne $true -or $s.head -ne "e0c40bccf0d99858a21beab0d62d0f143e969608" -or $s.runner_version_preflight.ok -ne $true) { throw "SOURCE_SESSION_BLOCKED" }
           "source_path=$($s.target_path)" | Add-Content $env:GITHUB_OUTPUT
           "source_session_id=$($s.session_id)" | Add-Content $env:GITHUB_OUTPUT
       - name: Prepare fixed activation digest through Gateway
@@ -111,7 +111,7 @@ jobs:
           $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
           $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_dev_supervision_deploy.py"
-          $raw = & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 600 --expected-head "84109661b6f6b20d4be81487ab0d3b8cc481c979" -- python -B $script plan --source-sha 84109661b6f6b20d4be81487ab0d3b8cc481c979 --correlation-id orchestrator-dev-supervision-review
+          $raw = & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 600 --expected-head "e0c40bccf0d99858a21beab0d62d0f143e969608" -- python -B $script plan --source-sha e0c40bccf0d99858a21beab0d62d0f143e969608 --correlation-id orchestrator-dev-supervision-review
           $exitCode = $LASTEXITCODE
           $raw | Write-Output
           if ($exitCode -ne 0) { exit $exitCode }
@@ -142,7 +142,7 @@ jobs:
             const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:115});
             if (data.total_count !== data.jobs.length || job?.runner_id !== 2 ||
                 job.status !== 'completed' || job.conclusion !== 'success' ||
-                pr.head.sha !== '84109661b6f6b20d4be81487ab0d3b8cc481c979' ||
+                (!pr.merged || pr.head.sha !== '674c0d9e89b7b64de643ae1ea1e9761aa482df40' || pr.merge_commit_sha !== 'e0c40bccf0d99858a21beab0d62d0f143e969608') ||
                 !job.steps.some(s => s.name === 'Prepare fixed activation digest through Gateway' && s.conclusion === 'success')) throw new Error('PLAN_PHYSICAL_READBACK_BLOCKED');
       - name: Validate read-only qualification receipt
         shell: python
@@ -151,7 +151,7 @@ jobs:
           receipt = json.loads(os.environ["RECEIPT"])
           assert receipt["kind"] == "orchestrator-dev-supervised-activation-plan"
           assert receipt["runner_id"] == 21 and receipt["host"] == "DESKTOP-PDQK954"
-          assert receipt["source_sha"] == "84109661b6f6b20d4be81487ab0d3b8cc481c979"
+          assert receipt["source_sha"] == "e0c40bccf0d99858a21beab0d62d0f143e969608"
           assert receipt["configuration_read_only"] is True
           assert receipt["rdc_recovery_enabled"] is False
           assert receipt["additional_runner_profiles"] == ["orchestrator-dev"]
