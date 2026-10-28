@@ -220,3 +220,9 @@ não prova ausência em outros perfis do host. Consulta da tarefa indisponível
 não distingue inexistência de acesso negado. Componentes não observados são
 mantidos como desconhecidos, e nenhuma dessas leituras comprova operação
 contínua, recuperação ou cadastro do novo runner.
+
+## Autenticação local reaproveitada
+
+O bootstrap mantém a rota GitHub CLI e, quando ela não valida o owner, admite o credential helper já configurado no Git para o repositório fixo do Orchestrator. A credencial fica somente na memória do processo, é validada em /user como ericson-j-santos e só pode atender os endpoints fechados do contrato DEV. Nenhum login, approve/erase, arquivo de token ou exportação ao listener é solicitado; o helper pode renovar sua própria credencial durante get.
+
+A capability de diagnóstico consulta a tarefa RuntimeHealthSupervisor existente sem PyWin32 e compara principal/SID em memória. O dispatch excepcional desta correção é limitado ao commit filho de 7e51a578a59afa7ee955139c2f6bc3df72509ef6, exige HEAD/main/regras e os CIs de push/PR atuais aprovados, envia uma única requisição ao workflow físico existente e faz readback. Um POST de resultado incerto nunca é repetido. Esse dispatch não autoriza cadastro, instalação, restart ou alteração administrativa.

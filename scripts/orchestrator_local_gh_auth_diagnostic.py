@@ -282,6 +282,7 @@ def probe_health_supervisor() -> dict[str, object]:
     task_name = r"\Automation\DesktopPc24x7RuntimeHealthSupervisor"
     report: dict[str, object] = {
         "task_kind": "runtime_health_supervisor", "task_query_status": "unavailable",
+        "task_query_exit_code": None, "task_discovery_matches": None,
         "process_sid_matches_task_principal": None, "task_s4u": None,
         "task_boot_trigger": None, "task_action_matches_installed_launcher": None,
         "installed_source_sha": None, "evidence_status": None, "fresh_300s": None,
@@ -312,9 +313,33 @@ def probe_health_supervisor() -> dict[str, object]:
             ["schtasks.exe", "/Query", "/TN", task_name, "/XML"],
             capture_output=True, timeout=15, check=False,
         )
+        report["task_query_exit_code"] = task.returncode
         if task.returncode != 0:
-            report["task_query_status"] = "query_failed"
-            return report
+            listing = subprocess.run(
+                ["schtasks.exe", "/Query", "/FO", "CSV", "/NH"],
+                capture_output=True, timeout=15, check=False,
+            )
+            if listing.returncode != 0:
+                report["task_query_status"] = "enumeration_unavailable"
+                return report
+            import csv
+            rows = csv.reader(listing.stdout.decode("utf-8-sig", errors="replace").splitlines())
+            matches = [row[0] for row in rows if row
+                       and row[0].rsplit("\\", 1)[-1].casefold()
+                       == "desktoppc24x7runtimehealthsupervisor"]
+            report["task_discovery_matches"] = len(matches)
+            if len(matches) != 1:
+                report["task_query_status"] = "not_observed" if not matches else "ambiguous"
+                return report
+            task_name = matches[0]
+            task = subprocess.run(
+                ["schtasks.exe", "/Query", "/TN", task_name, "/XML"],
+                capture_output=True, timeout=15, check=False,
+            )
+            report["task_query_exit_code"] = task.returncode
+            if task.returncode != 0:
+                report["task_query_status"] = "query_failed"
+                return report
         raw = task.stdout
         if len(raw) > 262144:
             return report

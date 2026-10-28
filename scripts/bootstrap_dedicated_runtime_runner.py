@@ -87,10 +87,60 @@ def gh_env() -> dict[str, str]:
     return env
 
 
+
+def local_git_owner_token() -> str:
+    """Resolve existing fixed-repository Git credentials without login or export."""
+    env = gh_env()
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"})
+    try:
+        completed = subprocess.run(
+            ["git", "-c", "credential.interactive=false", "credential", "fill"],
+            input="protocol=https\nhost=github.com\npath=ericson-j-santos/reqsys-engineering-orchestrator.git\nusername=ericson-j-santos\n\n",
+            cwd=Path(__file__).resolve().parents[1], env=env,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        raise BootstrapError("github_local_auth_required", "credencial Git local indisponível") from None
+    if completed.returncode != 0 or len(completed.stdout) > 65536:
+        raise BootstrapError("github_local_auth_required", "credencial Git local indisponível")
+    fields = dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
+    token = fields.get("password", "")
+    if fields.get("host") != "github.com" or not 8 <= len(token) <= 8192:
+        raise BootstrapError("github_local_auth_required", "credencial Git local indisponível")
+    try:
+        owner = api_json("/user", token=token)
+    except BootstrapError:
+        raise BootstrapError("github_local_auth_required", "owner da credencial Git local não validado") from None
+    if str(owner.get("login") or "").casefold() != EXPECTED_GITHUB_LOGIN.casefold():
+        raise BootstrapError("github_local_auth_required", "owner da credencial Git local não validado")
+    return token
+
+
+def local_git_api_json(path: str, *, method: str = "GET") -> dict[str, Any]:
+    """Fallback limited to the reviewed Orchestrator DEV runner contract."""
+    from pc24x7_host_policy import (
+        ORCHESTRATOR_DEV_RUNNER_PACKAGE as package,
+        ORCHESTRATOR_DEV_RUNNER_PROFILE as profile,
+    )
+    allowed = {
+        ("GET", f"/repos/{profile['repository']}/actions/runners?per_page=100"),
+        ("GET", f"/repos/{profile['repository']}/actions/runners/deprecations/{package['version']}"),
+        ("GET", f"/repos/actions/runner/releases/tags/v{package['version']}"),
+        ("POST", f"/repos/{profile['repository']}/actions/runners/registration-token"),
+    }
+    if (method, path) not in allowed:
+        raise BootstrapError("github_local_auth_required", "fallback Git fora do contrato DEV")
+    token = local_git_owner_token()
+    try:
+        return api_json(path, method=method, token=token)
+    except BootstrapError:
+        raise BootstrapError("github_local_api_failed", "credencial Git local não autorizou o endpoint fixo") from None
+
 def local_gh_api_json(path: str, *, method: str = "GET") -> dict[str, Any]:
     gh = find_gh()
     if gh is None:
-        raise BootstrapError("github_local_auth_required", "GitHub CLI autenticado indisponível")
+        return local_git_api_json(path, method=method)
     env = gh_env()
     who = subprocess.run(
         [str(gh), "api", "user", "--jq", ".login"],
@@ -103,7 +153,7 @@ def local_gh_api_json(path: str, *, method: str = "GET") -> dict[str, Any]:
         env=env,
     )
     if who.returncode != 0 or who.stdout.strip().casefold() != EXPECTED_GITHUB_LOGIN.casefold():
-        raise BootstrapError("github_local_auth_required", "sessão GitHub local do owner não validada")
+        return local_git_api_json(path, method=method)
     completed = subprocess.run(
         [str(gh), "api", "--method", method, path.lstrip("/")],
         capture_output=True,

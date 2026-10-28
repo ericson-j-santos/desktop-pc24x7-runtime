@@ -125,6 +125,21 @@ jobs:
           $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_local_gh_auth_diagnostic.py"
           & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 180 --expected-head "${{ github.sha }}" -- python -B $script --expected-sha "${{ github.sha }}" --correlation-id $env:CORRELATION_ID
           exit $LASTEXITCODE
+      - name: Dispatch fixed preflight once after repaired auth and CI
+        if: github.event.before == '7e51a578a59afa7ee955139c2f6bc3df72509ef6'
+        shell: powershell
+        env:
+          GH_TOKEN: ''
+          GITHUB_TOKEN: ''
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_preflight_dispatch_once.py"
+          & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 600 --expected-head "${{ github.sha }}" -- python -B $script --expected-sha "${{ github.sha }}" --correlation-id $env:CORRELATION_ID
+          exit $LASTEXITCODE
   queue_watchdog:
     name: Diagnostic pickup watchdog
     needs: admit
@@ -175,7 +190,9 @@ jobs:
                 matches[0].status !== 'completed' ||
                 matches[0].conclusion !== 'success' ||
                 !['Verify pickup identity and freshness','Require governed session',
-                  'Diagnose through Command Gateway'].every(name =>
+                  'Diagnose through Command Gateway',
+                  ...(context.payload.before === '7e51a578a59afa7ee955139c2f6bc3df72509ef6'
+                    ? ['Dispatch fixed preflight once after repaired auth and CI'] : [])].every(name =>
                     matches[0].steps?.some(s => s.name === name &&
                       s.status === 'completed' && s.conclusion === 'success'))) {
               throw new Error('DIAGNOSTIC_INDEPENDENT_READBACK_BLOCKED');
