@@ -73,6 +73,22 @@ class AuthClassificationTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[1].kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(run.call_args_list[1].kwargs["stderr"], subprocess.DEVNULL)
 
+    def test_owner_token_can_be_present_but_inactive(self):
+        version = subprocess.CompletedProcess([], 0, "gh version 2.100.0\n", "")
+        inactive = subprocess.CompletedProcess([], 1, None, None)
+        owner = subprocess.CompletedProcess([], 0, None, None)
+        with tempfile.TemporaryDirectory() as root:
+            appdata = pathlib.Path(root) / "AppData" / "Roaming"
+            appdata.mkdir(parents=True)
+            with patch.dict(os.environ, {"USERPROFILE": root, "APPDATA": str(appdata)}), \
+                 patch.object(diagnostic.bootstrap, "find_gh", return_value="gh"), \
+                 patch.object(diagnostic.bootstrap, "gh_env", return_value={}), \
+                 patch.object(diagnostic.subprocess, "run", side_effect=[version, inactive, owner]) as run:
+                observed = diagnostic.probe_same_profile_config()
+        self.assertEqual(observed["same_profile_auth"], "owner_credential_inactive")
+        self.assertTrue(observed["owner_token_present_but_inactive"])
+        self.assertEqual(run.call_args_list[2].kwargs["stdout"], subprocess.DEVNULL)
+
     def test_owner_candidate_requires_api_readback(self):
         self.assertEqual(diagnostic.classify_auth_status(self.payload(), 0), "owner_candidate")
         status = subprocess.CompletedProcess([], 0, json.dumps(self.payload()), "secret stderr")

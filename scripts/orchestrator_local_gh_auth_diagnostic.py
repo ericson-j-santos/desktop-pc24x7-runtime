@@ -120,6 +120,7 @@ def probe_same_profile_config() -> dict[str, object]:
         "appdata_set": bool(os.environ.get("APPDATA")),
         "appdata_hosts_file_present": None,
         "same_profile_auth": "not_checked",
+        "owner_token_present_but_inactive": None,
         "gh_version": None,
     }
     binary = bootstrap.find_gh()
@@ -163,7 +164,21 @@ def probe_same_profile_config() -> dict[str, object]:
         context["same_profile_auth"] = "probe_unavailable"
         return context
     if token.returncode != 0:
-        context["same_profile_auth"] = "credential_unavailable"
+        try:
+            owner_token = subprocess.run(
+                [str(binary), "auth", "token", "--hostname", "github.com",
+                 "--user", OWNER, "--no-refresh"],
+                env=candidate_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=20, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            context["same_profile_auth"] = "owner_probe_unavailable"
+            return context
+        context["owner_token_present_but_inactive"] = owner_token.returncode == 0
+        context["same_profile_auth"] = (
+            "owner_credential_inactive" if owner_token.returncode == 0
+            else "credential_unavailable"
+        )
         return context
     try:
         api = subprocess.run(
@@ -223,6 +238,8 @@ def main(argv: list[str] | None = None) -> int:
             alternate = receipt["gh_config_context"]["same_profile_auth"]
             if alternate == "owner_validated":
                 receipt["auth_classification"] = "config_directory_mismatch"
+            elif alternate == "owner_credential_inactive":
+                receipt["auth_classification"] = "owner_credential_inactive"
             elif alternate in ("account_mismatch", "authentication_invalid"):
                 receipt["auth_classification"] = alternate
         try:

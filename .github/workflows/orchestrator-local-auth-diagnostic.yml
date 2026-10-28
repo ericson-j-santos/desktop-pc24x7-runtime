@@ -36,7 +36,7 @@ jobs:
               ...context.repo,state:'open',base:'main',
               head:context.repo.owner + ':' + branch,per_page:100});
             if (current.commit.sha !== context.sha ||
-                main.commit.sha !== 'bfdef6008faeab3e2e6634bec079c00e45eebf6a' ||
+                main.commit.sha !== '18fb89dc2c788d0c0e268908971c24215c4872f3' ||
                 rules.commit.sha !== 'd6af41001bf641727a35a990e7c93b4c757538cb' ||
                 pulls.length !== 1 || pulls[0].number !== 113 ||
                 pulls[0].head.sha !== context.sha ||
