@@ -571,7 +571,11 @@ def test_source_contract_is_independent_of_rdc_and_github_runner(tmp_path: Path)
     assert "pc24x7_rdc_recovery.py" in text
     assert "Runner.Listener.exe" in text
     assert "run.cmd" in text
-    assert "github.com" not in text.casefold()
+    # Local .runner URL binding is allowed; the watchdog must not gain an HTTP client.
+    assert "urllib.request" not in text
+    assert "http.client" not in text
+    assert "requests." not in text
+    assert "urlopen(" not in text
     assert "api.github" not in text.casefold()
     assert "workflow_dispatch" not in text
     assert "except OSError:\n            pass" not in text

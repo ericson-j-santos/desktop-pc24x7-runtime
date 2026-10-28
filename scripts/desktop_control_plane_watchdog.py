@@ -332,6 +332,56 @@ def _creationflags() -> int:
     )
 
 
+
+ORCHESTRATOR_RUNNER_ID = 21
+ORCHESTRATOR_ENV_KEYS = {
+    "systemroot", "windir", "comspec", "path", "pathext", "os",
+    "username", "userdomain", "computername", "userprofile", "appdata", "localappdata",
+    "homedrive", "homepath", "temp", "tmp", "processor_architecture",
+    "processor_identifier", "number_of_processors", "programfiles", "programfiles(x86)",
+    "programw6432", "programdata", "allusersprofile", "public",
+}
+
+
+def orchestrator_runner_environment(environment: dict[str, str]) -> dict[str, str]:
+    """Give the new listener only fixed Windows runtime variables."""
+    return {key: value for key, value in environment.items()
+            if key.casefold() in ORCHESTRATOR_ENV_KEYS}
+
+
+def _is_orchestrator_runner_home(home: Path) -> bool:
+    local = os.environ.get("LOCALAPPDATA")
+    if not local:
+        return False
+    expected = Path(local) / "EngineeringOrchestratorDEV" / "GitHubRunner"
+    return os.path.normcase(str(home.resolve())) == os.path.normcase(str(expected.resolve()))
+
+
+def additional_orchestrator_runner_home(metadata: dict[str, Any]) -> Path | None:
+    """Admit only the already registered fixed DEV profile, never arbitrary homes."""
+    profiles = metadata.get("additional_runner_profiles", [])
+    if profiles == []:
+        return None
+    if profiles != ["orchestrator-dev"]:
+        raise WatchdogError("additional_runner_profile_rejected")
+    from pc24x7_host_policy import ORCHESTRATOR_DEV_RUNNER_PROFILE as profile
+    if socket.gethostname().casefold() != profile["host"].casefold():
+        raise WatchdogError("additional_runner_host_rejected")
+    local = Path(os.environ.get("LOCALAPPDATA") or "")
+    if not local.is_absolute():
+        raise WatchdogError("additional_runner_path_rejected")
+    home = local / profile["directory"] / "GitHubRunner"
+    _inventory_path(home, directory=True)
+    data, _ = _inventory_json(home / ".runner")
+    urls = [data[key] for key in ("repoUrl", "gitHubUrl") if key in data]
+    names = [data[key] for key in ("agentName", "runnerName") if key in data]
+    if (type(data.get("agentId")) is not int or data["agentId"] != ORCHESTRATOR_RUNNER_ID
+        or not urls or any(not isinstance(url, str) or url.rstrip("/") !=
+                             "https://github.com/" + profile["repository"] for url in urls)
+        or not names or any(name != profile["runner_name"] for name in names)):
+        raise WatchdogError("additional_runner_binding_rejected")
+    return validate_runner_home(home)
+
 def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
     runner_home = validate_runner_home(runner_home)
     version_info = inspect_runner_version(runner_home)
@@ -359,7 +409,8 @@ def start_runner(runner_home: Path, log_path: Path) -> dict[str, Any]:
     run_cmd = runner_home / "run.cmd"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_handle = log_path.open("a", encoding="utf-8", buffering=1)
-    child_env = os.environ.copy()
+    child_env = (orchestrator_runner_environment(dict(os.environ))
+                 if _is_orchestrator_runner_home(runner_home) else os.environ.copy())
     # GitHub Actions mata no cleanup processos que herdaram RUNNER_TRACKING_ID.
     # O listener é um serviço persistente do host, não um processo do job.
     child_env.pop("RUNNER_TRACKING_ID", None)
@@ -540,6 +591,10 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
     runner_home = validate_runner_home(Path(metadata["runner_home"]))
     python_executable = Path(metadata["python_executable"])
     recovery_script = release_root / "scripts" / RDC_RECOVERY_SCRIPT
+    additional_home = additional_orchestrator_runner_home(metadata)
+    rdc_enabled = metadata.get("rdc_recovery_enabled", True)
+    if type(rdc_enabled) is not bool:
+        raise WatchdogError("rdc_recovery_policy_invalid")
 
     # Runner recovery is the primary control-plane dependency and must not be
     # blocked by an unrelated RDC failure. Each component is recovered and
@@ -552,9 +607,16 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:
         runner = _component_failure("github_runner", exc)
 
-    rdc_required = authorized_desktop_profile(host).role == "desktop-primary"
+    additional = {}
+    if additional_home is not None:
+        try:
+            observed = start_runner(additional_home, runtime_root / "logs" / "orchestrator-dev-runner.log")
+        except Exception as exc:
+            observed = _component_failure("orchestrator_dev_runner", exc)
+        additional["orchestrator-dev"] = {"runner_id": ORCHESTRATOR_RUNNER_ID, **observed}
+    rdc_required = rdc_enabled and authorized_desktop_profile(host).role == "desktop-primary"
     if not rdc_required:
-        rdc = {"status": "not_applicable", "reason": "legacy_rdc_primary_only"}
+        rdc = {"status": "not_applicable", "reason": "disabled_by_owner" if not rdc_enabled else "legacy_rdc_primary_only"}
     elif recovery_script.is_file():
         try:
             rdc = recover_rdc(
@@ -572,7 +634,9 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
             "recovered": False,
         }
 
-    runner_ok = runner.get("status") in {"recovered", "process_running"}
+    primary_runner_ok = runner.get("status") in {"recovered", "process_running"}
+    additional_ok = all(item.get("status") in {"recovered", "process_running"} for item in additional.values())
+    runner_ok = primary_runner_ok and additional_ok
     rdc_ok = not rdc_required or rdc.get("status") in {"healthy", "recovered"}
     payload = {
         "schema_version": "2",
@@ -583,6 +647,10 @@ def cycle(metadata: dict[str, Any]) -> dict[str, Any]:
         "rdc": rdc,
         "github_runner": runner,
         "runner_recovery_ok": runner_ok,
+        "primary_runner_recovery_ok": primary_runner_ok,
+        "additional_runners": additional,
+        "additional_runner_recovery_ok": additional_ok,
+        "rdc_recovery_enabled": rdc_enabled,
         "rdc_recovery_ok": rdc_ok,
         "rdc_required": rdc_required,
         "ok": runner_ok and rdc_ok,
