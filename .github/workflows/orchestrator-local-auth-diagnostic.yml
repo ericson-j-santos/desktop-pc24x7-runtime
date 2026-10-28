@@ -2,7 +2,9 @@ name: Orchestrator local auth diagnostic
 on:
   push:
     branches: [feat/orchestrator-dev-runner-preflight-20261027]
-    paths: [.github/workflows/orchestrator-local-auth-diagnostic.yml]
+    paths:
+      - .github/workflows/orchestrator-local-auth-diagnostic.yml
+      - scripts/orchestrator_local_gh_auth_diagnostic.py
 permissions:
   contents: read
 concurrency:

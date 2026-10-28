@@ -41,6 +41,17 @@ class AuthClassificationTests(unittest.TestCase):
     def test_account_mismatch(self):
         self.assertEqual(diagnostic.classify_auth_status(self.payload(login="different-user"), 0), "account_mismatch")
 
+    def test_unavailable_status_uses_token_probe_without_capturing_token(self):
+        status = subprocess.CompletedProcess([], 1, "", "untrusted stderr")
+        token = subprocess.CompletedProcess([], 1, None, None)
+        with patch.object(diagnostic.bootstrap, "find_gh", return_value="gh"), \
+             patch.object(diagnostic.bootstrap, "gh_env", return_value={}), \
+             patch.object(diagnostic.subprocess, "run", side_effect=[status, token]) as run:
+            observed = diagnostic.diagnose_auth()
+        self.assertEqual(observed, ("credential_unavailable", True, False))
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+
     def test_owner_candidate_requires_api_readback(self):
         self.assertEqual(diagnostic.classify_auth_status(self.payload(), 0), "owner_candidate")
         status = subprocess.CompletedProcess([], 0, json.dumps(self.payload()), "secret stderr")

@@ -77,7 +77,19 @@ def diagnose_auth() -> tuple[str, bool, bool]:
     except (ValueError, TypeError):
         payload = None
     state = classify_auth_status(payload, result.returncode)
-    if state != "owner_candidate":
+    if state in ("auth_status_unavailable", "auth_state_ambiguous"):
+        try:
+            token_probe = subprocess.run(
+                [str(binary), "auth", "token", "--hostname", "github.com"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=20, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return "credential_probe_unavailable", True, False
+        if token_probe.returncode != 0:
+            return "credential_unavailable", True, False
+        state = "owner_candidate"
+    if state not in ("owner_candidate", "account_mismatch"):
         return state, True, False
     try:
         api = subprocess.run(
@@ -88,7 +100,10 @@ def diagnose_auth() -> tuple[str, bool, bool]:
     except (OSError, subprocess.TimeoutExpired):
         return "github_endpoint_unavailable", True, False
     if api.returncode != 0:
-        return "authentication_invalid", True, False
+        detail = (api.stderr or "").casefold()
+        if "http 401" in detail or "bad credentials" in detail or "401 unauthorized" in detail:
+            return "authentication_invalid", True, False
+        return "api_failure_unclassified", True, False
     if api.stdout.strip().casefold() != OWNER.casefold():
         return "account_mismatch", True, False
     return "owner_validated", True, True
