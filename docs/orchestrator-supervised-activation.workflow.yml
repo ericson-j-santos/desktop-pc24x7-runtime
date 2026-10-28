@@ -1,0 +1,219 @@
+name: Orchestrator exact approved supervised activation
+on:
+  push:
+    branches: [ops/orchestrator-dev-plan-2232022f-20261028]
+    paths: [.github/workflows/orchestrator-registration-plan-review.yml]
+permissions:
+  contents: read
+concurrency:
+  group: orchestrator-registration-plan-review-desktop
+  cancel-in-progress: false
+jobs:
+  admit:
+    name: Admit approved source and positive physical preflight
+    runs-on: windows-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Verify current approved source and terminal independent readback
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            if (context.repo.owner !== 'ericson-j-santos' || context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                context.ref !== 'refs/heads/ops/orchestrator-dev-plan-2232022f-20261028' ||
+                context.eventName !== 'push' || context.actor !== 'ericson-j-santos' || process.env.GITHUB_RUN_ATTEMPT !== '1') throw new Error('PLAN_SCOPE_REJECTED');
+            const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:115});
+            const {data: main} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
+            const {data: rules} = await github.rest.repos.getBranch({owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'});
+            if (!pr.merged || pr.head.sha !== '674c0d9e89b7b64de643ae1ea1e9761aa482df40' || pr.merge_commit_sha !== 'e0c40bccf0d99858a21beab0d62d0f143e969608' || main.commit.sha !== 'e0c40bccf0d99858a21beab0d62d0f143e969608' ||
+                rules.commit.sha !== '682bba2858e09c161e7d3a477896ba7e326e83bd') throw new Error('PLAN_SOURCE_OR_RULES_CHANGED');
+            const deadline = Date.now()+180000;
+            while (true) {
+              const {data} = await github.rest.actions.listWorkflowRunsForRepo({...context.repo,head_sha:main.commit.sha,event:'push',per_page:30});
+              const runs = data.workflow_runs.filter(r => r.path === '.github/workflows/ci.yml' && r.head_sha === main.commit.sha);
+              if (runs.some(r => r.status === 'completed' && r.conclusion === 'success' && r.run_attempt === 1)) break;
+              if (runs.some(r => r.status === 'completed' && r.conclusion !== 'success') || Date.now()>=deadline) throw new Error('SOURCE_CI_NOT_POSITIVE');
+              await new Promise(resolve => setTimeout(resolve,15000));
+            }
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: e0c40bccf0d99858a21beab0d62d0f143e969608
+          persist-credentials: false
+      - name: Test closed supervision deployment contracts
+        shell: pwsh
+        run: python -B -m unittest discover -s tests -p test_orchestrator_dev_supervision_deploy.py -v
+  plan:
+    name: Apply exact approved supervision on Desktop
+    needs: admit
+    runs-on: ${{ fromJSON('["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt: ${{ steps.plan.outputs.receipt }}
+    env:
+      CORRELATION_ID: orchestrator-plan-review-${{ github.run_id }}-1
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+    steps:
+      - name: Require exact Desktop runner
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
+            const job = data.jobs.find(j => j.name === 'Apply exact approved supervision on Desktop');
+            if (data.total_count !== data.jobs.length || job?.runner_id !== 2 ||
+                process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
+                require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1') throw new Error('PLAN_RUNNER_REJECTED');
+      - name: Checkout exact supervised activation source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: e0c40bccf0d99858a21beab0d62d0f143e969608
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout exact canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 682bba2858e09c161e7d3a477896ba7e326e83bd
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Materialize governed harness and exact approved source sessions
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $raw = & python -B $launcher --policy $policy --repo $env:GITHUB_WORKSPACE --session-prefix supervision-source --correlation-id $env:CORRELATION_ID --expected-head e0c40bccf0d99858a21beab0d62d0f143e969608 --sync-ref origin/main --require-runner-version-preflight
+          $exitCode = $LASTEXITCODE
+          $raw | Write-Output
+          if ($exitCode -ne 0) { exit $exitCode }
+          $s = @($raw)[-1] | ConvertFrom-Json
+          if ($s.result -ne "SESSION_LAUNCH_OK" -or $s.state_validated -ne $true -or $s.head -ne "e0c40bccf0d99858a21beab0d62d0f143e969608" -or $s.runner_version_preflight.ok -ne $true) { throw "SOURCE_SESSION_BLOCKED" }
+          "source_path=$($s.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "source_session_id=$($s.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Checkout exact approval harness
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reopen exact canonical rules for approval harness
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 682bba2858e09c161e7d3a477896ba7e326e83bd
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Materialize separate approval harness session
+        id: harness
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $raw = & python -B $launcher --policy $policy --repo $env:GITHUB_WORKSPACE --session-prefix supervision-apply --correlation-id $env:CORRELATION_ID --expected-head "${{ github.sha }}" --sync-ref "origin/$env:GITHUB_REF_NAME" --require-runner-version-preflight
+          $exitCode = $LASTEXITCODE
+          $raw | Write-Output
+          if ($exitCode -ne 0) { exit $exitCode }
+          $s = @($raw)[-1] | ConvertFrom-Json
+          if ($s.result -ne "SESSION_LAUNCH_OK" -or $s.state_validated -ne $true -or $s.head -ne "${{ github.sha }}" -or $s.runner_version_preflight.ok -ne $true) { throw "APPROVAL_HARNESS_SESSION_BLOCKED" }
+          "target_path=$($s.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($s.session_id)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Apply only exact approved digest through specific Risk3
+        id: plan
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.harness.outputs.target_path }}
+          SESSION_ID: ${{ steps.harness.outputs.session_id }}
+          APPROVED_SOURCE_ROOT: ${{ steps.session.outputs.source_path }}
+          CANONICAL_RULES_ROOT: ${{ github.workspace }}\_rules
+          EXACT_PLAN_APPROVAL: e74b89a5c9ca49ca2b6695d13332e81873dd363e770a9a65894e7a76e5e63396
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\apply_authorized_orchestrator_supervision.py"
+          $raw = & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 900 --expected-head "${{ github.sha }}" -- python -B $script
+          $exitCode = $LASTEXITCODE
+          $raw | Write-Output
+          if ($exitCode -ne 0) { exit $exitCode }
+          $event = @($raw)[-1] | ConvertFrom-Json
+          if ($event.result -ne "ok" -or $event.state_changed -ne $false -or $event.command_exit_code -ne 0) { throw "PLAN_GATEWAY_READBACK_REJECTED" }
+          $receipt = $event.stdout | ConvertFrom-Json
+          if ($receipt.ok -ne $true -or $receipt.authorization_entry_removed -ne $true -or $receipt.independent_local_readback.live_runner_online -ne $true) { throw "ACTIVATION_READBACK_BLOCKED" }
+          "receipt=$($event.stdout.Trim())" | Add-Content $env:GITHUB_OUTPUT
+  readback:
+    name: Independent approved activation readback
+    needs: [admit, plan]
+    if: ${{ always() && needs.admit.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    env:
+      RECEIPT: ${{ needs.plan.outputs.receipt }}
+    steps:
+      - name: Verify actual physical job and source remain current
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
+            const job = data.jobs.find(j => j.name === 'Apply exact approved supervision on Desktop');
+            const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:115});
+            if (data.total_count !== data.jobs.length || job?.runner_id !== 2 ||
+                job.status !== 'completed' || job.conclusion !== 'success' ||
+                (!pr.merged || pr.head.sha !== '674c0d9e89b7b64de643ae1ea1e9761aa482df40' || pr.merge_commit_sha !== 'e0c40bccf0d99858a21beab0d62d0f143e969608') ||
+                !job.steps.some(s => s.name === 'Apply only exact approved digest through specific Risk3' && s.conclusion === 'success')) throw new Error('PLAN_PHYSICAL_READBACK_BLOCKED');
+      - name: Validate read-only qualification receipt
+        shell: python
+        run: |
+          import json, os
+          receipt = json.loads(os.environ["RECEIPT"])
+          assert receipt["kind"] == "authorized-orchestrator-dev-supervision"
+          assert receipt["source_sha"] == "e0c40bccf0d99858a21beab0d62d0f143e969608"
+          assert receipt["plan_sha256"] == "e74b89a5c9ca49ca2b6695d13332e81873dd363e770a9a65894e7a76e5e63396"
+          assert receipt["registered_runner_id"] == 21 and receipt["ok"] is True
+          assert receipt["registration_performed"] is False and receipt["authorization_entry_removed"] is True
+          assert receipt["risk3_execution_success"] is True
+          assert receipt["risk3_authorization"]["broad_development_mode_changed"] is False
+          actual = receipt["independent_local_readback"]
+          assert actual["live_runner_online"] is True and actual["primary_runner_metadata_unchanged"] is True
+          assert actual["scanner_workflow_restored"] is True
+          assert actual["controlled_idle_listener_recovery_proven"] is True
+          assert actual["live_task_identity"]["principal_sid_matches_process"] is True
+          assert actual["live_supervisor"]["fresh_90s"] is True
+          print("SUPERVISION_ACTIVATION_INDEPENDENT_READBACK_OK:" + json.dumps(receipt,sort_keys=True))
+  queue_watchdog:
+    name: Registration plan pickup watchdog
+    needs: admit
+    runs-on: windows-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const deadline = Date.now() + 300000;
+            while (true) {
+              const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
+              const job = data.jobs.find(j => j.name === 'Apply exact approved supervision on Desktop');
+              if (data.total_count !== data.jobs.length) throw new Error('PLAN_JOB_LIST_INCOMPLETE');
+              if (job?.runner_id === 2 && ['in_progress','completed'].includes(job.status)) return;
+              if (Date.now() >= deadline) {
+                await github.rest.actions.cancelWorkflowRun({...context.repo,run_id:context.runId});
+                throw new Error('PLAN_PICKUP_EXPIRED');
+              }
+              await new Promise(resolve => setTimeout(resolve,15000));
+            }

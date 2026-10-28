@@ -7,6 +7,9 @@ on:
       - scripts/apply_authorized_orchestrator_supervision.py
       - tests/test_apply_authorized_orchestrator_supervision.py
       - docs/orchestrator-dev-supervision-activation-e74b89a5.json
+      - docs/orchestrator-supervised-activation.workflow.yml
+      - tests/test_orchestrator_supervision_workflow_template.py
+      - tests/parse_supervision_workflow_powershell.ps1
 permissions:
   contents: read
 jobs:
@@ -45,3 +48,10 @@ jobs:
           assert plan["runner_id"] == 21 and plan["additional_cost_authorized_brl"] == 0
           assert plan["rdc_recovery_enabled"] is False
           print("APPROVAL_ACTUATOR_CONTRACT_AND_PERSISTED_PLAN_VALIDATED")
+      - name: Parse disarmed application workflow and negative controls
+        shell: pwsh
+        run: |
+          python -m pip install --disable-pip-version-check PyYAML==6.0.3
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s tests -p test_orchestrator_supervision_workflow_template.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
