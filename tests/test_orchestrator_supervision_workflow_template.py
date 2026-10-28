@@ -16,7 +16,7 @@ class WorkflowTemplateTests(unittest.TestCase):
     def check_js(self, value):
         with tempfile.TemporaryDirectory() as temp:
             path = Path(temp) / "contract.mjs"
-            path.write_text(value, encoding="utf-8")
+            path.write_text("async function reviewedWorkflow(github, context, core, require) {\n" + value + "\n}\n", encoding="utf-8")
             return subprocess.run(["node", "--check", str(path)], capture_output=True, timeout=30).returncode
 
     def check_ps(self, value):
@@ -40,6 +40,9 @@ class WorkflowTemplateTests(unittest.TestCase):
                     ps_count += 1
         self.assertGreaterEqual(js_count, 3)
         self.assertGreaterEqual(ps_count, 3)
+
+    def test_github_script_function_body_accepts_await_and_return(self):
+        self.assertEqual(self.check_js("await Promise.resolve(); return;"), 0)
 
     def test_parsers_reject_broken_syntax(self):
         self.assertNotEqual(self.check_js("const = ;"), 0)
