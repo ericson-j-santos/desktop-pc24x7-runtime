@@ -89,6 +89,60 @@ class AuthClassificationTests(unittest.TestCase):
         self.assertTrue(observed["owner_token_present_but_inactive"])
         self.assertEqual(run.call_args_list[2].kwargs["stdout"], subprocess.DEVNULL)
 
+    def test_git_helper_owner_and_registry_without_exporting_secret(self):
+        secret = "dummy-test-token-never-export"
+        helper = subprocess.CompletedProcess([], 0,
+            "protocol=https\nhost=github.com\nusername=ericson-j-santos\npassword=" + secret + "\n", "")
+        responses = [
+            io.BytesIO(json.dumps({"login": "ericson-j-santos"}).encode()),
+            io.BytesIO(json.dumps({"total_count": 0, "runners": []}).encode()),
+        ]
+        with patch.object(diagnostic.subprocess, "run", return_value=helper) as run, \
+             patch.object(diagnostic.urllib.request, "urlopen", side_effect=responses):
+            report = diagnostic.probe_git_credential()
+        self.assertTrue(report["owner_validated"])
+        self.assertEqual(report["registry_status"], "observed")
+        self.assertEqual(report["runner_count"], 0)
+        self.assertNotIn(secret, json.dumps(report))
+        self.assertEqual(run.call_args.kwargs["env"]["GIT_TERMINAL_PROMPT"], "0")
+        self.assertEqual(run.call_args.kwargs["env"]["GCM_INTERACTIVE"], "Never")
+
+    def test_git_helper_rejects_other_owner_before_registry(self):
+        helper = subprocess.CompletedProcess([], 0,
+            "protocol=https\nhost=github.com\npassword=dummy-test-token\n", "")
+        with patch.object(diagnostic.subprocess, "run", return_value=helper), \
+             patch.object(diagnostic.urllib.request, "urlopen",
+                          return_value=io.BytesIO(b'{"login":"different-account"}')) as api:
+            report = diagnostic.probe_git_credential()
+        self.assertEqual(report["credential_status"], "account_mismatch")
+        self.assertFalse(report["owner_validated"])
+        self.assertEqual(api.call_count, 1)
+
+    def test_health_supervisor_queries_correct_task_and_compares_sid_privately(self):
+        sid = "S-1-5-21-111-222-333-1001"
+        with tempfile.TemporaryDirectory() as local:
+            root = pathlib.Path(local) / "DesktopPC24x7" / "RuntimeSupervisor"
+            root.mkdir(parents=True)
+            (root / "install-evidence.json").write_text(json.dumps({"source_sha": "a" * 40}))
+            (root / "evidence.json").write_text(json.dumps({
+                "timestamp": diagnostic.datetime.now().astimezone().isoformat(), "status": "ok"}))
+            xml = ('<Task xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">'
+                   '<RegistrationInfo><URI>\\Automation\\DesktopPc24x7RuntimeHealthSupervisor</URI></RegistrationInfo>'
+                   '<Principals><Principal><UserId>' + sid + '</UserId><LogonType>S4U</LogonType></Principal></Principals>'
+                   '<Triggers><BootTrigger/></Triggers><Actions><Exec><Arguments>"' +
+                   str(root / "run-supervisor.py") + '"</Arguments></Exec></Actions></Task>').encode()
+            query = subprocess.CompletedProcess([], 0, xml, b"")
+            who = subprocess.CompletedProcess([], 0, ('"private-user","' + sid + '"').encode(), b"")
+            with patch.dict(os.environ, {"LOCALAPPDATA": local}), \
+                 patch.object(diagnostic.subprocess, "run", side_effect=[query, who]) as run:
+                report = diagnostic.probe_health_supervisor()
+        self.assertEqual(report["task_query_status"], "observed")
+        self.assertTrue(report["process_sid_matches_task_principal"])
+        self.assertTrue(report["task_action_matches_installed_launcher"])
+        self.assertTrue(report["fresh_300s"])
+        self.assertNotIn(sid, json.dumps(report))
+        self.assertIn("DesktopPc24x7RuntimeHealthSupervisor", run.call_args_list[0].args[0][3])
+
     def test_owner_candidate_requires_api_readback(self):
         self.assertEqual(diagnostic.classify_auth_status(self.payload(), 0), "owner_candidate")
         status = subprocess.CompletedProcess([], 0, json.dumps(self.payload()), "secret stderr")

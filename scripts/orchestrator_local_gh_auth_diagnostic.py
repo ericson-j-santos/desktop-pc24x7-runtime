@@ -9,6 +9,11 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.request
+import xml.etree.ElementTree as ET
+from datetime import datetime
 
 sys.dont_write_bytecode = True
 
@@ -201,6 +206,141 @@ def probe_same_profile_config() -> dict[str, object]:
         context["same_profile_auth"] = "account_mismatch"
     return context
 
+
+def probe_git_credential() -> dict[str, object]:
+    """Use the configured Git helper for one fixed repo; keep secrets in memory."""
+    report: dict[str, object] = {
+        "credential_source": "git_configured_helper",
+        "credential_status": "unavailable", "owner_validated": False,
+        "registry_status": "not_checked", "runner_count": None,
+        "credential_logged": False, "credential_storage_write_requested": False,
+        "credential_helper_may_refresh": True,
+    }
+    env = bootstrap.gh_env()
+    env.update({"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "Never"})
+    try:
+        result = subprocess.run(
+            ["git", "-c", "credential.interactive=false", "credential", "fill"],
+            input="protocol=https\nhost=github.com\npath=ericson-j-santos/reqsys-engineering-orchestrator.git\nusername=ericson-j-santos\n\n",
+            cwd=Path(__file__).resolve().parents[1],
+            env=env, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return report
+    if result.returncode != 0 or len(result.stdout) > 65536:
+        return report
+    fields = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    token = fields.get("password", "")
+    if fields.get("host") != "github.com" or not 8 <= len(token) <= 8192:
+        return report
+    report["credential_status"] = "present"
+    def read(path: str) -> dict:
+        request = urllib.request.Request(
+            "https://api.github.com" + path,
+            headers={"Authorization": "Bearer " + token,
+                     "Accept": "application/vnd.github+json",
+                     "X-GitHub-Api-Version": "2022-11-28"},
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:
+            raw = response.read(262145)
+        if len(raw) > 262144:
+            raise ValueError("bounded_response")
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("invalid_response")
+        return value
+    try:
+        user = read("/user")
+    except urllib.error.HTTPError as error:
+        report["credential_status"] = "invalid" if error.code == 401 else "api_rejected"
+        return report
+    except Exception:
+        report["credential_status"] = "validation_unavailable"
+        return report
+    if str(user.get("login") or "").casefold() != OWNER.casefold():
+        report["credential_status"] = "account_mismatch"
+        return report
+    report["owner_validated"] = True
+    try:
+        registry = read("/repos/ericson-j-santos/reqsys-engineering-orchestrator/actions/runners?per_page=100")
+        runners = registry.get("runners")
+        total = registry.get("total_count")
+        if not isinstance(runners, list) or type(total) is not int or total != len(runners):
+            raise ValueError("registry_incomplete")
+        report["registry_status"] = "observed"
+        report["runner_count"] = total
+    except urllib.error.HTTPError as error:
+        report["registry_status"] = "permission_denied" if error.code == 403 else "api_rejected"
+    except Exception:
+        report["registry_status"] = "unavailable"
+    return report
+
+
+def probe_health_supervisor() -> dict[str, object]:
+    """Query the installed health supervisor, not the separate runtime watchdog."""
+    task_name = r"\Automation\DesktopPc24x7RuntimeHealthSupervisor"
+    report: dict[str, object] = {
+        "task_kind": "runtime_health_supervisor", "task_query_status": "unavailable",
+        "process_sid_matches_task_principal": None, "task_s4u": None,
+        "task_boot_trigger": None, "task_action_matches_installed_launcher": None,
+        "installed_source_sha": None, "evidence_status": None, "fresh_300s": None,
+    }
+    try:
+        root = Path(os.environ["LOCALAPPDATA"]) / "DesktopPC24x7" / "RuntimeSupervisor"
+        preflight.checked_path(root, directory=True)
+        for filename in ("install-evidence.json", "evidence.json"):
+            path = root / filename
+            preflight.checked_path(path, directory=False)
+            raw = path.read_bytes()
+            if len(raw) > 262144:
+                raise ValueError("bounded_file")
+            payload = json.loads(raw)
+            if filename == "install-evidence.json":
+                sha = payload.get("source_sha")
+                report["installed_source_sha"] = sha if isinstance(sha, str) and preflight.SHA_RE.fullmatch(sha) else None
+            else:
+                status = payload.get("status")
+                report["evidence_status"] = status if status in ("ok", "degraded", "blocked", "failed") else "other"
+                stamp = datetime.fromisoformat(str(payload["timestamp"]).replace("Z", "+00:00")).timestamp()
+                age = time.time() - stamp
+                report["fresh_300s"] = 0 <= age <= 300
+    except Exception:
+        pass
+    try:
+        task = subprocess.run(
+            ["schtasks.exe", "/Query", "/TN", task_name, "/XML"],
+            capture_output=True, timeout=15, check=False,
+        )
+        if task.returncode != 0:
+            report["task_query_status"] = "query_failed"
+            return report
+        raw = task.stdout
+        if len(raw) > 262144:
+            return report
+        xml = raw.decode("utf-16" if raw.startswith(b"\xff\xfe") or b"\x00" in raw[:80] else "utf-8-sig")
+        definition = ET.fromstring(xml)
+        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
+        if definition.findtext(".//t:URI", namespaces=ns) != task_name:
+            report["task_query_status"] = "identity_mismatch"
+            return report
+        principal = definition.findtext(".//t:Principal/t:UserId", default="", namespaces=ns)
+        report["task_query_status"] = "observed"
+        report["task_s4u"] = definition.findtext(".//t:Principal/t:LogonType", namespaces=ns) == "S4U"
+        report["task_boot_trigger"] = definition.find(".//t:BootTrigger", ns) is not None
+        args = definition.findtext(".//t:Actions/t:Exec/t:Arguments", default="", namespaces=ns)
+        report["task_action_matches_installed_launcher"] = (
+            args.strip().strip('"').casefold() == str(root / "run-supervisor.py").casefold()
+        )
+        who = subprocess.run(["whoami.exe", "/user", "/fo", "csv", "/nh"],
+                             capture_output=True, timeout=10, check=False)
+        current = re.search(rb"S-1-[0-9-]+", who.stdout)
+        if who.returncode == 0 and current and re.fullmatch(r"S-1-[0-9-]+", principal):
+            report["process_sid_matches_task_principal"] = current.group().decode("ascii") == principal
+    except Exception:
+        report["task_query_status"] = "unavailable"
+    return report
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-sha", required=True)
@@ -212,7 +352,7 @@ def main(argv: list[str] | None = None) -> int:
         "source_sha": args.expected_sha if preflight.SHA_RE.fullmatch(args.expected_sha) else None,
         "correlation_id": args.correlation_id if preflight.CORRELATION_RE.fullmatch(args.correlation_id) else None,
         "host": "DESKTOP-PDQK954",
-        "read_only": True,
+        "runtime_read_only": True,
         "registration_performed": False,
         "runner_started": False,
         "watchdog_changed": False,
@@ -220,6 +360,8 @@ def main(argv: list[str] | None = None) -> int:
         "gh_located": None,
         "owner_validated": False,
         "gh_config_context": None,
+        "git_credential_probe": None,
+        "health_supervisor": None,
         "supervision": {key: None for key in IDENTITY_FIELDS},
     }
     try:
@@ -229,6 +371,8 @@ def main(argv: list[str] | None = None) -> int:
         if bootstrap.validate_host().casefold() != receipt["host"].casefold():
             raise ValueError("host_mismatch")
         receipt["state_validated"] = True
+        receipt["git_credential_probe"] = probe_git_credential()
+        receipt["health_supervisor"] = probe_health_supervisor()
         state, located, owner_validated = diagnose_auth()
         receipt["auth_classification"] = state
         receipt["gh_located"] = located

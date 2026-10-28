@@ -123,7 +123,7 @@ jobs:
           $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
           $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
           $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_local_gh_auth_diagnostic.py"
-          & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 90 --expected-head "${{ github.sha }}" -- python -B $script --expected-sha "${{ github.sha }}" --correlation-id $env:CORRELATION_ID
+          & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 180 --expected-head "${{ github.sha }}" -- python -B $script --expected-sha "${{ github.sha }}" --correlation-id $env:CORRELATION_ID
           exit $LASTEXITCODE
   queue_watchdog:
     name: Diagnostic pickup watchdog
