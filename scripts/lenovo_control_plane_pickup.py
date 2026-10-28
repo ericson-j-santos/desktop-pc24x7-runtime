@@ -7,8 +7,8 @@ import json
 import os
 import re
 import socket
+import subprocess
 import sys
-import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -38,27 +38,55 @@ def require_sha(value: str, reason: str) -> str:
 
 
 def task_runtime_readback() -> dict[str, Any]:
+    # Use the inbox ScheduledTasks provider instead of a per-user PyWin32
+    # installation, whose availability differs in the Actions runner session.
+    script = (
+        "$ErrorActionPreference='Stop';"
+        "$task=Get-ScheduledTask -TaskName 'DesktopPc24x7RuntimeWatchdog' "
+        "-TaskPath '\\Automation\\';"
+        "if($task.Actions.Count -ne 1){throw 'task_action_count_mismatch'};"
+        "$info=Get-ScheduledTaskInfo -InputObject $task;"
+        "[pscustomobject]@{"
+        "state=[int]$task.State;last_task_result=[int]$info.LastTaskResult;"
+        "enabled=[bool]$task.Settings.Enabled;"
+        "command=[string]$task.Actions[0].Execute;"
+        "arguments=[string]$task.Actions[0].Arguments;"
+        "working_directory=[string]$task.Actions[0].WorkingDirectory"
+        "}|ConvertTo-Json -Compress"
+    )
     try:
-        import win32com.client  # type: ignore
-    except ImportError as exc:
-        raise PickupBlocked("pywin32_required") from exc
-    try:
-        service = win32com.client.Dispatch("Schedule.Service")
-        service.Connect()
-        task = service.GetFolder(watchdog.TASK_FOLDER).GetTask(watchdog.TASK_LEAF)
-    except Exception as exc:
+        completed = subprocess.run(
+            [
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                script,
+            ],
+            capture_output=True,
+            text=True,
+            encoding="utf-8-sig",
+            errors="replace",
+            timeout=20,
+            check=False,
+        )
+        if completed.returncode != 0 or completed.stderr.strip():
+            raise PickupBlocked("task_runtime_readback_failed")
+        observed = json.loads(completed.stdout.strip())
+        if not isinstance(observed, dict):
+            raise PickupBlocked("task_runtime_readback_failed")
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         raise PickupBlocked("task_runtime_readback_failed") from exc
     try:
-        root = ET.fromstring(str(task.Xml))
-        ns = {"t": "http://schemas.microsoft.com/windows/2004/02/mit/task"}
-        command = root.findtext(".//t:Actions/t:Exec/t:Command", default="", namespaces=ns)
-        arguments = root.findtext(".//t:Actions/t:Exec/t:Arguments", default="", namespaces=ns)
-        working = root.findtext(
-            ".//t:Actions/t:Exec/t:WorkingDirectory", default="", namespaces=ns
-        )
-        launcher = Path(arguments.strip().strip('"')).resolve()
-        working_directory = Path(working).resolve()
-    except (ET.ParseError, OSError, ValueError) as exc:
+        state = observed["state"]
+        last_result = observed["last_task_result"]
+        enabled = observed["enabled"]
+        if type(state) is not int or type(last_result) is not int or type(enabled) is not bool:
+            raise ValueError("task_runtime_types_invalid")
+        command = str(observed["command"])
+        launcher = Path(str(observed["arguments"]).strip().strip('"')).resolve()
+        working_directory = Path(str(observed["working_directory"])).resolve()
+    except (KeyError, OSError, ValueError, TypeError) as exc:
         raise PickupBlocked("task_action_readback_failed") from exc
     if (
         not Path(command).is_file()
@@ -68,9 +96,9 @@ def task_runtime_readback() -> dict[str, Any]:
     ):
         raise PickupBlocked("task_action_contract_mismatch")
     return {
-        "state": int(task.State),
-        "last_task_result": int(task.LastTaskResult),
-        "enabled": bool(task.Enabled),
+        "state": state,
+        "last_task_result": last_result,
+        "enabled": enabled,
         "launcher": str(launcher),
         "working_directory": str(working_directory),
     }

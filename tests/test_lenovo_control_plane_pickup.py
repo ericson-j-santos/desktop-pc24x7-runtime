@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -90,6 +91,64 @@ def test_positive_pickup_binds_host_runner_task_state_and_sha(
     assert result["rdc_required"] is False
 
 
+def test_task_runtime_uses_fixed_inbox_readback_without_pywin32(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    launcher = tmp_path / "run.py"
+    launcher.touch()
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append((command, kwargs))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            json.dumps({
+                "state": 4,
+                "last_task_result": 267009,
+                "enabled": True,
+                "command": sys.executable,
+                "arguments": f'"{launcher}"',
+                "working_directory": str(tmp_path),
+            }),
+            "",
+        )
+
+    monkeypatch.setattr(m.subprocess, "run", fake_run)
+    observed = m.task_runtime_readback()
+
+    assert observed == {
+        "state": 4,
+        "last_task_result": 267009,
+        "enabled": True,
+        "launcher": str(launcher),
+        "working_directory": str(tmp_path),
+    }
+    assert len(calls) == 1
+    assert calls[0][0][1:3] == ["-NoProfile", "-NonInteractive"]
+    assert "Get-ScheduledTaskInfo" in calls[0][0][4]
+    assert calls[0][1]["timeout"] == 20
+    assert calls[0][1]["check"] is False
+
+
+@pytest.mark.parametrize(
+    ("returncode", "stdout", "stderr"),
+    [(1, "", "denied"), (0, "not json", ""), (0, "{}", "warning")],
+)
+def test_task_runtime_readback_fails_closed_on_provider_error(
+    monkeypatch: pytest.MonkeyPatch, returncode: int, stdout: str, stderr: str
+) -> None:
+    monkeypatch.setattr(
+        m.subprocess,
+        "run",
+        lambda command, **kwargs: subprocess.CompletedProcess(
+            command, returncode, stdout, stderr
+        ),
+    )
+    with pytest.raises(m.PickupBlocked, match="task_runtime_readback_failed"):
+        m.task_runtime_readback()
+
+
 @pytest.mark.parametrize(
     ("key", "value", "reason"),
     [
@@ -160,7 +219,7 @@ def test_task_bound_metadata_rejects_runtime_split(tmp_path: Path) -> None:
         m.load_task_bound_installation(tmp_path.resolve(), sha)
 
 
-def test_missing_pywin32_writes_only_bounded_failure_evidence(
+def test_readback_dependency_failure_writes_only_bounded_failure_evidence(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     sha = "a" * 40
@@ -169,7 +228,9 @@ def test_missing_pywin32_writes_only_bounded_failure_evidence(
     monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "1")
     monkeypatch.setenv("GITHUB_TOKEN", "must-never-appear")
     monkeypatch.setattr(
-        m, "collect", lambda expected: (_ for _ in ()).throw(m.PickupBlocked("pywin32_required"))
+        m,
+        "collect",
+        lambda expected: (_ for _ in ()).throw(m.PickupBlocked("task_runtime_readback_failed")),
     )
     monkeypatch.setattr(
         sys, "argv", ["pickup.py", "--expected-source-sha", sha, "--evidence-file", m.EVIDENCE_REL]
@@ -182,7 +243,7 @@ def test_missing_pywin32_writes_only_bounded_failure_evidence(
         "schema_version": "1",
         "ok": False,
         "result": "BLOCKED",
-        "reason": "pywin32_required",
+        "reason": "task_runtime_readback_failed",
         "source_sha": sha,
         "github_run_id": "123",
         "github_run_attempt": "1",
