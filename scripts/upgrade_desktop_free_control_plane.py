@@ -9,6 +9,7 @@ import socket
 import sys
 import tempfile
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,51 @@ BACKUP_FILES = ("metadata.json", "run.py", "repair-evidence.json", "uac-result.j
 
 class UpgradeBlocked(RuntimeError):
     pass
+
+
+def verified_runner_process(
+    runner_home: Path,
+    runtime_root: Path,
+    *,
+    source_sha: str,
+    task_runtime: dict[str, Any],
+) -> dict[str, Any]:
+    """Use a fresh S4U watchdog attestation when this user cannot query its path."""
+    try:
+        return watchdog.runner_process_snapshot(runner_home)
+    except watchdog.WatchdogError as exc:
+        if str(exc) != "runner_listener_identity_unverifiable":
+            raise
+    if task_runtime.get("state") != 4 or task_runtime.get("enabled") is not True:
+        raise UpgradeBlocked("s4u_runner_task_not_running")
+    state = read_state(runtime_root)
+    if not state or state.get("source_sha") != source_sha:
+        raise UpgradeBlocked("s4u_runner_state_sha_mismatch")
+    if str(state.get("host") or "").casefold() != "desktop-rp23ogs":
+        raise UpgradeBlocked("s4u_runner_state_host_mismatch")
+    if (state.get("ok") is not True or state.get("runner_recovery_ok") is not True
+            or state.get("rdc_required") is not False):
+        raise UpgradeBlocked("s4u_runner_state_unhealthy")
+    runner_state = state.get("github_runner") or {}
+    if runner_state.get("status") not in {"process_running", "recovered"}:
+        raise UpgradeBlocked("s4u_runner_status_unhealthy")
+    try:
+        generated = datetime.fromisoformat(str(state["generated_at"]).replace("Z", "+00:00"))
+        if generated.tzinfo is None:
+            raise ValueError("timezone required")
+        age = (datetime.now(timezone.utc) - generated.astimezone(timezone.utc)).total_seconds()
+    except (KeyError, TypeError, ValueError) as exc:
+        raise UpgradeBlocked("s4u_runner_state_time_invalid") from exc
+    if not 0 <= age <= 120:
+        raise UpgradeBlocked("s4u_runner_state_stale")
+    pid = runner_state.get("listener_pid")
+    if type(pid) is not int or pid <= 0 or watchdog._runner_process_ids() != [pid]:
+        raise UpgradeBlocked("s4u_runner_pid_not_unique")
+    return {
+        "matching_pids": [pid], "unresolved_pids": [],
+        "identity_evidence": "fresh_s4u_state_and_unique_listener_pid",
+        "path_independently_readable": False,
+    }
 
 
 def require_digest(value: str, reason: str) -> str:
@@ -96,7 +142,10 @@ def inspect_active_installation(
     if not runner_home_value:
         raise UpgradeBlocked("installed_runner_home_missing")
     runner_home = watchdog.validate_runner_home(Path(runner_home_value))
-    process = watchdog.runner_process_snapshot(runner_home)
+    process = verified_runner_process(
+        runner_home, runtime_root,
+        source_sha=previous, task_runtime=task_runtime,
+    )
     pids = process.get("matching_pids") or []
     if len(pids) != 1 or process.get("unresolved_pids"):
         raise UpgradeBlocked("runner_process_identity_unproven")
@@ -231,7 +280,10 @@ def apply_upgrade(context: dict[str, Any], *, timeout_seconds: int = 30) -> dict
         else:
             raise UpgradeBlocked("s4u_watchdog_state_not_proven")
 
-        process_after = watchdog.runner_process_snapshot(context["runner_home"])
+        process_after = verified_runner_process(
+            context["runner_home"], runtime_root,
+            source_sha=target_sha, task_runtime=watchdog.task_runtime_snapshot(),
+        )
         if process_after.get("matching_pids") != context["runner_process"].get("matching_pids"):
             raise UpgradeBlocked("runner_process_identity_changed")
         registry_after = runner.registry_snapshot(None)
@@ -261,6 +313,9 @@ def apply_upgrade(context: dict[str, Any], *, timeout_seconds: int = 30) -> dict
             "runner_id": registry_after["id"],
             "runner_name": context["profile"].runner_name,
             "runner_process_preserved": True,
+            "runner_process_identity_evidence": process_after.get(
+                "identity_evidence", "executable_path_readback"
+            ),
             "watchdog_task_handover": handover,
             "github_pickup_proven": False,
             "credentials_created": False,
