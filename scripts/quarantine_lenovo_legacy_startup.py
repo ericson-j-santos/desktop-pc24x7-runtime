@@ -52,10 +52,20 @@ def process(pid: int) -> dict[str, Any] | None:
     }
 
 
+def legacy_startup_commands() -> list[int]:
+    """Find a still-running invocation of the exact Startup entry."""
+    import win32com.client  # type: ignore
+
+    wmi = win32com.client.GetObject("winmgmts:")
+    rows = wmi.ExecQuery("SELECT ProcessId, CommandLine FROM Win32_Process WHERE Name = 'cmd.exe'")
+    return [int(row.ProcessId) for row in rows
+            if str(STARTUP).casefold() in str(row.CommandLine or "").casefold()]
+
+
 def preflight(pid: int) -> dict[str, Any]:
     if os.name != "nt" or socket.gethostname().upper() != HOST:
         raise Blocked("host_mismatch")
-    if pid <= 0:
+    if pid < 0:
         raise Blocked("pid_invalid")
     if not STARTUP.is_file() or STARTUP.is_symlink() or QUARANTINED.exists():
         raise Blocked("startup_entry_changed_or_already_quarantined")
@@ -64,6 +74,11 @@ def preflight(pid: int) -> dict[str, Any]:
     metadata = json.loads((RUNTIME / "metadata.json").read_text(encoding="utf-8"))
     if metadata.get("host", "").upper() != HOST or metadata.get("source_sha") != SOURCE_SHA:
         raise Blocked("installation_provenance_changed")
+    if pid == 0:
+        if legacy_startup_commands():
+            raise Blocked("legacy_startup_command_still_running")
+        return {"host": HOST, "source_sha": SOURCE_SHA, "duplicate_pid": None,
+                "parent_pid": None, "entry_sha256": ENTRY_SHA256}
     listener = process(pid)
     if not listener or listener["name"].casefold() != "runner.listener.exe":
         raise Blocked("duplicate_listener_missing")
@@ -84,6 +99,10 @@ def apply(pid: int) -> dict[str, Any]:
     if STARTUP.exists() or not QUARANTINED.is_file() or digest(QUARANTINED) != ENTRY_SHA256:
         raise Blocked("quarantine_readback_failed")
     evidence["quarantined_path"] = str(QUARANTINED)
+    if pid == 0:
+        evidence["duplicate_stopped"] = True
+        evidence["result"] = "LEGACY_STARTUP_QUARANTINED"
+        return evidence
     taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
     stopped = subprocess.run([str(taskkill), "/PID", str(pid), "/T"],
                              capture_output=True, text=True, timeout=15, check=False)

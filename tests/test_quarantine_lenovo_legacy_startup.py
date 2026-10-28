@@ -65,3 +65,22 @@ def test_wrong_parent_or_digest_never_moves_or_kills(monkeypatch, tmp_path):
     with pytest.raises(q.Blocked, match="digest_changed"):
         q.apply(2024)
     assert startup.is_file()
+
+
+def test_duplicate_already_exited_quarantines_without_kill(monkeypatch, tmp_path):
+    startup, _ = fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(q, "legacy_startup_commands", lambda: [])
+    monkeypatch.setattr(q.subprocess, "run", lambda *args, **kwargs: pytest.fail("must not kill"))
+    result = q.apply(0)
+    assert result["duplicate_pid"] is None
+    assert result["duplicate_stopped"] is True
+    assert result["result"] == "LEGACY_STARTUP_QUARANTINED"
+    assert not startup.exists() and q.QUARANTINED.is_file()
+
+
+def test_pending_startup_command_blocks_quarantine(monkeypatch, tmp_path):
+    startup, _ = fixture(monkeypatch, tmp_path)
+    monkeypatch.setattr(q, "legacy_startup_commands", lambda: [12552])
+    with pytest.raises(q.Blocked, match="still_running"):
+        q.apply(0)
+    assert startup.is_file()
