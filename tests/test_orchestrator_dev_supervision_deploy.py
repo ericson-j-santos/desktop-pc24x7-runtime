@@ -83,7 +83,7 @@ class ApplySafetyTests(unittest.TestCase):
             path = Path(temp) / "receipt.json"
             with patch.object(deploy, "source_guard"), \
                  patch.object(deploy, "receipt_path", return_value=path), \
-                 patch.object(deploy, "build_plan", return_value={"plan_sha256": "b" * 64}), \
+                 patch.object(deploy, "build_plan", return_value={"plan_sha256": "b" * 64, "scanner_main_sha": "d" * 40}), \
                  patch.object(deploy.bootstrap, "local_git_owner_token", return_value="opaque-test"), \
                  patch.object(deploy, "scanner_guard"), \
                  patch.object(deploy, "workflow_state", return_value={"state": "active"}), \
@@ -101,7 +101,7 @@ class ApplySafetyTests(unittest.TestCase):
             path = Path(temp) / "receipt.json"
             with patch.object(deploy, "source_guard"), \
                  patch.object(deploy, "receipt_path", return_value=path), \
-                 patch.object(deploy, "build_plan", return_value={"plan_sha256": "b" * 64}), \
+                 patch.object(deploy, "build_plan", return_value={"plan_sha256": "b" * 64, "scanner_main_sha": "d" * 40}), \
                  patch.object(deploy.bootstrap, "local_git_owner_token", return_value="opaque-test"), \
                  patch.object(deploy, "scanner_guard"), \
                  patch.object(deploy, "workflow_state", return_value={"state": "active"}), \
