@@ -1,0 +1,191 @@
+name: Orchestrator registration plan review at approved source
+on:
+  push:
+    branches: [ops/orchestrator-dev-plan-2232022f-20261028]
+    paths: [.github/workflows/orchestrator-registration-plan-review.yml]
+permissions:
+  contents: read
+concurrency:
+  group: orchestrator-registration-plan-review-desktop
+  cancel-in-progress: false
+jobs:
+  admit:
+    name: Admit approved source and positive physical preflight
+    runs-on: windows-latest
+    timeout-minutes: 4
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - name: Verify current approved source and terminal independent readback
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            if (context.repo.owner !== 'ericson-j-santos' || context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                context.ref !== 'refs/heads/ops/orchestrator-dev-plan-2232022f-20261028' ||
+                context.eventName !== 'push' || process.env.GITHUB_RUN_ATTEMPT !== '1') throw new Error('PLAN_SCOPE_REJECTED');
+            const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:113});
+            const {data: main} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
+            const {data: rules} = await github.rest.repos.getBranch({owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'});
+            const {data: run} = await github.rest.actions.getWorkflowRun({...context.repo,run_id:40613511020});
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:40613511020,per_page:100,filter:'latest'});
+            if (pr.state !== 'open' || pr.head.sha !== '2232022f310970df54299263f0ea93f48ee2a56a' ||
+                main.commit.sha !== '18fb89dc2c788d0c0e268908971c24215c4872f3' ||
+                rules.commit.sha !== '25a72d6220d8432c92dfbe6e783aa64dc3891330' ||
+                run.head_sha !== pr.head.sha || run.run_attempt !== 1 ||
+                run.status !== 'completed' || run.conclusion !== 'success' ||
+                jobs.total_count !== jobs.jobs.length ||
+                ![122570745898,122571032492].every(id => jobs.jobs.some(j => j.id === id && j.status === 'completed' && j.conclusion === 'success'))) {
+              throw new Error('PLAN_SOURCE_OR_PREFLIGHT_NOT_CURRENT');
+            }
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Test private identity comparison and negative task control
+        shell: pwsh
+        run: python -B -m unittest discover -s tests -p test_orchestrator_registration_review.py -v
+  plan:
+    name: Read registration plan on Desktop at approved source
+    needs: admit
+    runs-on: ${{ fromJSON('["self-hosted","Windows","X64","pc24x7","desktop-runtime","runtime-dev","desktop-pdqk954"]') }}
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      receipt: ${{ steps.plan.outputs.receipt }}
+    env:
+      CORRELATION_ID: orchestrator-plan-review-${{ github.run_id }}-1
+      GH_TOKEN: ''
+      GITHUB_TOKEN: ''
+    steps:
+      - name: Require exact Desktop runner
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
+            const job = data.jobs.find(j => j.name === 'Read registration plan on Desktop at approved source');
+            if (data.total_count !== data.jobs.length || job?.runner_id !== 2 ||
+                process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
+                require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1') throw new Error('PLAN_RUNNER_REJECTED');
+      - name: Checkout review harness
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout exact canonical rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: 25a72d6220d8432c92dfbe6e783aa64dc3891330
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Materialize governed harness and exact approved source sessions
+        id: session
+        shell: powershell
+        run: |
+          $ErrorActionPreference = "Stop"
+          $launcher = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\session_launcher.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $raw = & python $launcher --policy $policy --repo $env:GITHUB_WORKSPACE --session-prefix plan-harness --correlation-id $env:CORRELATION_ID --expected-head "${{ github.sha }}" --sync-ref "origin/$env:GITHUB_REF_NAME" --require-runner-version-preflight
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $h = @($raw)[-1] | ConvertFrom-Json
+          if ($h.result -ne "SESSION_LAUNCH_OK" -or $h.state_validated -ne $true -or $h.head -ne "${{ github.sha }}" -or $h.runner_version_preflight.ok -ne $true) { throw "HARNESS_SESSION_BLOCKED" }
+          $raw = & python $launcher --policy $policy --repo "C:\dev\chatgpt-workers\wt-chat-desktop-runner-desktop-pdqk-20261028-011036-8f68" --session-prefix plan-source --correlation-id "${env:CORRELATION_ID}-source" --expected-head 2232022f310970df54299263f0ea93f48ee2a56a --sync-ref origin/feat/orchestrator-dev-runner-preflight-20261027 --require-runner-version-preflight
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $s = @($raw)[-1] | ConvertFrom-Json
+          if ($s.result -ne "SESSION_LAUNCH_OK" -or $s.state_validated -ne $true -or $s.head -ne "2232022f310970df54299263f0ea93f48ee2a56a" -or $s.runner_version_preflight.ok -ne $true) { throw "SOURCE_SESSION_BLOCKED" }
+          "target_path=$($h.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($h.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          "source_path=$($s.target_path)" | Add-Content $env:GITHUB_OUTPUT
+      - name: Compute plan digest and compare task identity through Gateway
+        id: plan
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          APPROVED_SOURCE_ROOT: ${{ steps.session.outputs.source_path }}
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\scripts\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\config\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\orchestrator_registration_review.py"
+          $raw = & python $gateway --policy $policy --correlation-id $env:CORRELATION_ID run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 180 --expected-head "${{ github.sha }}" -- python -B $script
+          $exitCode = $LASTEXITCODE
+          $raw | Write-Output
+          if ($exitCode -ne 0) { exit $exitCode }
+          $event = @($raw)[-1] | ConvertFrom-Json
+          if ($event.result -ne "ok" -or $event.state_changed -ne $false -or $event.command_exit_code -ne 0) { throw "PLAN_GATEWAY_READBACK_REJECTED" }
+          $receipt = $event.stdout | ConvertFrom-Json
+          if ($receipt.ok -ne $true -or $receipt.registration_performed -ne $false) { throw "PLAN_BLOCKED" }
+          "receipt=$($event.stdout.Trim())" | Add-Content $env:GITHUB_OUTPUT
+  readback:
+    name: Independent registration plan digest readback
+    needs: [admit, plan]
+    if: ${{ always() && needs.admit.result == 'success' }}
+    runs-on: windows-latest
+    timeout-minutes: 3
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+    env:
+      RECEIPT: ${{ needs.plan.outputs.receipt }}
+    steps:
+      - name: Verify actual physical job and source remain current
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
+            const job = data.jobs.find(j => j.name === 'Read registration plan on Desktop at approved source');
+            const {data: pr} = await github.rest.pulls.get({...context.repo,pull_number:113});
+            if (data.total_count !== data.jobs.length || job?.runner_id !== 2 ||
+                job.status !== 'completed' || job.conclusion !== 'success' ||
+                pr.head.sha !== '2232022f310970df54299263f0ea93f48ee2a56a' ||
+                !job.steps.some(s => s.name === 'Compute plan digest and compare task identity through Gateway' && s.conclusion === 'success')) throw new Error('PLAN_PHYSICAL_READBACK_BLOCKED');
+      - name: Recompute canonical digest independently
+        shell: python
+        run: |
+          import hashlib, json, os
+          receipt = json.loads(os.environ["RECEIPT"])
+          plan = receipt["registration_plan"]
+          keys = ("schema_version","kind","source_sha","correlation_id","profile","runner_home","required_labels","package","version_policy","registration_required","observed_runner_id","administrative_effects","listener_start_planned","watchdog_change_planned","windows_task_change_planned","additional_cost_authorized_brl","runtime_runner_change_planned")
+          canonical = {key: plan[key] for key in keys}
+          digest = hashlib.sha256(json.dumps(canonical,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest()
+          assert plan["plan_sha256"] == digest
+          assert plan["source_sha"] == "2232022f310970df54299263f0ea93f48ee2a56a"
+          assert plan["profile"]["host"] == "DESKTOP-PDQK954"
+          assert plan["profile"]["repository"] == "ericson-j-santos/reqsys-engineering-orchestrator"
+          assert plan["read_only"] is True and plan["registration_performed"] is False
+          assert plan["registration_token_requested"] is False
+          assert plan["listener_start_planned"] is False and plan["watchdog_change_planned"] is False
+          assert plan["additional_cost_authorized_brl"] == 0
+          print("REGISTRATION_PLAN_INDEPENDENT_READBACK_OK:" + digest)
+  queue_watchdog:
+    name: Registration plan pickup watchdog
+    needs: admit
+    runs-on: windows-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const deadline = Date.now() + 300000;
+            while (true) {
+              const {data} = await github.rest.actions.listJobsForWorkflowRun({...context.repo,run_id:context.runId,per_page:100});
+              const job = data.jobs.find(j => j.name === 'Read registration plan on Desktop at approved source');
+              if (data.total_count !== data.jobs.length) throw new Error('PLAN_JOB_LIST_INCOMPLETE');
+              if (job?.runner_id === 2 && ['in_progress','completed'].includes(job.status)) return;
+              if (Date.now() >= deadline) {
+                await github.rest.actions.cancelWorkflowRun({...context.repo,run_id:context.runId});
+                throw new Error('PLAN_PICKUP_EXPIRED');
+              }
+              await new Promise(resolve => setTimeout(resolve,15000));
+            }
