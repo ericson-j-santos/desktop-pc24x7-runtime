@@ -5,6 +5,8 @@ import importlib.util
 import io
 import json
 import pathlib
+import os
+import tempfile
 import subprocess
 import sys
 import unittest
@@ -51,6 +53,25 @@ class AuthClassificationTests(unittest.TestCase):
         self.assertEqual(observed, ("credential_unavailable", True, False))
         self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
         self.assertEqual(run.call_args.kwargs["stderr"], subprocess.DEVNULL)
+
+    def test_same_profile_config_recovers_owner_without_token_output(self):
+        version = subprocess.CompletedProcess([], 0, "gh version 2.82.0\n", "")
+        token = subprocess.CompletedProcess([], 0, None, None)
+        api = subprocess.CompletedProcess([], 0, "ericson-j-santos\n", "")
+        with tempfile.TemporaryDirectory() as root:
+            appdata = pathlib.Path(root) / "AppData" / "Roaming"
+            appdata.mkdir(parents=True)
+            with patch.dict(os.environ, {"USERPROFILE": root, "APPDATA": str(appdata),
+                                       "GH_CONFIG_DIR": str(pathlib.Path(root) / "wrong")}), \
+                 patch.object(diagnostic.bootstrap, "find_gh", return_value="gh"), \
+                 patch.object(diagnostic.bootstrap, "gh_env", return_value={}), \
+                 patch.object(diagnostic.subprocess, "run", side_effect=[version, token, api]) as run:
+                observed = diagnostic.probe_same_profile_config()
+        self.assertEqual(observed["same_profile_auth"], "owner_validated")
+        self.assertTrue(observed["gh_config_dir_set"])
+        self.assertEqual(observed["gh_version"], "2.82.0")
+        self.assertEqual(run.call_args_list[1].kwargs["stdout"], subprocess.DEVNULL)
+        self.assertEqual(run.call_args_list[1].kwargs["stderr"], subprocess.DEVNULL)
 
     def test_owner_candidate_requires_api_readback(self):
         self.assertEqual(diagnostic.classify_auth_status(self.payload(), 0), "owner_candidate")

@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -80,7 +82,7 @@ def diagnose_auth() -> tuple[str, bool, bool]:
     if state in ("auth_status_unavailable", "auth_state_ambiguous"):
         try:
             token_probe = subprocess.run(
-                [str(binary), "auth", "token", "--hostname", "github.com"],
+                [str(binary), "auth", "token", "--hostname", "github.com", "--no-refresh"],
                 env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 timeout=20, check=False,
             )
@@ -109,6 +111,81 @@ def diagnose_auth() -> tuple[str, bool, bool]:
     return "owner_validated", True, True
 
 
+
+def probe_same_profile_config() -> dict[str, object]:
+    """Check only fixed current-user config locations; never read or print tokens."""
+    context: dict[str, object] = {
+        "gh_config_dir_set": bool(os.environ.get("GH_CONFIG_DIR")),
+        "xdg_config_home_set": bool(os.environ.get("XDG_CONFIG_HOME")),
+        "appdata_set": bool(os.environ.get("APPDATA")),
+        "appdata_hosts_file_present": None,
+        "same_profile_auth": "not_checked",
+        "gh_version": None,
+    }
+    binary = bootstrap.find_gh()
+    if binary is None:
+        return context
+    env = bootstrap.gh_env()
+    env["GH_PROMPT_DISABLED"] = "1"
+    env["GH_HOST"] = "github.com"
+    try:
+        version = subprocess.run(
+            [str(binary), "--version"], env=env, capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=10, check=False,
+        )
+        match = re.search(r"\bgh version (\d+\.\d+\.\d+)\b", version.stdout)
+        if version.returncode == 0 and match:
+            context["gh_version"] = match.group(1)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    appdata = os.environ.get("APPDATA")
+    profile = os.environ.get("USERPROFILE")
+    if not appdata or not profile:
+        return context
+    directory = Path(appdata) / "GitHub CLI"
+    try:
+        if not directory.is_absolute() or not Path(profile).is_absolute():
+            return context
+        directory.resolve(strict=False).relative_to(Path(profile).resolve(strict=False))
+        context["appdata_hosts_file_present"] = (directory / "hosts.yml").is_file()
+    except (OSError, ValueError):
+        return context
+    candidate_env = dict(env)
+    candidate_env.pop("XDG_CONFIG_HOME", None)
+    candidate_env["GH_CONFIG_DIR"] = str(directory)
+    try:
+        token = subprocess.run(
+            [str(binary), "auth", "token", "--hostname", "github.com", "--no-refresh"],
+            env=candidate_env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        context["same_profile_auth"] = "probe_unavailable"
+        return context
+    if token.returncode != 0:
+        context["same_profile_auth"] = "credential_unavailable"
+        return context
+    try:
+        api = subprocess.run(
+            [str(binary), "api", "user", "--jq", ".login"],
+            env=candidate_env, capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        context["same_profile_auth"] = "api_unavailable"
+        return context
+    if api.returncode != 0:
+        context["same_profile_auth"] = (
+            "authentication_invalid"
+            if "http 401" in (api.stderr or "").casefold()
+            else "api_failure_unclassified"
+        )
+    elif api.stdout.strip().casefold() == OWNER.casefold():
+        context["same_profile_auth"] = "owner_validated"
+    else:
+        context["same_profile_auth"] = "account_mismatch"
+    return context
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--expected-sha", required=True)
@@ -127,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
         "auth_classification": "not_checked",
         "gh_located": None,
         "owner_validated": False,
+        "gh_config_context": None,
         "supervision": {key: None for key in IDENTITY_FIELDS},
     }
     try:
@@ -140,6 +218,13 @@ def main(argv: list[str] | None = None) -> int:
         receipt["auth_classification"] = state
         receipt["gh_located"] = located
         receipt["owner_validated"] = owner_validated
+        if state == "credential_unavailable":
+            receipt["gh_config_context"] = probe_same_profile_config()
+            alternate = receipt["gh_config_context"]["same_profile_auth"]
+            if alternate == "owner_validated":
+                receipt["auth_classification"] = "config_directory_mismatch"
+            elif alternate in ("account_mismatch", "authentication_invalid"):
+                receipt["auth_classification"] = alternate
         try:
             inventory = watchdog.readonly_local_inventory()
             receipt["supervision"] = {key: inventory.get(key) for key in IDENTITY_FIELDS}
