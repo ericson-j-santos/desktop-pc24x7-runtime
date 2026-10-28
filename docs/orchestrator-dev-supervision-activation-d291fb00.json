@@ -1,0 +1,58 @@
+{
+  "additional_cost_authorized_brl": 0,
+  "additional_runner_profiles": [
+    "orchestrator-dev"
+  ],
+  "administrative_effects": [
+    "backup_existing_watchdog_metadata_and_launcher",
+    "stage_verified_source_release_preserving_primary_runner_home",
+    "create_only_the_absent_canonical_s4u_task_with_same_process_sid",
+    "pause_only_pr_health_scan_and_cancel_only_unpicked_up_scanner_runs",
+    "start_existing_watchdog_with_closed_additional_runner_profile",
+    "stop_only_idle_new_listener_and_prove_supervisor_recovery",
+    "restore_scanner_workflow"
+  ],
+  "configuration_read_only": true,
+  "correlation_id": "orchestrator-dev-supervision-review",
+  "host": "DESKTOP-PDQK954",
+  "host_reboot_planned": false,
+  "kind": "orchestrator-dev-supervised-activation-plan",
+  "new_supervisor_manager_created": false,
+  "official_package_manifest_sha256": "6c622726225217d74f52a7fa6ba8bb2ed9735e9ed1f0fd30838f028d7410dac6",
+  "old_launcher_sha256": "62001a8706bfab8e3933dc799cd731267980b58fe75ecb365969f9a6a7b3f7ad",
+  "old_metadata_sha256": "93f58f8ec2dfeff498b551698c7567160069707981440a8ffbd7925f2ff5ed37",
+  "old_source_sha": "61c3a48ec5977ae568c35ce092b1303555121202",
+  "package_version": "2.338.2",
+  "pickup_followup_required": true,
+  "plan_sha256": "d291fb00d84c35bc7e7392b5909d434bf7b0f8d817bd76e43a688bb2d0d937ff",
+  "primary_runner_metadata_sha256": "fd8a341f7c4594db83960991c74d9f9337f061e8e61e79c4ceb6eb3c715aa182",
+  "principal_sid_sha256": "9483484bb20ce6358263487a5bb7e753e7759199c66ab902346360e19bc266c8",
+  "python_executable": "C:\\Users\\Windows\\AppData\\Local\\Programs\\Python\\Python312\\python.exe",
+  "python_sha256": "4d6f5f81a4bca11191c4c7c6b43632694d0a4ce74e068619d8fdc161d469859a",
+  "rdc_recovery_enabled": false,
+  "reversal": [
+    "disable_only_the_new_canonical_task_after_idle_check",
+    "stop_only_the_new_profile_listener_and_this_watchdog_after_identity_readback",
+    "restore_backup_metadata_and_launcher_with_digest_readback",
+    "preserve_both_runner_registrations_and_payloads",
+    "restore_pr_health_scan_to_prior_active_state"
+  ],
+  "rules_sha": "25a72d6220d8432c92dfbe6e783aa64dc3891330",
+  "runner_home": "C:\\Users\\Windows\\AppData\\Local\\EngineeringOrchestratorDEV\\GitHubRunner",
+  "runner_id": 21,
+  "scanner_main_sha": "1eed56b1a96a4f4ecfcd1a292bd95223a18fc0f2",
+  "schema_version": 1,
+  "source_files": {
+    "desktop_control_plane_watchdog.py": "5823e996b16c2483dd0b727d98e5882e46d99cd6e588a50fbd61ad0fc7a7ebc4",
+    "desktop_control_plane_watchdog_uac_launcher.py": "2f2134b4e2505fbb24eeb24a9e75bfb9c3cdd75cc7b3b341e47f9c7058667f40",
+    "pc24x7_host_policy.py": "3f9084dee2640a5586d46b075aa92ca6154cef3a7f3ddcb140164bdd008f7a8c",
+    "pc24x7_rdc_recovery.py": "0f23bf9e33213772551861a0c5ab4236ffad50bfe75ba4ed4eecce610e5bf966"
+  },
+  "source_sha": "a9c3fe785a2cb1229f3629127e71f8039c3216f2",
+  "state": "ACTIVATION_PLAN_READY_EXECUTION_PENDING",
+  "task_creation_only_if_absent": true,
+  "task_name": "\\Automation\\DesktopPc24x7RuntimeWatchdog",
+  "task_xml_sha256": "b20d223669b0241285474cb44dc2f6d7be679827348290bdc709522bc99e4829",
+  "temporary_package_verification": true,
+  "watchdog_root": "C:\\Users\\Windows\\AppData\\Local\\DesktopPC24x7\\ControlPlaneWatchdog"
+}
