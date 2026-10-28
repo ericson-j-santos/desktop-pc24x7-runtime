@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import ntpath
 import os
 import socket
 import subprocess
@@ -103,8 +104,8 @@ def apply(pid: int) -> dict[str, Any]:
         evidence["duplicate_stopped"] = True
         evidence["result"] = "LEGACY_STARTUP_QUARANTINED"
         return evidence
-    taskkill = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "taskkill.exe"
-    stopped = subprocess.run([str(taskkill), "/PID", str(pid), "/T"],
+    taskkill = ntpath.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "taskkill.exe")
+    stopped = subprocess.run([taskkill, "/PID", str(pid), "/T"],
                              capture_output=True, text=True, timeout=15, check=False)
     evidence["taskkill_exit_code"] = stopped.returncode
     deadline = time.monotonic() + 10
