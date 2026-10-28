@@ -1,0 +1,47 @@
+name: Review closed supervised activation actuator
+on:
+  push:
+    branches: [ops/orchestrator-dev-plan-2232022f-20261028]
+    paths:
+      - .github/workflows/orchestrator-supervision-actuator-review.yml
+      - scripts/apply_authorized_orchestrator_supervision.py
+      - tests/test_apply_authorized_orchestrator_supervision.py
+      - docs/orchestrator-dev-supervision-activation-d291fb00.json
+permissions:
+  contents: read
+jobs:
+  contract:
+    name: Approval gate and independent digest (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+      fail-fast: false
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Compile and exercise rejection before local access
+        shell: pwsh
+        run: |
+          python -B -m py_compile scripts/apply_authorized_orchestrator_supervision.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s tests -p test_apply_authorized_orchestrator_supervision.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Independently recompute persisted plan digest
+        shell: python
+        run: |
+          import hashlib, json
+          from pathlib import Path
+          plan = json.loads(Path("docs/orchestrator-dev-supervision-activation-d291fb00.json").read_text())
+          digest = plan.pop("plan_sha256")
+          for key in ("state","configuration_read_only","temporary_package_verification"):
+              plan.pop(key)
+          assert digest == "d291fb00d84c35bc7e7392b5909d434bf7b0f8d817bd76e43a688bb2d0d937ff"
+          assert hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest() == digest
+          assert plan["source_sha"] == "a9c3fe785a2cb1229f3629127e71f8039c3216f2"
+          assert plan["runner_id"] == 21 and plan["additional_cost_authorized_brl"] == 0
+          assert plan["rdc_recovery_enabled"] is False
+          print("APPROVAL_ACTUATOR_CONTRACT_AND_PERSISTED_PLAN_VALIDATED")
