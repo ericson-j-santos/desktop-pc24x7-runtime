@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -206,3 +207,80 @@ def test_upgrade_contract_does_not_register_runner_task_or_credentials() -> None
     assert '"github_pickup_proven": False' in text
     assert "require_current_release=True" not in text
     assert 'installation["runner_home"]' not in text
+
+
+def test_s4u_process_attestation_preserves_exact_pid(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    sha = "a" * 40
+    state = {
+        "host": "DESKTOP-RP23OGS", "source_sha": sha,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "ok": True, "runner_recovery_ok": True, "rdc_required": False,
+        "github_runner": {"status": "process_running", "listener_pid": 9716},
+    }
+    (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(m.watchdog, "runner_process_snapshot", lambda _: (_ for _ in ()).throw(
+        m.watchdog.WatchdogError("runner_listener_identity_unverifiable")
+    ))
+    monkeypatch.setattr(m.watchdog, "_runner_process_ids", lambda: [9716])
+    result = m.verified_runner_process(
+        tmp_path / "runner", root, source_sha=sha,
+        task_runtime={"state": 4, "enabled": True},
+    )
+    assert result["matching_pids"] == [9716]
+    assert result["path_independently_readable"] is False
+
+
+@pytest.mark.parametrize("change,reason", [
+    ({"source_sha": "b" * 40}, "s4u_runner_state_sha_mismatch"),
+    ({"host": "OTHER"}, "s4u_runner_state_host_mismatch"),
+    ({"runner_recovery_ok": False}, "s4u_runner_state_unhealthy"),
+    ({"generated_at": (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()},
+     "s4u_runner_state_stale"),
+    ({"generated_at": "2026-10-28T02:00:00"}, "s4u_runner_state_time_invalid"),
+])
+def test_s4u_process_attestation_rejects_bad_state(
+    monkeypatch, tmp_path: Path, change: dict, reason: str
+) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    sha = "a" * 40
+    state = {
+        "host": "DESKTOP-RP23OGS", "source_sha": sha,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "ok": True, "runner_recovery_ok": True, "rdc_required": False,
+        "github_runner": {"status": "process_running", "listener_pid": 9716},
+    }
+    state.update(change)
+    (root / "state.json").write_text(json.dumps(state), encoding="utf-8")
+    monkeypatch.setattr(m.watchdog, "runner_process_snapshot", lambda _: (_ for _ in ()).throw(
+        m.watchdog.WatchdogError("runner_listener_identity_unverifiable")
+    ))
+    monkeypatch.setattr(m.watchdog, "_runner_process_ids", lambda: [9716])
+    with pytest.raises(m.UpgradeBlocked, match=reason):
+        m.verified_runner_process(
+            tmp_path / "runner", root, source_sha=sha,
+            task_runtime={"state": 4, "enabled": True},
+        )
+
+
+def test_s4u_process_attestation_rejects_duplicate_listener(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "runtime"
+    root.mkdir()
+    sha = "a" * 40
+    (root / "state.json").write_text(json.dumps({
+        "host": "DESKTOP-RP23OGS", "source_sha": sha,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "ok": True, "runner_recovery_ok": True, "rdc_required": False,
+        "github_runner": {"status": "process_running", "listener_pid": 9716},
+    }), encoding="utf-8")
+    monkeypatch.setattr(m.watchdog, "runner_process_snapshot", lambda _: (_ for _ in ()).throw(
+        m.watchdog.WatchdogError("runner_listener_identity_unverifiable")
+    ))
+    monkeypatch.setattr(m.watchdog, "_runner_process_ids", lambda: [9716, 2024])
+    with pytest.raises(m.UpgradeBlocked, match="s4u_runner_pid_not_unique"):
+        m.verified_runner_process(
+            tmp_path / "runner", root, source_sha=sha,
+            task_runtime={"state": 4, "enabled": True},
+        )
