@@ -8,14 +8,14 @@ import re
 import subprocess
 import sys
 
-SOURCE_SHA = "a9c3fe785a2cb1229f3629127e71f8039c3216f2"
-RULES_SHA = "25a72d6220d8432c92dfbe6e783aa64dc3891330"
-RUNTIME_MAIN = "c1f224b79a26fe927686e69523f3a4f7cc37ba81"
-DIGEST = "d291fb00d84c35bc7e7392b5909d434bf7b0f8d817bd76e43a688bb2d0d937ff"
+SOURCE_SHA = "e0c40bccf0d99858a21beab0d62d0f143e969608"
+RULES_SHA = "682bba2858e09c161e7d3a477896ba7e326e83bd"
+RUNTIME_MAIN = "e0c40bccf0d99858a21beab0d62d0f143e969608"
+DIGEST = "e74b89a5c9ca49ca2b6695d13332e81873dd363e770a9a65894e7a76e5e63396"
 CORRELATION = "orchestrator-dev-supervision-review"
-ACTION = "pc24x7.orchestrator-dev.supervise.a9c3fe78"
+ACTION = "pc24x7.orchestrator-dev.supervise.e0c40bcc"
 SCOPE = "repo://ericson-j-santos/reqsys-engineering-orchestrator/environment/dev/runner/DESKTOP-PDQK954-orchestrator-dev"
-AUTHORIZATION_REF = "owner-chat-exact-supervision-plan-d291fb00-20261028"
+AUTHORIZATION_REF = "owner-chat-exact-supervision-plan-e74b89a5-20261028"
 
 
 def main():
@@ -50,7 +50,9 @@ def main():
         runs = deploy.bootstrap.api_json(prefix + "/actions/workflows/ci.yml/runs?head_sha=" + SOURCE_SHA + "&event=push&per_page=30", token=token)
         deploy.scanner_guard(token)
         token = ""
-        if (pr.get("state") != "open" or pr.get("head", {}).get("sha") != SOURCE_SHA
+        if (pr.get("merged") is not True
+            or pr.get("head", {}).get("sha") != "674c0d9e89b7b64de643ae1ea1e9761aa482df40"
+            or pr.get("merge_commit_sha") != SOURCE_SHA
             or main.get("commit", {}).get("sha") != RUNTIME_MAIN
             or not any(run.get("head_sha") == SOURCE_SHA and run.get("event") == "push"
                        and run.get("run_attempt") == 1 and run.get("status") == "completed"

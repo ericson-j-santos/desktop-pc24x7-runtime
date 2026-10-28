@@ -6,7 +6,7 @@ on:
       - .github/workflows/orchestrator-supervision-actuator-review.yml
       - scripts/apply_authorized_orchestrator_supervision.py
       - tests/test_apply_authorized_orchestrator_supervision.py
-      - docs/orchestrator-dev-supervision-activation-d291fb00.json
+      - docs/orchestrator-dev-supervision-activation-e74b89a5.json
 permissions:
   contents: read
 jobs:
@@ -35,13 +35,13 @@ jobs:
         run: |
           import hashlib, json
           from pathlib import Path
-          plan = json.loads(Path("docs/orchestrator-dev-supervision-activation-d291fb00.json").read_text())
+          plan = json.loads(Path("docs/orchestrator-dev-supervision-activation-e74b89a5.json").read_text())
           digest = plan.pop("plan_sha256")
           for key in ("state","configuration_read_only","temporary_package_verification"):
               plan.pop(key)
-          assert digest == "d291fb00d84c35bc7e7392b5909d434bf7b0f8d817bd76e43a688bb2d0d937ff"
+          assert digest == "e74b89a5c9ca49ca2b6695d13332e81873dd363e770a9a65894e7a76e5e63396"
           assert hashlib.sha256(json.dumps(plan,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode()).hexdigest() == digest
-          assert plan["source_sha"] == "a9c3fe785a2cb1229f3629127e71f8039c3216f2"
+          assert plan["source_sha"] == "e0c40bccf0d99858a21beab0d62d0f143e969608"
           assert plan["runner_id"] == 21 and plan["additional_cost_authorized_brl"] == 0
           assert plan["rdc_recovery_enabled"] is False
           print("APPROVAL_ACTUATOR_CONTRACT_AND_PERSISTED_PLAN_VALIDATED")

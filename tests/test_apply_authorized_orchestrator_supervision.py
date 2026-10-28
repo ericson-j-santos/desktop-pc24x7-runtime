@@ -25,8 +25,8 @@ class ApprovalGateTests(unittest.TestCase):
             self.assertFalse(receipt["apply_invoked"])
             self.assertEqual(receipt["state"], "administrative_approval_required")
     def test_closed_identity_and_digest(self):
-        self.assertEqual(module.SOURCE_SHA, "a9c3fe785a2cb1229f3629127e71f8039c3216f2")
-        self.assertEqual(module.DIGEST, "d291fb00d84c35bc7e7392b5909d434bf7b0f8d817bd76e43a688bb2d0d937ff")
+        self.assertEqual(module.SOURCE_SHA, "e0c40bccf0d99858a21beab0d62d0f143e969608")
+        self.assertEqual(module.DIGEST, "e74b89a5c9ca49ca2b6695d13332e81873dd363e770a9a65894e7a76e5e63396")
         self.assertEqual(module.CORRELATION, "orchestrator-dev-supervision-review")
         self.assertIn("/environment/dev/", module.SCOPE)
         self.assertNotIn("shell=True", SCRIPT.read_text())
