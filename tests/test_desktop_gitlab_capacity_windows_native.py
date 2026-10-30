@@ -3,16 +3,225 @@
 No production host collection or ACL repair. DACL mutations affect only fresh
 TemporaryDirectory fixtures and are restored before cleanup. Windows CI must
 execute these tests; API mocks are a separate test module.
+
+The hosted parent intentionally retains its incompatible Administrators default
+owner and proves rejection. Only a verified distinct-token child temporarily
+uses its existing TokenUser as TokenOwner, restoring it before success. This is
+fixture context, NOT a production token repair or proof of a physical Desktop.
 """
 from __future__ import annotations
 import concurrent.futures
 import contextlib
 import ctypes
+import functools
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
+import subprocess
+import sys
 import unittest
+from unittest.mock import patch
+
+_NATIVE_CHILD = False
+
+class FixtureToken:
+    """Own-process fixture token only; never enables privileges or changes groups."""
+    def __init__(self, access=8):
+        from ctypes import wintypes as w
+        self.w, self.p = w, ctypes.c_void_p
+        self.advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+        self.kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.kernel.GetCurrentProcess.restype = w.HANDLE
+        self.kernel.CloseHandle.argtypes = [w.HANDLE]
+        self.kernel.CloseHandle.restype = w.BOOL
+        self.advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+        self.advapi.OpenProcessToken.restype = w.BOOL
+        self.advapi.GetTokenInformation.argtypes = [w.HANDLE, ctypes.c_int, self.p, w.DWORD, ctypes.POINTER(w.DWORD)]
+        self.advapi.GetTokenInformation.restype = w.BOOL
+        self.advapi.GetLengthSid.argtypes = [self.p]
+        self.advapi.GetLengthSid.restype = w.DWORD
+        self.advapi.SetTokenInformation.argtypes = [w.HANDLE, ctypes.c_int, self.p, w.DWORD]
+        self.advapi.SetTokenInformation.restype = w.BOOL
+        self.handle = w.HANDLE()
+        if access not in (8, 8 | 0x80) or not self.advapi.OpenProcessToken(self.kernel.GetCurrentProcess(), access, ctypes.byref(self.handle)):
+            raise AssertionError("FIXTURE_OWN_TOKEN_ACCESS_FAILED")
+
+    def close(self):
+        if self.handle.value:
+            if not self.kernel.CloseHandle(self.handle):
+                raise AssertionError("FIXTURE_TOKEN_CLOSE_FAILED")
+            self.handle = self.w.HANDLE()
+
+    def query(self, kind):
+        size = self.w.DWORD()
+        self.advapi.GetTokenInformation(self.handle, kind, None, 0, ctypes.byref(size))
+        if not 0 < size.value <= 1048576:
+            raise AssertionError("FIXTURE_TOKEN_SIZE_INVALID")
+        buffer = ctypes.create_string_buffer(size.value)
+        if not self.advapi.GetTokenInformation(self.handle, kind, buffer, size, ctypes.byref(size)):
+            raise AssertionError("FIXTURE_TOKEN_QUERY_FAILED")
+        return buffer
+
+    def sid_bytes(self, pointer):
+        size = self.advapi.GetLengthSid(pointer)
+        if not 8 <= size <= 68:
+            raise AssertionError("FIXTURE_SID_SIZE_INVALID")
+        return ctypes.string_at(pointer, size)
+
+    def snapshot(self):
+        w, p = self.w, self.p
+        class Luid(ctypes.Structure):
+            _fields_ = [("low", w.DWORD), ("high", w.LONG)]
+        class Statistics(ctypes.Structure):
+            _fields_ = [("token", Luid), ("authentication", Luid), ("expiration", ctypes.c_longlong), ("kind", ctypes.c_int), ("level", ctypes.c_int), ("charged", w.DWORD), ("available", w.DWORD), ("groups", w.DWORD), ("privileges", w.DWORD), ("modified", Luid)]
+        class SidAttributes(ctypes.Structure):
+            _fields_ = [("sid", p), ("attributes", w.DWORD)]
+        class Groups(ctypes.Structure):
+            _fields_ = [("count", w.DWORD), ("first", SidAttributes)]
+        class LuidAttributes(ctypes.Structure):
+            _fields_ = [("luid", Luid), ("attributes", w.DWORD)]
+        class Privileges(ctypes.Structure):
+            _fields_ = [("count", w.DWORD), ("first", LuidAttributes)]
+        buffers = {kind: self.query(kind) for kind in (1, 2, 3, 4, 6, 10)}
+        def sid(kind):
+            return self.sid_bytes(ctypes.cast(buffers[kind], ctypes.POINTER(p))[0]).hex()
+        def entries(kind, header, entry):
+            count = ctypes.cast(buffers[kind], ctypes.POINTER(w.DWORD))[0]
+            if count > 4096 or header.first.offset + count * ctypes.sizeof(entry) > len(buffers[kind]):
+                raise AssertionError("FIXTURE_TOKEN_ARRAY_INVALID")
+            return (entry.from_buffer(buffers[kind], header.first.offset + i * ctypes.sizeof(entry)) for i in range(count))
+        groups = sorted((self.sid_bytes(e.sid).hex(), e.attributes) for e in entries(2, Groups, SidAttributes))
+        privileges = sorted((e.luid.low, e.luid.high, e.attributes) for e in entries(3, Privileges, LuidAttributes))
+        acl = ctypes.cast(buffers[6], ctypes.POINTER(p))[0]
+        default_dacl = None
+        if acl:
+            acl_size = int.from_bytes(ctypes.string_at(acl, 4)[2:4], "little")
+            if not 8 <= acl_size <= 65535:
+                raise AssertionError("FIXTURE_TOKEN_DACL_INVALID")
+            default_dacl = ctypes.string_at(acl, acl_size).hex()
+        if len(buffers[10]) < ctypes.sizeof(Statistics):
+            raise AssertionError("FIXTURE_TOKEN_STATISTICS_INVALID")
+        statistics = Statistics.from_buffer(buffers[10])
+        return {"token_id": (statistics.token.low, statistics.token.high), "modified_id": (statistics.modified.low, statistics.modified.high), "user": sid(1), "owner": sid(4), "groups": groups, "privileges": privileges, "default_dacl": default_dacl}
+
+    def set_own_owner(self, sid_bytes):
+        # The caller supplies only its saved owner or its existing TokenUser SID.
+        buffer = ctypes.create_string_buffer(sid_bytes)
+        owner = self.p(ctypes.addressof(buffer))
+        if not self.advapi.SetTokenInformation(self.handle, 4, ctypes.byref(owner), ctypes.sizeof(owner)):
+            raise AssertionError("FIXTURE_TOKEN_OWNER_SET_FAILED")
+
+def invariant_token(snapshot):
+    return {key: value for key, value in snapshot.items() if key not in ("owner", "modified_id")}
+
+@contextlib.contextmanager
+def isolated_owner_context(parent_token_id):
+    query = FixtureToken()
+    try:
+        original = query.snapshot()
+        if list(original["token_id"]) == parent_token_id:
+            raise AssertionError("FIXTURE_TOKEN_NOT_ISOLATED_NO_SETTER_EXECUTED")
+    finally:
+        query.close()
+    token = FixtureToken(8 | 0x80)  # QUERY | ADJUST_DEFAULT, never ADJUST_PRIVILEGES.
+    attempted = False
+    try:
+        if token.snapshot() != original:
+            raise AssertionError("FIXTURE_TOKEN_CHANGED_BEFORE_SETTER")
+        attempted = True
+        token.set_own_owner(bytes.fromhex(original["user"]))
+        changed = token.snapshot()
+        if changed["owner"] != original["user"] or invariant_token(changed) != invariant_token(original):
+            raise AssertionError("FIXTURE_TOKEN_CHANGE_OUT_OF_SCOPE")
+        yield
+    finally:
+        try:
+            if attempted:
+                invariant_ok = False
+                try:
+                    invariant_ok = invariant_token(token.snapshot()) == invariant_token(original)
+                finally:
+                    # Even a failed invariant query must not bypass restoration.
+                    token.set_own_owner(bytes.fromhex(original["owner"]))
+                restored = token.snapshot()
+                if not invariant_ok or restored["owner"] != original["owner"] or invariant_token(restored) != invariant_token(original):
+                    raise AssertionError("FIXTURE_TOKEN_RESTORE_OR_INVARIANT_FAILED")
+        finally:
+            token.close()
+
+def isolated_native_test(function):
+    @functools.wraps(function)
+    def wrapped(self):
+        if _NATIVE_CHILD:
+            return function(self)
+        token = FixtureToken()
+        try:
+            before = token.snapshot()
+            self.assertTrue(before["owner"] != before["user"], "Original hosted owner-mismatch control must be exercised")
+            with tempfile.TemporaryDirectory(prefix="capacity-original-owner-") as directory:
+                with self.assertRaisesRegex(m.ClaimError, "AUDIT_OWNER_REJECTED"):
+                    m.claim(Path(directory), META)
+                self.assertEqual(list(Path(directory).iterdir()), [])
+            try:
+                result = subprocess.run([sys.executable, "-I", str(Path(__file__).resolve()), "--capacity-native-child", function.__name__, json.dumps(before["token_id"])], capture_output=True, text=True, timeout=180, check=False)
+            finally:
+                self.assertTrue(token.snapshot() == before, "Parent process token must remain exactly unchanged")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            receipts = [json.loads(line.removeprefix("CAPACITY_NATIVE_RECEIPT ")) for line in result.stdout.splitlines() if line.startswith("CAPACITY_NATIVE_RECEIPT ")]
+            self.assertEqual(receipts, [{"test": function.__name__, "tests_run": 1, "skipped": 0, "successful": True, "token_isolated": True, "owner_restored": True, "security_invariants": True}])
+        finally:
+            token.close()
+    return wrapped
+
+class FixtureIsolationProtocolTests(unittest.TestCase):
+    """Portable protocol controls only; never evidence of the native Win32 ABI."""
+    def token_factory(self, *, same=False):
+        state = {"token_id": (1, 2) if same else (3, 4), "modified_id": (5, 6), "user": "01", "owner": "02", "groups": [("group", 1)], "privileges": [(7, 8, 9)], "default_dacl": "acl"}
+        calls = []
+        class FakeToken:
+            def __init__(self, access=8):
+                calls.append(("open", access))
+            def snapshot(self):
+                return dict(state)
+            def set_own_owner(self, value):
+                calls.append(("owner", value.hex()))
+                state["owner"] = value.hex()
+            def close(self):
+                calls.append(("close",))
+        return state, calls, FakeToken
+
+    def test_equal_token_id_never_opens_adjust_or_sets_owner(self):
+        state, calls, fake = self.token_factory(same=True)
+        with patch.dict(globals(), {"FixtureToken": fake}), self.assertRaisesRegex(AssertionError, "NOT_ISOLATED"):
+            with isolated_owner_context([1, 2]):
+                self.fail("body must not execute")
+        self.assertNotIn(("open", 0x88), calls)
+        self.assertFalse(any(call[0] == "owner" for call in calls))
+        self.assertEqual(state["owner"], "02")
+
+    def test_distinct_token_runs_body_and_restores_original_owner(self):
+        state, calls, fake = self.token_factory()
+        with patch.dict(globals(), {"FixtureToken": fake}):
+            with isolated_owner_context([1, 2]):
+                self.assertEqual(state["owner"], "01")
+        self.assertEqual(state["owner"], "02")
+        self.assertEqual([call for call in calls if call[0] == "owner"], [("owner", "01"), ("owner", "02")])
+
+    def test_test_failure_still_restores_owner(self):
+        state, calls, fake = self.token_factory()
+        with patch.dict(globals(), {"FixtureToken": fake}), self.assertRaisesRegex(RuntimeError, "test failed"):
+            with isolated_owner_context([1, 2]):
+                raise RuntimeError("test failed")
+        self.assertEqual(state["owner"], "02")
+
+    def test_privilege_drift_is_failure_not_success_receipt(self):
+        state, calls, fake = self.token_factory()
+        with patch.dict(globals(), {"FixtureToken": fake}), self.assertRaisesRegex(AssertionError, "INVARIANT_FAILED"):
+            with isolated_owner_context([1, 2]):
+                state["privileges"] = [(7, 8, 10)]
+        self.assertEqual(state["owner"], "02")
 
 spec = importlib.util.spec_from_file_location("capacity_native_claim", Path(__file__).resolve().parents[1] / "scripts/desktop_gitlab_capacity_claim.py")
 m = importlib.util.module_from_spec(spec)
@@ -142,6 +351,8 @@ def fixture_dacl(path, *, null=False):
 @unittest.skipUnless(os.name == "nt", "Native Win32 ABI/NTFS/DACL gate: requires Windows CI; Linux is not evidence")
 class NativeWindowsClaimTests(unittest.TestCase):
     def setUp(self):
+        if not _NATIVE_CHILD:
+            return
         self.tmp = tempfile.TemporaryDirectory(prefix="capacity-native-")
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
@@ -153,8 +364,10 @@ class NativeWindowsClaimTests(unittest.TestCase):
             raise AssertionError(str(error) + "; " + fixture_owner_diagnostic(self.root)) from error
 
     def tearDown(self):
-        self.tmp.cleanup()
+        if _NATIVE_CHILD:
+            self.tmp.cleanup()
 
+    @isolated_native_test
     def test_native_bindings_private_claim_and_replay(self):
         receipt = m.claim(self.root, META)
         self.assertTrue(receipt["claimed"])
@@ -163,6 +376,7 @@ class NativeWindowsClaimTests(unittest.TestCase):
         with self.assertRaisesRegex(m.ClaimError, "REQUEST_ALREADY_CONSUMED"):
             m.claim(self.root, META)
 
+    @isolated_native_test
     def test_native_concurrent_claim_exactly_one_winner(self):
         def attempt(_):
             try:
@@ -175,6 +389,7 @@ class NativeWindowsClaimTests(unittest.TestCase):
             results = list(pool.map(attempt, range(16)))
         self.assertEqual(sum(results), 1)
 
+    @isolated_native_test
     def test_native_null_and_broad_dacl_fail_without_claim(self):
         for null in (False, True):
             with self.subTest(null=null), fixture_dacl(self.root, null=null):
@@ -183,6 +398,7 @@ class NativeWindowsClaimTests(unittest.TestCase):
                     m.claim(self.root, META)
                 self.assertEqual(list(self.root.iterdir()), [])
 
+    @isolated_native_test
     def test_native_reparse_and_hardlink_are_rejected(self):
         alias = self.root / "alias"
         # No skip if CI lacks symlink capability: the mandatory Windows gate fails.
@@ -196,6 +412,7 @@ class NativeWindowsClaimTests(unittest.TestCase):
         with self.assertRaisesRegex(m.ClaimError, "HARDLINK"):
             m.ordinary(first, False)
 
+    @isolated_native_test
     def test_native_open_directory_handles_prevent_rename(self):
         moved = self.root.with_name(self.root.name + "-moved")
         try:
@@ -210,4 +427,16 @@ class NativeWindowsClaimTests(unittest.TestCase):
                 moved.rename(self.root)
 
 if __name__ == "__main__":
-    unittest.main()
+    if len(sys.argv) == 4 and sys.argv[1] == "--capacity-native-child":
+        name = sys.argv[2]
+        allowed = {name for name in vars(NativeWindowsClaimTests) if name.startswith("test_native_")}
+        if os.name != "nt" or name not in allowed:
+            raise SystemExit("FIXTURE_CHILD_SCOPE_INVALID")
+        _NATIVE_CHILD = True
+        with isolated_owner_context(json.loads(sys.argv[3])):
+            result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([NativeWindowsClaimTests(name)]))
+        if not result.wasSuccessful() or result.testsRun != 1 or result.skipped:
+            raise SystemExit(1)
+        print("CAPACITY_NATIVE_RECEIPT " + json.dumps({"test": name, "tests_run": result.testsRun, "skipped": len(result.skipped), "successful": True, "token_isolated": True, "owner_restored": True, "security_invariants": True}, sort_keys=True))
+    else:
+        unittest.main()
