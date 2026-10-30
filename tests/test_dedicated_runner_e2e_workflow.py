@@ -54,9 +54,9 @@ def test_canary_queue_is_bounded_fail_closed() -> None:
     assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in raw
 
 
-def test_lenovo_pickup_is_exact_sha_host_runner_and_artifact_bound() -> None:
+def test_lenovo_pickup_is_exact_sha_host_runner_and_receipt_bound() -> None:
     raw = workflow_text()
-    lenovo = raw.split("\n  lenovo_pickup:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
+    lenovo = raw.split("\n  lenovo_pickup:\n", 1)[1].split("\n  lenovo_readback:\n", 1)[0]
     assert "lenovo_control_plane_pickup:" in raw
     assert "inputs.lenovo_control_plane_pickup == true" in raw
     assert "inputs.diagnostic == 'runner-identity'" in raw
@@ -70,5 +70,26 @@ def test_lenovo_pickup_is_exact_sha_host_runner_and_artifact_bound() -> None:
     assert lenovo.count('os.environ["GITHUB_WORKSPACE"]') == 2
     assert 'module["bootstrap"]()' in lenovo
     assert 'module["prove"]()' in lenovo
-    assert "lenovo-control-plane-pickup/evidence.json" in raw
+    assert "lenovo-control-plane-pickup" in raw
+    assert 'module["emit_receipt"]()' in lenovo
+    assert "actions/upload-artifact@" not in lenovo
+    assert "steps.lenovo_proof.outputs.receipt_sha256" in lenovo
     assert "process.env.EXPECTED_RUNNER" in raw
+
+
+def test_lenovo_independent_readback_checks_job_outputs_and_real_runner() -> None:
+    raw = workflow_text()
+    readback = raw.split("\n  lenovo_readback:\n", 1)[1].split("\n  queue_watchdog:\n", 1)[0]
+    assert "needs: [resolve_rules, lenovo_pickup]" in readback
+    assert "runs-on: ubuntu-latest" in readback
+    assert "needs.lenovo_pickup.outputs.receipt_b64" in readback
+    assert "needs.lenovo_pickup.outputs.receipt_sha256" in readback
+    assert "base64 --decode" in readback and "sha256sum" in readback
+    assert "LENOVO_RECEIPT_SHA256_VERIFIED" in readback
+    assert "LENOVO_INDEPENDENT_READBACK_OK" in readback
+    assert "gh api" in readback and "runner_id" in readback
+    assert "Prove Lenovo control-plane pickup through Command Gateway" in readback
+    assert "Bootstrap governed Lenovo session and runner version preflight" in readback
+    assert "actions/upload-artifact@" not in readback
+    assert "actions/download-artifact@" not in readback
+    assert "synthetic_test_only" not in readback

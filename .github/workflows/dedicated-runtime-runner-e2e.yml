@@ -666,6 +666,9 @@ jobs:
 
   lenovo_pickup:
     needs: resolve_rules
+    outputs:
+      receipt_b64: ${{ steps.lenovo_proof.outputs.receipt_b64 }}
+      receipt_sha256: ${{ steps.lenovo_proof.outputs.receipt_sha256 }}
     if: inputs.lenovo_control_plane_pickup == true && inputs.diagnostic == 'runner-identity'
     name: Pickup on Lenovo free control plane
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
@@ -700,6 +703,7 @@ jobs:
           module["bootstrap"]()
 
       - name: Prove Lenovo control-plane pickup through Command Gateway
+        id: lenovo_proof
         shell: python
         env:
           TARGET_PATH: ${{ steps.lenovo_session.outputs.target_path }}
@@ -709,15 +713,74 @@ jobs:
           import os, runpy
           module = runpy.run_path(os.path.join(os.environ["GITHUB_WORKSPACE"], "scripts", "lenovo_control_plane_workflow.py"))
           module["prove"]()
+          module["emit_receipt"]()
 
-      - name: Upload Lenovo pickup evidence
-        if: always() && steps.lenovo_session.outputs.target_path != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.lenovo_session.outputs.target_path }}/artifacts/lenovo-control-plane-pickup/evidence.json
-          if-no-files-found: error
-          retention-days: 30
+  lenovo_readback:
+    needs: [resolve_rules, lenovo_pickup]
+    if: ${{ inputs.lenovo_control_plane_pickup == true && inputs.diagnostic == 'runner-identity' && needs.lenovo_pickup.result == 'success' }}
+    name: Independent Lenovo pickup receipt readback
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    permissions:
+      contents: read
+      actions: read
+    env:
+      RECEIPT_B64: ${{ needs.lenovo_pickup.outputs.receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.lenovo_pickup.outputs.receipt_sha256 }}
+      EXPECTED_RULES_SHA: ${{ needs.resolve_rules.outputs.rules_sha }}
+    steps:
+      - name: Verify bounded receipt and immutable run identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = 'ericson-j-santos/desktop-pc24x7-runtime'
+          test -n "$RECEIPT_B64"
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(printf '%s' "$RECEIPT_B64" | wc -c)" -le 12000
+          mkdir -p _lenovo_readback
+          printf '%s' "$RECEIPT_B64" | base64 --decode > _lenovo_readback/receipt.json
+          test -s _lenovo_readback/receipt.json
+          test "$(wc -c < _lenovo_readback/receipt.json)" -le 8192
+          test "$(sha256sum _lenovo_readback/receipt.json | cut -d' ' -f1)" = "$RECEIPT_SHA256"
+          jq -e --arg sha "$GITHUB_SHA" --arg rules "$EXPECTED_RULES_SHA" \
+            --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" \
+            '(.contract == "lenovo-pickup-job-output-v1") and (.ok == true) and
+             (.result == "LENOVO_CONTROL_PLANE_PICKUP_PROVEN") and
+             (.host == "DESKTOP-RP23OGS") and
+             (.runner_name == "DESKTOP-RP23OGS-runtime") and
+             (.source_sha == $sha) and (.rules_sha == $rules) and
+             (.run_id == $run) and (.run_attempt == $attempt) and
+             (.correlation_id == ("lenovo-control-plane-pickup-" + $run + "-" + $attempt)) and
+             (.session_result == "SESSION_LAUNCH_OK") and
+             ((.session_id | length) > 0) and
+             (.state_validated == true) and (.gateway_ok == true) and
+             (.watchdog_runner_status == "process_running" or .watchdog_runner_status == "recovered") and
+             (.runner_process_count == 1) and
+             (.credentials_created == false) and (.production_touched == false) and
+             (.reboot_performed == false)' _lenovo_readback/receipt.json >/dev/null
+          echo LENOVO_RECEIPT_SHA256_VERIFIED
+      - name: Independently verify physical runner and guarded steps
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          observed="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/jobs?per_page=100")"
+          printf '%s' "$observed" | jq -e '
+            (.total_count == (.jobs | length)) and
+            ([.jobs[] | select(
+              .name == "Pickup on Lenovo free control plane" and
+              .runner_name == "DESKTOP-RP23OGS-runtime" and
+              (.runner_id | type == "number" and . > 0) and
+              .status == "completed" and .conclusion == "success" and
+              ([.steps[] | select(.name == "Bootstrap governed Lenovo session and runner version preflight"
+                and .status == "completed" and .conclusion == "success")] | length) == 1 and
+              ([.steps[] | select(.name == "Prove Lenovo control-plane pickup through Command Gateway"
+                and .status == "completed" and .conclusion == "success")] | length) == 1
+            )] | length == 1)' >/dev/null
+          printf 'Lenovo pickup verified in run %s / sha %s / digest %s\n' \
+            "$GITHUB_RUN_ID" "$GITHUB_SHA" "$RECEIPT_SHA256" >> "$GITHUB_STEP_SUMMARY"
+          echo LENOVO_INDEPENDENT_READBACK_OK
 
   queue_watchdog:
     needs: [resolve_rules, orchestrator_contract]
