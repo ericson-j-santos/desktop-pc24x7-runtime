@@ -91,7 +91,10 @@ def windows_private_root(root):
             return bool(advapi.EqualSid(sid, current_sid) or advapi.IsWellKnownSid(sid, 22) or advapi.IsWellKnownSid(sid, 26) or advapi.EqualSid(sid, installer))
         for path in list(reversed(root.parents)) + [root]:
             ordinary(path, True)
-            handle = kernel.CreateFileW(str(path), 0x20080, 3, None, 3, 0x02200000, None)
+            # FILE_LIST_DIRECTORY participates in share-access enforcement;
+            # attribute-only handles do not reliably prevent directory rename.
+            # Keep READ_CONTROL/READ_ATTRIBUTES and deny FILE_SHARE_DELETE.
+            handle = kernel.CreateFileW(str(path), 0x20081, 3, None, 3, 0x02200000, None)
             require(handle != ctypes.c_void_p(-1).value and handle is not None, "AUDIT_DIRECTORY_HANDLE_UNAVAILABLE")
             handles.append(handle)
             observed = ordinary(path, True)

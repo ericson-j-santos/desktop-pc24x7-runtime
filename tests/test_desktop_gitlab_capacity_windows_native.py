@@ -534,6 +534,11 @@ class NativeWindowsClaimTests(unittest.TestCase):
                     self.root.rename(moved)
             self.assertTrue(self.root.is_dir())
             self.assertFalse(moved.exists())
+            # Positive control: the same rename is allowed after handles close.
+            self.root.rename(moved)
+            self.assertTrue(moved.is_dir())
+            self.assertFalse(self.root.exists())
+            moved.rename(self.root)
         finally:
             # Restore a failed negative control only after native handles close.
             if moved.exists() and not self.root.exists():

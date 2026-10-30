@@ -43,6 +43,7 @@ class FakeWindows:
         self.sid_values = {}
         self.next_handle = 10
         self.open_failure = False
+        self.open_requests = []
         self.attributes = 0x10
         self.file_index = 42
         self.drive_type = 3
@@ -79,7 +80,8 @@ class FakeWindows:
     def _IsWellKnownSid(self, value, kind):
         return self.sid(value) == {22:self.SYSTEM, 26:self.ADMIN}.get(kind)
     def _CreateFileW(self, path, access, sharing, security, disposition, flags, template):
-        assert access == 0x20080 and sharing == 3 and disposition == 3 and flags == 0x02200000
+        self.open_requests.append((path, access, sharing, disposition, flags))
+        assert access == 0x20081 and sharing == 3 and disposition == 3 and flags == 0x02200000
         if self.open_failure:
             return ctypes.c_void_p(-1).value
         handle = self.next_handle
@@ -134,6 +136,15 @@ class WindowsGuardDecisionTests(unittest.TestCase):
 
     def test_native_decision_path_positive_and_release(self):
         self.run_guard(FakeWindows())
+
+    def test_directory_read_acquisition_denial_has_no_metadata_only_fallback(self):
+        api = FakeWindows()
+        api.open_failure = True
+        with self.assertRaisesRegex(m.ClaimError, "AUDIT_DIRECTORY_HANDLE_UNAVAILABLE"):
+            self.run_guard(api)
+        self.assertEqual(len(api.open_requests), 1)
+        self.assertEqual(api.open_requests[0][1:3], (0x20081, 3))
+        self.assertEqual(api.closed, [2])
 
     def test_trusted_os_aces_on_existing_root_and_claim_are_accepted(self):
         for sid in (FakeWindows.SYSTEM, FakeWindows.ADMIN, FakeWindows.INSTALLER):
