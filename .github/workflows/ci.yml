@@ -103,46 +103,60 @@ jobs:
         run: |
           set -euo pipefail
           test "$GITHUB_REPOSITORY" = "ericson-j-santos/desktop-pc24x7-runtime"
-          test -n "$RECEIPT_B64"
-          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
-          test "$(printf '%s' "$RECEIPT_B64" | wc -c)" -le 12000
           mkdir -p _receipt_transport
-          printf '%s' "$RECEIPT_B64" | base64 --decode > _receipt_transport/receipt.json
-          test -s _receipt_transport/receipt.json
-          test "$(wc -c < _receipt_transport/receipt.json)" -le 8192
-          test "$(sha256sum _receipt_transport/receipt.json | cut -d' ' -f1)" = "$RECEIPT_SHA256"
-          jq -e --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '
-            .contract == "job-output-transport-test-v1" and
-            .synthetic_test_only == true and
-            .source_sha == $sha and .run_id == $run and .run_attempt == $attempt
-          ' _receipt_transport/receipt.json >/dev/null
-          cp _receipt_transport/receipt.json _receipt_transport/altered.json
-          printf 'x' >> _receipt_transport/altered.json
-          if test "$(sha256sum _receipt_transport/altered.json | cut -d' ' -f1)" = "$RECEIPT_SHA256"; then
-            echo "NEGATIVE_HASH_NOT_DETECTED"
-            exit 21
-          fi
-          if jq -e --arg sha "0000000000000000000000000000000000000000" '.source_sha == $sha' _receipt_transport/receipt.json >/dev/null; then
-            echo "NEGATIVE_SHA_NOT_DETECTED"
-            exit 22
-          fi
-          if jq -e --arg run "0" '.run_id == $run' _receipt_transport/receipt.json >/dev/null; then
-            echo "NEGATIVE_RUN_NOT_DETECTED"
-            exit 23
-          fi
-          if test -n ""; then
-            echo "NEGATIVE_MISSING_NOT_DETECTED"
-            exit 24
-          fi
-          head -c 8193 /dev/zero > _receipt_transport/oversized.bin
-          if test "$(wc -c < _receipt_transport/oversized.bin)" -le 8192; then
-            echo "NEGATIVE_SIZE_NOT_DETECTED"
-            exit 25
-          fi
-          if printf '%%%' | base64 --decode >/dev/null 2>&1; then
-            echo "NEGATIVE_BASE64_NOT_DETECTED"
-            exit 26
-          fi
-          cp _receipt_transport/receipt.json _receipt_transport/replay.json
-          cmp -s _receipt_transport/receipt.json _receipt_transport/replay.json
+
+          # Every negative case exercises this same verifier, not an unrelated assertion.
+          verify_transport() {
+            local encoded="$1" digest="$2" expected_sha="$3" expected_run="$4" expected_attempt="$5"
+            test -n "$encoded" || return 1
+            [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+            test "$(printf '%s' "$encoded" | wc -c)" -le 12000 || return 1
+            printf '%s' "$encoded" | base64 --decode > _receipt_transport/checked.json || return 1
+            test -s _receipt_transport/checked.json || return 1
+            test "$(wc -c < _receipt_transport/checked.json)" -le 8192 || return 1
+            test "$(sha256sum _receipt_transport/checked.json | cut -d' ' -f1)" = "$digest" || return 1
+            jq -e --arg sha "$expected_sha" --arg run "$expected_run" --arg attempt "$expected_attempt" '
+              .contract == "job-output-transport-test-v1" and
+              .synthetic_test_only == true and
+              .source_sha == $sha and .run_id == $run and .run_attempt == $attempt
+            ' _receipt_transport/checked.json >/dev/null || return 1
+          }
+
+          expect_rejected() {
+            local case_name="$1"
+            shift
+            if verify_transport "$@"; then
+              echo "NEGATIVE_${case_name}_NOT_DETECTED" >&2
+              exit 1
+            fi
+          }
+
+          # Positive: provider-delivered output from another hosted job.
+          verify_transport "$RECEIPT_B64" "$RECEIPT_SHA256" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          cp _receipt_transport/checked.json _receipt_transport/valid.json
+
+          # Tampered bytes with the original digest.
+          cp _receipt_transport/valid.json _receipt_transport/tampered.json
+          printf 'x' >> _receipt_transport/tampered.json
+          tampered_b64="$(base64 -w0 < _receipt_transport/tampered.json)"
+          expect_rejected hash "$tampered_b64" "$RECEIPT_SHA256" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
+          # Foreign SHA with internally consistent bytes and digest.
+          jq -c '.source_sha = "0000000000000000000000000000000000000000"' _receipt_transport/valid.json > _receipt_transport/forged.json
+          forged_b64="$(base64 -w0 < _receipt_transport/forged.json)"
+          forged_digest="$(sha256sum _receipt_transport/forged.json | cut -d' ' -f1)"
+          expect_rejected sha "$forged_b64" "$forged_digest" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          expect_rejected run "$RECEIPT_B64" "$RECEIPT_SHA256" "$GITHUB_SHA" "0" "$GITHUB_RUN_ATTEMPT"
+          expect_rejected attempt "$RECEIPT_B64" "$RECEIPT_SHA256" "$GITHUB_SHA" "$GITHUB_RUN_ID" "0"
+          expect_rejected missing "" "$RECEIPT_SHA256" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
+          # Oversized decoded bytes and malformed Base64 must fail in the verifier.
+          head -c 8193 /dev/zero > _receipt_transport/oversized.json
+          oversize_b64="$(base64 -w0 < _receipt_transport/oversized.json)"
+          oversize_digest="$(sha256sum _receipt_transport/oversized.json | cut -d' ' -f1)"
+          expect_rejected size "$oversize_b64" "$oversize_digest" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+          expect_rejected base64 "%%%" "$RECEIPT_SHA256" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
+
+          # A replay of the immutable fixture produces no external write.
+          verify_transport "$RECEIPT_B64" "$RECEIPT_SHA256" "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT"
           echo "SYNTHETIC_CROSS_JOB_TRANSPORT_OK"
