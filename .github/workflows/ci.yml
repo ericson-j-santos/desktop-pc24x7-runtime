@@ -64,3 +64,85 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           node --test tests/test_reqsys_dev_inventory_admission.cjs tests/test_reqsys_dev_inventory_pickup_watchdog.cjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+  # Synthetic hosted-only transport test. No artifact, host pickup or failover certification.
+  lenovo_output_producer:
+    name: Synthetic Lenovo receipt output producer (hosted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      receipt_b64: ${{ steps.emit.outputs.receipt_b64 }}
+      receipt_sha256: ${{ steps.emit.outputs.receipt_sha256 }}
+    steps:
+      - name: Emit bounded non-secret synthetic receipt
+        id: emit
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "ericson-j-santos/desktop-pc24x7-runtime"
+          fixture="$(jq -nc --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '{contract:"job-output-transport-test-v1",synthetic_test_only:true,source_sha:$sha,run_id:$run,run_attempt:$attempt}')"
+          test -n "$fixture"
+          test "$(printf '%s' "$fixture" | wc -c)" -le 8192
+          encoded="$(printf '%s' "$fixture" | base64 -w0)"
+          test "${#encoded}" -le 12000
+          digest="$(printf '%s' "$fixture" | sha256sum | cut -d' ' -f1)"
+          echo "receipt_b64=$encoded" >> "$GITHUB_OUTPUT"
+          echo "receipt_sha256=$digest" >> "$GITHUB_OUTPUT"
+
+  lenovo_output_readback:
+    name: Independent synthetic job-output transport readback (hosted)
+    needs: lenovo_output_producer
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      RECEIPT_B64: ${{ needs.lenovo_output_producer.outputs.receipt_b64 }}
+      RECEIPT_SHA256: ${{ needs.lenovo_output_producer.outputs.receipt_sha256 }}
+    steps:
+      - name: Validate cross-job delivery, SHA-256, bounds and negative controls
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REPOSITORY" = "ericson-j-santos/desktop-pc24x7-runtime"
+          test -n "$RECEIPT_B64"
+          [[ "$RECEIPT_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          test "$(printf '%s' "$RECEIPT_B64" | wc -c)" -le 12000
+          mkdir -p _receipt_transport
+          printf '%s' "$RECEIPT_B64" | base64 --decode > _receipt_transport/receipt.json
+          test -s _receipt_transport/receipt.json
+          test "$(wc -c < _receipt_transport/receipt.json)" -le 8192
+          test "$(sha256sum _receipt_transport/receipt.json | cut -d' ' -f1)" = "$RECEIPT_SHA256"
+          jq -e --arg sha "$GITHUB_SHA" --arg run "$GITHUB_RUN_ID" --arg attempt "$GITHUB_RUN_ATTEMPT" '
+            .contract == "job-output-transport-test-v1" and
+            .synthetic_test_only == true and
+            .source_sha == $sha and .run_id == $run and .run_attempt == $attempt
+          ' _receipt_transport/receipt.json >/dev/null
+          cp _receipt_transport/receipt.json _receipt_transport/altered.json
+          printf 'x' >> _receipt_transport/altered.json
+          if test "$(sha256sum _receipt_transport/altered.json | cut -d' ' -f1)" = "$RECEIPT_SHA256"; then
+            echo "NEGATIVE_HASH_NOT_DETECTED"
+            exit 21
+          fi
+          if jq -e --arg sha "0000000000000000000000000000000000000000" '.source_sha == $sha' _receipt_transport/receipt.json >/dev/null; then
+            echo "NEGATIVE_SHA_NOT_DETECTED"
+            exit 22
+          fi
+          if jq -e --arg run "0" '.run_id == $run' _receipt_transport/receipt.json >/dev/null; then
+            echo "NEGATIVE_RUN_NOT_DETECTED"
+            exit 23
+          fi
+          if test -n ""; then
+            echo "NEGATIVE_MISSING_NOT_DETECTED"
+            exit 24
+          fi
+          head -c 8193 /dev/zero > _receipt_transport/oversized.bin
+          if test "$(wc -c < _receipt_transport/oversized.bin)" -le 8192; then
+            echo "NEGATIVE_SIZE_NOT_DETECTED"
+            exit 25
+          fi
+          if printf '%%%' | base64 --decode >/dev/null 2>&1; then
+            echo "NEGATIVE_BASE64_NOT_DETECTED"
+            exit 26
+          fi
+          cp _receipt_transport/receipt.json _receipt_transport/replay.json
+          cmp -s _receipt_transport/receipt.json _receipt_transport/replay.json
+          echo "SYNTHETIC_CROSS_JOB_TRANSPORT_OK"
