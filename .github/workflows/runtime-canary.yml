@@ -10,7 +10,9 @@ on:
       - tests/test_runtime_health_supervisor.py
       - tests/test_runtime_canary_queue_watchdog.py
   schedule:
-    - cron: "*/5 * * * *"
+    # Hourly half-open pickup probe: avoid repeating the same 300s no-pickup outage every five minutes.
+    # Owner manual dispatch remains available after a verified change in host preconditions.
+    - cron: "17 * * * *"
   workflow_dispatch:
 
 permissions:
