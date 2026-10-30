@@ -19,6 +19,77 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 META = {"request_id": "fedcba98-7654-4321-8123-456789abcdef", "source_sha": "a" * 40, "rules_sha": "b" * 40, "issue_id": "100", "issue_number": "12", "run_id": "123456789", "run_attempt": "1", "host": m.HOST}
 
+def fixture_owner_diagnostic(path):
+    """Query owner classes on disposable fixtures; never mutate security/token."""
+    from ctypes import wintypes as w
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    p = ctypes.c_void_p
+    kernel.GetCurrentProcess.restype = w.HANDLE
+    kernel.CloseHandle.argtypes = [w.HANDLE]
+    kernel.LocalFree.argtypes = [p]
+    advapi.OpenProcessToken.argtypes = [w.HANDLE, w.DWORD, ctypes.POINTER(w.HANDLE)]
+    advapi.OpenProcessToken.restype = w.BOOL
+    advapi.GetTokenInformation.argtypes = [w.HANDLE, ctypes.c_int, p, w.DWORD, ctypes.POINTER(w.DWORD)]
+    advapi.GetTokenInformation.restype = w.BOOL
+    advapi.GetNamedSecurityInfoW.argtypes = [w.LPWSTR, ctypes.c_int, w.DWORD, ctypes.POINTER(p), ctypes.POINTER(p), ctypes.POINTER(p), ctypes.POINTER(p), ctypes.POINTER(p)]
+    advapi.GetNamedSecurityInfoW.restype = w.DWORD
+    advapi.EqualSid.argtypes = [p, p]
+    advapi.EqualSid.restype = w.BOOL
+    advapi.IsWellKnownSid.argtypes = [p, ctypes.c_int]
+    advapi.IsWellKnownSid.restype = w.BOOL
+    token, descriptor, owner = w.HANDLE(), p(), p()
+    try:
+        if not advapi.OpenProcessToken(kernel.GetCurrentProcess(), 8, ctypes.byref(token)):
+            return "owner_diagnostic=token_unavailable"
+        buffers = []
+        for kind in (1, 4):  # TokenUser, TokenOwner; query only.
+            size = w.DWORD()
+            advapi.GetTokenInformation(token, kind, None, 0, ctypes.byref(size))
+            if not 0 < size.value <= 65536:
+                return "owner_diagnostic=token_size_invalid"
+            buffer = ctypes.create_string_buffer(size.value)
+            if not advapi.GetTokenInformation(token, kind, buffer, size, ctypes.byref(size)):
+                return "owner_diagnostic=token_query_failed"
+            buffers.append(buffer)
+        user, default_owner = [ctypes.cast(buffer, ctypes.POINTER(p))[0] for buffer in buffers]
+        def classify(sid):
+            if not sid:
+                return "missing"
+            if advapi.EqualSid(sid, user):
+                return "token_user"
+            if advapi.IsWellKnownSid(sid, 26):
+                return "builtin_administrators"
+            if advapi.IsWellKnownSid(sid, 22):
+                return "local_system"
+            return "other"
+        def observe(target):
+            nonlocal descriptor
+            if advapi.GetNamedSecurityInfoW(str(target), 1, 1, ctypes.byref(owner), None, None, None, ctypes.byref(descriptor)) != 0:
+                return "query_failed"
+            try:
+                return (classify(owner.value) + ",equals_token_user=" + str(bool(advapi.EqualSid(owner, user)))
+                        + ",equals_token_owner=" + str(bool(advapi.EqualSid(owner, default_owner))))
+            finally:
+                kernel.LocalFree(descriptor)
+                descriptor = p()
+        directory = observe(path)
+        probe = path / "owner-diagnostic.tmp"
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        try:
+            os.close(fd)
+            created = observe(probe)
+        finally:
+            probe.unlink()
+        return ("directory_owner=" + directory + "; new_file_owner=" + created
+                + "; token_default_owner=" + classify(default_owner)
+                + "; token_owner_equals_user=" + str(bool(advapi.EqualSid(default_owner, user))))
+    finally:
+        if descriptor.value:
+            kernel.LocalFree(descriptor)
+        if token.value:
+            kernel.CloseHandle(token)
+
 @contextlib.contextmanager
 def fixture_dacl(path, *, null=False):
     """Change only the caller's disposable fixture DACL, preserving its owner."""
@@ -75,8 +146,11 @@ class NativeWindowsClaimTests(unittest.TestCase):
         self.addCleanup(self.tmp.cleanup)
         self.root = Path(self.tmp.name)
         # Every negative control first proves an admissible real native baseline.
-        with m.windows_private_root(self.root):
-            pass
+        try:
+            with m.windows_private_root(self.root):
+                pass
+        except m.ClaimError as error:
+            raise AssertionError(str(error) + "; " + fixture_owner_diagnostic(self.root)) from error
 
     def tearDown(self):
         self.tmp.cleanup()
