@@ -138,7 +138,8 @@ def test_canary_preserves_serialization_without_cancelling_active_jobs() -> None
     canary = content.split("  canary:\n", 1)[1].split("\n  queue_watchdog:", 1)[0]
     assert "actions: write" not in canary
     assert "    timeout-minutes: 4" in content
-    assert "  schedule:\n    - cron: \"*/5 * * * *\"" in content
+    assert "  schedule:" in content
+    assert '    - cron: "17 * * * *"' in content
     assert "  workflow_dispatch:" in content
 
 
