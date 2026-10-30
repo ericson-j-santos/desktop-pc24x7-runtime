@@ -2,6 +2,8 @@ name: Desktop GitLab capacity read-only preflight
 
 # A demanda e deliberada: este workflow NAO instala ou registra runners.
 on:
+  issues:
+    types: [opened]
   workflow_dispatch:
     inputs:
       expected_head_sha:
@@ -23,18 +25,45 @@ permissions:
   contents: read
   actions: read
 
-concurrency:
-  group: desktop-gitlab-capacity-readonly
-  cancel-in-progress: false
-
 jobs:
+  admission:
+    name: Admit typed owner issue before Desktop scheduling
+    if: ${{ github.event_name == 'issues' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      admitted: ${{ steps.admit.outputs.admitted }}
+      request_id: ${{ steps.admit.outputs.request_id }}
+      expected_head_sha: ${{ steps.admit.outputs.expected_head_sha }}
+      expected_rules_sha: ${{ steps.admit.outputs.expected_rules_sha }}
+      issue_id: ${{ steps.admit.outputs.issue_id }}
+      issue_number: ${{ steps.admit.outputs.issue_number }}
+    steps:
+      - name: Checkout trusted event source only
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 1
+      - name: Parse typed request and independently re-read issue and current sources
+        id: admit
+        run: python -B scripts/desktop_gitlab_capacity_admission.py
+
   capacity:
+    needs: [admission]
+    if: ${{ !cancelled() && ((github.event_name == 'workflow_dispatch' && needs.admission.result == 'skipped') || (github.event_name == 'issues' && needs.admission.result == 'success' && needs.admission.outputs.admitted == 'true')) }}
     name: Collect Desktop capacity through governed Gateway
+    concurrency:
+      group: desktop-gitlab-capacity-readonly
+      cancel-in-progress: false
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 5
     env:
-      EXPECTED_HEAD: ${{ inputs.expected_head_sha }}
-      EXPECTED_RULES: ${{ inputs.expected_rules_sha }}
+      EXPECTED_HEAD: ${{ inputs.expected_head_sha || needs.admission.outputs.expected_head_sha }}
+      EXPECTED_RULES: ${{ inputs.expected_rules_sha || needs.admission.outputs.expected_rules_sha }}
+      CAPACITY_REQUEST_ID: ${{ needs.admission.outputs.request_id }}
+      CAPACITY_ISSUE_ID: ${{ needs.admission.outputs.issue_id }}
+      CAPACITY_ISSUE_NUMBER: ${{ needs.admission.outputs.issue_number }}
       CORRELATION_ID: gitlab-capacity-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Require owner, current source, dedicated runner and read-only scope
@@ -44,7 +73,7 @@ jobs:
             const expected = String(process.env.EXPECTED_HEAD || '').toLowerCase();
             const rulesExpected = String(process.env.EXPECTED_RULES || '').toLowerCase();
             const shaPattern = /^[0-9a-f]{40}$/;
-            if (context.eventName !== 'workflow_dispatch' ||
+            if (!['workflow_dispatch', 'issues'].includes(context.eventName) ||
                 context.actor !== 'ericson-j-santos' ||
                 context.repo.owner !== 'ericson-j-santos' ||
                 context.repo.repo !== 'desktop-pc24x7-runtime' ||
@@ -52,7 +81,8 @@ jobs:
                 process.env.GITHUB_RUN_ATTEMPT !== '1' ||
                 process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
                 require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954' ||
-                context.payload.inputs?.scope !== 'READ_ONLY_CAPACITY_NO_INSTALL' ||
+                (context.eventName === 'workflow_dispatch' && context.payload.inputs?.scope !== 'READ_ONLY_CAPACITY_NO_INSTALL') ||
+                (context.eventName === 'issues' && (context.payload.action !== 'opened' || !process.env.CAPACITY_REQUEST_ID)) ||
                 !shaPattern.test(expected) || !shaPattern.test(rulesExpected) ||
                 context.sha !== expected) throw new Error('CAPACITY_SCOPE_OR_SHA_REJECTED');
             const {data: main} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
@@ -75,7 +105,7 @@ jobs:
       - name: Checkout exact Desktop source
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
-          ref: ${{ inputs.expected_head_sha }}
+          ref: ${{ env.EXPECTED_HEAD }}
           persist-credentials: false
           fetch-depth: 1
 
@@ -83,7 +113,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: ${{ inputs.expected_rules_sha }}
+          ref: ${{ env.EXPECTED_RULES }}
           path: _rules
           persist-credentials: false
           fetch-depth: 1
@@ -118,7 +148,9 @@ jobs:
           "session_id=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
           Write-Output 'CAPACITY_SESSION_LAUNCH_OK'
 
-      - name: Measure native CPU, RAM and disk through Command Gateway
+      - name: Consume issue request once in protected audit state through Gateway risk 2
+        id: claim
+        if: ${{ github.event_name == 'issues' }}
         shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
@@ -136,6 +168,45 @@ jobs:
           $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
           $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
           $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
+          $raw = @(& $python -B $gateway --policy $policy --correlation-id $env:CORRELATION_ID `
+            run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 60 `
+            --expected-head $env:EXPECTED_HEAD -- python -B scripts/desktop_gitlab_capacity_claim.py)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'AUDIT_CLAIM_BLOCKED' }
+          $event = @($raw)[-1] | ConvertFrom-Json
+          if ($event.result -ne 'ok' -or $event.command_exit_code -ne 0 -or $event.state_changed -ne $false) { throw 'AUDIT_CLAIM_GATEWAY_INVALID' }
+          $receipt = $event.stdout | ConvertFrom-Json
+          if ($receipt.claimed -ne $true -or $receipt.request_id -ne $env:CAPACITY_REQUEST_ID -or
+              $receipt.audit_state_changed -ne $true -or $receipt.configuration_changed -ne $false) { throw 'AUDIT_CLAIM_READBACK_INVALID' }
+          'claimed=true' | Add-Content $env:GITHUB_OUTPUT
+          Write-Output 'CAPACITY_REQUEST_CONSUMED_AT_MOST_ONCE'
+
+      - name: Measure native CPU, RAM and disk through Command Gateway
+        if: ${{ github.event_name == 'workflow_dispatch' || steps.claim.outputs.claimed == 'true' }}
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TARGET_PATH -or -not $env:SESSION_ID) { throw 'SESSION_OUTPUT_MISSING' }
+          $candidates = @(
+            (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'),
+            'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
+            'C:\Users\Windows\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          )
+          $python = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $python) { throw 'PINNED_PYTHON_NOT_FOUND' }
+          $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
+          $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
+          if ($env:GITHUB_EVENT_NAME -eq 'issues') {
+            $check = @(& $python -B $gateway --policy $policy --correlation-id $env:CORRELATION_ID `
+              run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 60 `
+              --expected-head $env:EXPECTED_HEAD -- python -B scripts/desktop_gitlab_capacity_admission.py --verify-only)
+            if ($LASTEXITCODE -ne 0 -or -not $check) { throw 'PRE_COLLECTION_ISSUE_CHANGED_OR_STALE' }
+            $verified = @($check)[-1] | ConvertFrom-Json
+            if ($verified.result -ne 'ok' -or $verified.command_exit_code -ne 0 -or $verified.state_changed -ne $false) { throw 'PRE_COLLECTION_ADMISSION_INVALID' }
+          }
           $raw = @(& $python -B $gateway --policy $policy --correlation-id $env:CORRELATION_ID `
             run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 40 `
             --expected-head $env:EXPECTED_HEAD -- `
@@ -169,6 +240,8 @@ jobs:
           ) | Add-Content $env:GITHUB_STEP_SUMMARY
 
   queue_watchdog:
+    needs: [admission]
+    if: ${{ !cancelled() && ((github.event_name == 'workflow_dispatch' && needs.admission.result == 'skipped') || (github.event_name == 'issues' && needs.admission.result == 'success' && needs.admission.outputs.admitted == 'true')) }}
     name: Stop a capacity probe that never gets a Desktop runner
     runs-on: ubuntu-latest
     timeout-minutes: 7
@@ -180,8 +253,9 @@ jobs:
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
-            if (context.eventName !== 'workflow_dispatch' ||
+            if (!['workflow_dispatch', 'issues'].includes(context.eventName) ||
                 context.actor !== 'ericson-j-santos' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1' ||
                 context.ref !== 'refs/heads/main' ||
                 context.repo.owner !== 'ericson-j-santos' ||
                 context.repo.repo !== 'desktop-pc24x7-runtime') {
