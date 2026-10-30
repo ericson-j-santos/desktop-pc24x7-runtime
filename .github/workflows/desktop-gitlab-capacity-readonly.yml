@@ -1,0 +1,215 @@
+name: Desktop GitLab capacity read-only preflight
+
+# A demanda e deliberada: este workflow NAO instala ou registra runners.
+on:
+  workflow_dispatch:
+    inputs:
+      expected_head_sha:
+        description: SHA completo e corrente da main do Desktop Runtime
+        required: true
+        type: string
+      expected_rules_sha:
+        description: SHA completo e corrente das regras operacionais
+        required: true
+        type: string
+      scope:
+        description: Confirmar leitura sem instalacao nem deploy
+        required: true
+        type: choice
+        options:
+          - READ_ONLY_CAPACITY_NO_INSTALL
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-gitlab-capacity-readonly
+  cancel-in-progress: false
+
+jobs:
+  capacity:
+    name: Collect Desktop capacity through governed Gateway
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
+    timeout-minutes: 5
+    env:
+      EXPECTED_HEAD: ${{ inputs.expected_head_sha }}
+      EXPECTED_RULES: ${{ inputs.expected_rules_sha }}
+      CORRELATION_ID: gitlab-capacity-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Require owner, current source, dedicated runner and read-only scope
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const expected = String(process.env.EXPECTED_HEAD || '').toLowerCase();
+            const rulesExpected = String(process.env.EXPECTED_RULES || '').toLowerCase();
+            const shaPattern = /^[0-9a-f]{40}$/;
+            if (context.eventName !== 'workflow_dispatch' ||
+                context.actor !== 'ericson-j-santos' ||
+                context.repo.owner !== 'ericson-j-santos' ||
+                context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                context.ref !== 'refs/heads/main' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime' ||
+                require('os').hostname().toUpperCase() !== 'DESKTOP-PDQK954' ||
+                context.payload.inputs?.scope !== 'READ_ONLY_CAPACITY_NO_INSTALL' ||
+                !shaPattern.test(expected) || !shaPattern.test(rulesExpected) ||
+                context.sha !== expected) throw new Error('CAPACITY_SCOPE_OR_SHA_REJECTED');
+            const {data: main} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
+            const {data: rules} = await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'
+            });
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo,run_id:context.runId,filter:'latest',per_page:100
+            });
+            const matches = jobs.jobs.filter(j=>j.name === 'Collect Desktop capacity through governed Gateway');
+            if (main.commit.sha !== expected || rules.commit.sha !== rulesExpected ||
+                jobs.total_count !== jobs.jobs.length || matches.length !== 1 ||
+                matches[0].runner_id !== 2 ||
+                matches[0].runner_name !== 'DESKTOP-PDQK954-runtime' ||
+                matches[0].status !== 'in_progress') {
+              throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
+            }
+            core.info('CAPACITY_READ_ONLY_ADMISSION_OK');
+
+      - name: Checkout exact Desktop source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.expected_head_sha }}
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout immutable current rules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ inputs.expected_rules_sha }}
+          path: _rules
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Materialize current SHA in a governed isolated worktree
+        id: session
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $candidates = @(
+            (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'),
+            'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
+            'C:\Users\Windows\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          )
+          $python = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $python) { throw 'PINNED_PYTHON_NOT_FOUND' }
+          $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $observed = (& git -C $rulesRoot rev-parse HEAD | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $observed -ne $env:EXPECTED_RULES) { throw 'RULES_SHA_MISMATCH' }
+          $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
+          $launcher = Join-Path $rulesRoot 'scripts\session_launcher.py'
+          $raw = @(& $python -B $launcher --policy $policy --repo $env:GITHUB_WORKSPACE `
+            --session-prefix gitlab-capacity --correlation-id $env:CORRELATION_ID `
+            --expected-head $env:EXPECTED_HEAD --sync-ref origin/main --require-runner-version-preflight)
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
+          $receipt = @($raw)[-1] | ConvertFrom-Json
+          if ($receipt.result -ne 'SESSION_LAUNCH_OK' -or $receipt.state_validated -ne $true -or
+              $receipt.head -ne $env:EXPECTED_HEAD -or $receipt.host -ne 'DESKTOP-PDQK954' -or
+              $receipt.runner_version_preflight.ok -ne $true) { throw 'SESSION_IDENTITY_NOT_VALIDATED' }
+          "target_path=$($receipt.target_path)" | Add-Content $env:GITHUB_OUTPUT
+          "session_id=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
+          Write-Output 'CAPACITY_SESSION_LAUNCH_OK'
+
+      - name: Measure native CPU, RAM and disk through Command Gateway
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TARGET_PATH -or -not $env:SESSION_ID) { throw 'SESSION_OUTPUT_MISSING' }
+          $candidates = @(
+            (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'),
+            'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
+            'C:\Users\Windows\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          )
+          $python = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $python) { throw 'PINNED_PYTHON_NOT_FOUND' }
+          $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
+          $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
+          $raw = @(& $python -B $gateway --policy $policy --correlation-id $env:CORRELATION_ID `
+            run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 40 `
+            --expected-head $env:EXPECTED_HEAD -- `
+            python -B scripts/desktop_gitlab_capacity_readonly.py `
+            --source-sha $env:EXPECTED_HEAD --correlation-id $env:CORRELATION_ID)
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0 -or -not $raw) { throw 'GATEWAY_READ_ONLY_EXECUTION_BLOCKED' }
+          $event = @($raw)[-1] | ConvertFrom-Json
+          if ($event.result -ne 'ok' -or $event.command_exit_code -ne 0 -or
+              $event.state_changed -ne $false) { throw 'GATEWAY_STATE_OR_RESULT_INVALID' }
+          $receipt = $event.stdout | ConvertFrom-Json
+          if ($receipt.type -ne 'desktop_gitlab_capacity_sample' -or
+              $receipt.host -ne 'DESKTOP-PDQK954' -or
+              $receipt.source_sha_claim -ne $env:EXPECTED_HEAD -or
+              $receipt.correlation_id -ne $env:CORRELATION_ID -or
+              $receipt.capacity_sample_complete -ne $true -or
+              $receipt.ready_for_gitlab_runner -ne $false -or
+              $receipt.configuration_changed -ne $false -or
+              $receipt.secrets_accessed -ne $false) { throw 'CAPACITY_SAMPLE_READBACK_INVALID' }
+          Write-Output ('CAPACITY_MEASURED_NOT_RUNNER_APPROVED ' + ($receipt | ConvertTo-Json -Compress -Depth 4))
+          @(
+            '## Desktop GitLab capacity — read-only',
+            "- Host: $($receipt.host)",
+            "- Repo SHA: $($receipt.source_sha_claim)",
+            "- Correlation: $($receipt.correlation_id)",
+            "- CPU sample: $($receipt.cpu_usage_percent)% (single sample)",
+            "- RAM available: $($receipt.memory_available_gib) GiB / $($receipt.memory_total_gib) GiB",
+            "- System disk available: $($receipt.disk_free_gib) GiB / $($receipt.disk_total_gib) GiB",
+            '- GitLab runner approved: **NO**; billing, isolation, sustained headroom and E2E are separate gates.',
+            '- No artifacts, service changes, installation, secrets, Docker or deployment.'
+          ) | Add-Content $env:GITHUB_STEP_SUMMARY
+
+  queue_watchdog:
+    name: Stop a capacity probe that never gets a Desktop runner
+    runs-on: ubuntu-latest
+    timeout-minutes: 7
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Cancel on missing or wrong physical pickup after bounded wait
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            if (context.eventName !== 'workflow_dispatch' ||
+                context.actor !== 'ericson-j-santos' ||
+                context.ref !== 'refs/heads/main' ||
+                context.repo.owner !== 'ericson-j-santos' ||
+                context.repo.repo !== 'desktop-pc24x7-runtime') {
+              throw new Error('WATCHDOG_SCOPE_REJECTED');
+            }
+            const anchor = Date.now();
+            const deadline = anchor + 300000;
+            const target = 'Collect Desktop capacity through governed Gateway';
+            while (true) {
+              const {data} = await github.rest.actions.listJobsForWorkflowRun({
+                ...context.repo,run_id:context.runId,filter:'latest',per_page:100
+              });
+              if (data.total_count !== data.jobs.length) throw new Error('JOB_LIST_INCOMPLETE');
+              const matches = data.jobs.filter(j=>j.name === target);
+              if (matches.length > 1) throw new Error('CAPACITY_JOB_NOT_UNIQUE');
+              const job = matches[0];
+              if (job && ['in_progress','completed'].includes(job.status)) {
+                if (job.runner_id === 2 && job.runner_name === 'DESKTOP-PDQK954-runtime' &&
+                    Boolean(job.started_at)) {
+                  core.info('CAPACITY_PHYSICAL_PICKUP_PROVEN');
+                  return;
+                }
+                await github.rest.actions.cancelWorkflowRun({...context.repo,run_id:context.runId});
+                throw new Error('CAPACITY_WRONG_OR_UNATTRIBUTED_RUNNER');
+              }
+              if (Date.now() >= deadline) {
+                await github.rest.actions.cancelWorkflowRun({...context.repo,run_id:context.runId});
+                throw new Error('CAPACITY_PHYSICAL_PICKUP_TIMEOUT_300S');
+              }
+              await new Promise(resolve=>setTimeout(resolve,15000));
+            }
