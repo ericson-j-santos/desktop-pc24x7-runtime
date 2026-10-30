@@ -1,7 +1,7 @@
 """Native Windows fixture gates; Linux skips are explicit, not Windows evidence.
 
-No production host collection or ACL repair. DACL mutations affect only fresh
-TemporaryDirectory fixtures and are restored before cleanup. Windows CI must
+No production host collection or ACL repair. DACL negative controls affect only
+fresh disposable fixtures and are restored before cleanup. Windows CI must
 execute these tests; API mocks are a separate test module.
 
 The hosted parent intentionally retains its incompatible Administrators default
@@ -17,11 +17,13 @@ import functools
 import importlib.util
 import json
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import subprocess
 import sys
 import unittest
+import uuid
 from unittest.mock import patch
 
 _NATIVE_CHILD = False
@@ -299,6 +301,122 @@ def fixture_owner_diagnostic(path):
         if token.value:
             kernel.CloseHandle(token)
 
+def verify_private_fixture_acl(path, *, directory):
+    """Read back the exact newly-created fixture ACL; never repair a mismatch."""
+    from ctypes import wintypes as w
+    p = ctypes.c_void_p
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.LocalFree.argtypes = [p]
+    advapi.GetNamedSecurityInfoW.argtypes = [w.LPWSTR, ctypes.c_int, w.DWORD, ctypes.POINTER(p), ctypes.POINTER(p), ctypes.POINTER(p), ctypes.POINTER(p), ctypes.POINTER(p)]
+    advapi.GetNamedSecurityInfoW.restype = w.DWORD
+    advapi.GetSecurityDescriptorControl.argtypes = [p, ctypes.POINTER(w.WORD), ctypes.POINTER(w.DWORD)]
+    advapi.GetSecurityDescriptorControl.restype = w.BOOL
+    advapi.GetAce.argtypes = [p, w.DWORD, ctypes.POINTER(p)]
+    advapi.GetAce.restype = w.BOOL
+    advapi.EqualSid.argtypes = [p, p]
+    advapi.EqualSid.restype = w.BOOL
+    advapi.IsWellKnownSid.argtypes = [p, ctypes.c_int]
+    advapi.IsWellKnownSid.restype = w.BOOL
+    token = FixtureToken()
+    try:
+        user = ctypes.create_string_buffer(bytes.fromhex(token.snapshot()["user"]))
+    finally:
+        token.close()
+    descriptor, owner, dacl = p(), p(), p()
+    before = m.ordinary(path, directory)
+    try:
+        if advapi.GetNamedSecurityInfoW(str(path), 1, 5, ctypes.byref(owner), None, ctypes.byref(dacl), None, ctypes.byref(descriptor)) != 0:
+            raise AssertionError("FIXTURE_SECURITY_READBACK_FAILED")
+        if not owner.value or not advapi.EqualSid(owner, user) or not dacl.value:
+            raise AssertionError("FIXTURE_OWNER_OR_DACL_INVALID")
+        control, revision = w.WORD(), w.DWORD()
+        if not advapi.GetSecurityDescriptorControl(descriptor, ctypes.byref(control), ctypes.byref(revision)):
+            raise AssertionError("FIXTURE_CONTROL_READBACK_FAILED")
+        if directory and not control.value & 0x1000:
+            raise AssertionError("FIXTURE_DACL_NOT_PROTECTED")
+        if int.from_bytes(ctypes.string_at(dacl, 8)[4:6], "little") != 3:
+            raise AssertionError("FIXTURE_ACE_COUNT_INVALID")
+        principals = []
+        for index in range(3):
+            ace = p()
+            if not advapi.GetAce(dacl, index, ctypes.byref(ace)):
+                raise AssertionError("FIXTURE_ACE_READBACK_FAILED")
+            header = ctypes.string_at(ace, 8)
+            if header[0] != 0 or header[1] != (3 if directory else 16) or int.from_bytes(header[2:4], "little") < 12 or int.from_bytes(header[4:8], "little") != 0x1F01FF:
+                raise AssertionError("FIXTURE_ACE_SHAPE_INVALID")
+            sid = p(ace.value + 8)
+            if advapi.EqualSid(sid, user):
+                principals.append("current_user")
+            elif advapi.IsWellKnownSid(sid, 22):
+                principals.append("system")
+            elif advapi.IsWellKnownSid(sid, 26):
+                principals.append("administrators")
+            else:
+                raise AssertionError("FIXTURE_UNEXPECTED_PRINCIPAL")
+        if sorted(principals) != ["administrators", "current_user", "system"]:
+            raise AssertionError("FIXTURE_PRINCIPALS_INVALID")
+        after = m.ordinary(path, directory)
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise AssertionError("FIXTURE_IDENTITY_CHANGED")
+    finally:
+        if descriptor.value:
+            kernel.LocalFree(descriptor)
+
+@contextlib.contextmanager
+def new_private_native_fixture():
+    """Create a NEW root with explicit user/SYSTEM/Admin ACL; no existing ACL edit."""
+    from ctypes import wintypes as w
+    p = ctypes.c_void_p
+    class SecurityAttributes(ctypes.Structure):
+        _fields_ = [("length", w.DWORD), ("descriptor", p), ("inherit_handle", w.BOOL)]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel.CreateDirectoryW.argtypes = [w.LPCWSTR, ctypes.POINTER(SecurityAttributes)]
+    kernel.CreateDirectoryW.restype = w.BOOL
+    kernel.LocalFree.argtypes = [p]
+    advapi.ConvertSidToStringSidW.argtypes = [p, ctypes.POINTER(w.LPWSTR)]
+    advapi.ConvertSidToStringSidW.restype = w.BOOL
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [w.LPCWSTR, w.DWORD, ctypes.POINTER(p), ctypes.POINTER(w.DWORD)]
+    advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = w.BOOL
+    token = FixtureToken()
+    try:
+        user = ctypes.create_string_buffer(bytes.fromhex(token.snapshot()["user"]))
+    finally:
+        token.close()
+    user_string, descriptor = w.LPWSTR(), p()
+    root = Path(tempfile.gettempdir()) / ("capacity-native-" + uuid.uuid4().hex)
+    created = False
+    try:
+        if not advapi.ConvertSidToStringSidW(user, ctypes.byref(user_string)):
+            raise AssertionError("FIXTURE_USER_SID_ENCODING_FAILED")
+        sddl = "D:P(A;OICI;FA;;;" + user_string.value + ")(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+        if not advapi.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(descriptor), None):
+            raise AssertionError("FIXTURE_PRIVATE_DESCRIPTOR_FAILED")
+        attributes = SecurityAttributes(ctypes.sizeof(SecurityAttributes), descriptor, False)
+        # A collision or denied creation fails closed; never reuse/repair a path.
+        if not kernel.CreateDirectoryW(str(root), ctypes.byref(attributes)):
+            raise AssertionError("FIXTURE_EXCLUSIVE_CREATION_FAILED")
+        created = True
+        verify_private_fixture_acl(root, directory=True)
+        probe = root / "inheritance-probe.tmp"
+        fd = os.open(probe, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o600)
+        try:
+            os.close(fd)
+            verify_private_fixture_acl(probe, directory=False)
+        finally:
+            probe.unlink()
+        yield root
+    finally:
+        try:
+            if created:
+                shutil.rmtree(root)
+        finally:
+            if descriptor.value:
+                kernel.LocalFree(descriptor)
+            if user_string:
+                kernel.LocalFree(ctypes.cast(user_string, p))
+
 @contextlib.contextmanager
 def fixture_dacl(path, *, null=False):
     """Change only the caller's disposable fixture DACL, preserving its owner."""
@@ -353,9 +471,7 @@ class NativeWindowsClaimTests(unittest.TestCase):
     def setUp(self):
         if not _NATIVE_CHILD:
             return
-        self.tmp = tempfile.TemporaryDirectory(prefix="capacity-native-")
-        self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = self.enterContext(new_private_native_fixture())
         # Every negative control first proves an admissible real native baseline.
         try:
             with m.windows_private_root(self.root):
@@ -363,16 +479,13 @@ class NativeWindowsClaimTests(unittest.TestCase):
         except m.ClaimError as error:
             raise AssertionError(str(error) + "; " + fixture_owner_diagnostic(self.root)) from error
 
-    def tearDown(self):
-        if _NATIVE_CHILD:
-            self.tmp.cleanup()
-
     @isolated_native_test
     def test_native_bindings_private_claim_and_replay(self):
         receipt = m.claim(self.root, META)
         self.assertTrue(receipt["claimed"])
         self.assertTrue(receipt["audit_state_changed"])
         self.assertFalse(receipt["configuration_changed"])
+        verify_private_fixture_acl(self.root / ("desktop-capacity-" + META["request_id"] + ".claim.json"), directory=False)
         with self.assertRaisesRegex(m.ClaimError, "REQUEST_ALREADY_CONSUMED"):
             m.claim(self.root, META)
 
@@ -435,8 +548,8 @@ if __name__ == "__main__":
         _NATIVE_CHILD = True
         with isolated_owner_context(json.loads(sys.argv[3])):
             result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite([NativeWindowsClaimTests(name)]))
+        print("CAPACITY_NATIVE_RECEIPT " + json.dumps({"test": name, "tests_run": result.testsRun, "skipped": len(result.skipped), "successful": result.wasSuccessful(), "token_isolated": True, "owner_restored": True, "security_invariants": True}, sort_keys=True))
         if not result.wasSuccessful() or result.testsRun != 1 or result.skipped:
             raise SystemExit(1)
-        print("CAPACITY_NATIVE_RECEIPT " + json.dumps({"test": name, "tests_run": result.testsRun, "skipped": len(result.skipped), "successful": True, "token_isolated": True, "owner_restored": True, "security_invariants": True}, sort_keys=True))
     else:
         unittest.main()
