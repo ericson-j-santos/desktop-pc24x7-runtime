@@ -136,10 +136,10 @@ class WorkflowStaticTests(unittest.TestCase):
         cls.text = WORKFLOW.read_text(encoding="utf-8")
         cls.data = yaml.load(cls.text, Loader=yaml.BaseLoader)
 
-    def test_only_manual_trigger_no_workflow_data_upload(self):
+    def test_only_owner_requests_or_manual_trigger_no_workflow_data_upload(self):
         data = self.data
-        self.assertEqual(set(data["on"]), {"workflow_dispatch"})
-        self.assertEqual(set(data["jobs"]), {"capacity", "queue_watchdog"})
+        self.assertEqual(set(data["on"]), {"workflow_dispatch", "issues"})
+        self.assertEqual(set(data["jobs"]), {"admission", "capacity", "queue_watchdog"})
         self.assertNotIn("upload-artifact", self.text)
         self.assertNotIn("docker run", self.text.lower())
         self.assertNotIn("gitlab-runner register", self.text.lower())
@@ -153,7 +153,7 @@ class WorkflowStaticTests(unittest.TestCase):
         self.assertEqual(runs_on, ["self-hosted", "Windows", "X64", "pc24x7", "desktop-runtime", "runtime-dev", "desktop-pdqk954"])
         for marker in (
             "context.actor !== 'ericson-j-santos'", "context.ref !== 'refs/heads/main'",
-            "context.eventName !== 'workflow_dispatch'", "context.sha !== expected",
+            "['workflow_dispatch', 'issues'].includes(context.eventName)", "context.sha !== expected",
             "matches[0].runner_id !== 2", "process.env.RUNNER_NAME !== 'DESKTOP-PDQK954-runtime'",
             "rules.commit.sha !== rulesExpected", "main.commit.sha !== expected",
         ):
