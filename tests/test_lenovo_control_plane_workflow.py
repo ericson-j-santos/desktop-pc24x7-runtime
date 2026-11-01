@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib.util
 import json
 import subprocess
@@ -149,3 +151,99 @@ def test_prove_invokes_only_fixed_gateway_without_shell(
     assert command[command.index("--") + 1] == sys.executable
     assert command[command.index("--") + 1] != "python"
     assert observed["kwargs"]["shell"] is False
+
+
+def _valid_probe_report(sha: str) -> dict:
+    return {
+        "ok": True,
+        "result": "LENOVO_CONTROL_PLANE_PICKUP_PROVEN",
+        "host": m.EXPECTED_HOST,
+        "runner_name": m.EXPECTED_RUNNER,
+        "source_sha": sha,
+        "github_run_id": "123",
+        "github_run_attempt": "2",
+        "task_runtime": {"state": 4, "enabled": True, "working_directory": "private"},
+        "runner_pids": [1234],
+        "watchdog_runner_status": "process_running",
+        "rdc_required": False,
+        "credentials_created": False,
+        "production_touched": False,
+        "reboot_performed": False,
+        "private_path": "must-not-be-exported",
+    }
+
+
+def test_emit_receipt_sanitizes_and_hashes_only_successful_gateway_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sha = "a" * 40
+    valid_env(monkeypatch, tmp_path, sha)
+    _, target = create_governed_files(tmp_path)
+    monkeypatch.setenv("ANCHOR_SHA", sha)
+    monkeypatch.setenv("RULES_SHA", "b" * 40)
+    monkeypatch.setenv("TARGET_PATH", str(target))
+    monkeypatch.setenv("SESSION_ID", "session-123")
+    dest = target / "artifacts" / "lenovo-control-plane-pickup" / "evidence.json"
+    dest.parent.mkdir(parents=True)
+    dest.write_text(json.dumps(_valid_probe_report(sha)), encoding="utf-8")
+    m.emit_receipt()
+    output = dict(line.split("=", 1) for line in
+                  (tmp_path / "outputs.txt").read_text(encoding="utf-8").splitlines())
+    assert set(output) == {"receipt_b64", "receipt_sha256"}
+    raw = base64.b64decode(output["receipt_b64"], validate=True)
+    assert hashlib.sha256(raw).hexdigest() == output["receipt_sha256"]
+    report = json.loads(raw)
+    assert report["source_sha"] == sha
+    assert report["rules_sha"] == "b" * 40
+    assert report["gateway_ok"] is True
+    assert report["run_id"] == "123" and report["run_attempt"] == "2"
+    assert report["session_id"] == "session-123"
+    assert report["credentials_created"] is False
+    assert "private_path" not in report and "task_runtime" not in report
+    assert b"must-not-be-exported" not in raw
+
+
+@pytest.mark.parametrize("change", [
+    {"source_sha": "c" * 40},
+    {"credentials_created": True},
+    {"runner_pids": []},
+    {"host": "DESKTOP-PDQK954"},
+    {"task_runtime": {"state": 3, "enabled": True}},
+    {"ok": False},
+])
+def test_emit_receipt_blocks_unverified_claims(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, change: dict
+) -> None:
+    sha = "a" * 40
+    valid_env(monkeypatch, tmp_path, sha)
+    _, target = create_governed_files(tmp_path)
+    monkeypatch.setenv("ANCHOR_SHA", sha)
+    monkeypatch.setenv("RULES_SHA", "b" * 40)
+    monkeypatch.setenv("TARGET_PATH", str(target))
+    monkeypatch.setenv("SESSION_ID", "session-123")
+    dest = target / "artifacts" / "lenovo-control-plane-pickup" / "evidence.json"
+    dest.parent.mkdir(parents=True)
+    dest.write_text(json.dumps({**_valid_probe_report(sha), **change}), encoding="utf-8")
+    with pytest.raises(m.WorkflowBlocked, match="lenovo_receipt_contract_invalid"):
+        m.emit_receipt()
+    assert not (tmp_path / "outputs.txt").exists()
+
+
+def test_emit_receipt_rejects_missing_and_oversized_evidence(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    sha = "a" * 40
+    valid_env(monkeypatch, tmp_path, sha)
+    _, target = create_governed_files(tmp_path)
+    monkeypatch.setenv("ANCHOR_SHA", sha)
+    monkeypatch.setenv("RULES_SHA", "b" * 40)
+    monkeypatch.setenv("TARGET_PATH", str(target))
+    monkeypatch.setenv("SESSION_ID", "session-123")
+    with pytest.raises(m.WorkflowBlocked, match="lenovo_receipt_path_invalid"):
+        m.emit_receipt()
+    dest = target / "artifacts" / "lenovo-control-plane-pickup" / "evidence.json"
+    dest.parent.mkdir(parents=True)
+    dest.write_bytes(b"x" * 9000)
+    with pytest.raises(m.WorkflowBlocked, match="lenovo_receipt_size_invalid"):
+        m.emit_receipt()
+    assert not (tmp_path / "outputs.txt").exists()

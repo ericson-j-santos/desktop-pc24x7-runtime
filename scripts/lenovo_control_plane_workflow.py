@@ -2,6 +2,8 @@
 """Fixed GitHub Actions orchestration for the Lenovo control-plane pickup."""
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
@@ -192,3 +194,80 @@ def prove() -> None:
     completed = subprocess.run(command, timeout=90, check=False, shell=False)
     if completed.returncode != 0:
         raise WorkflowBlocked(f"command_gateway_exit_{completed.returncode}")
+
+
+def emit_receipt() -> None:
+    """After a successful Gateway probe, publish only allowlisted, nonsecret facts."""
+    _, source_sha, correlation_id = _admit_identity()
+    if _require_sha(_required_env("ANCHOR_SHA"), "anchor_sha_invalid") != source_sha:
+        raise WorkflowBlocked("anchor_sha_mismatch")
+    target = Path(_required_env("TARGET_PATH")).resolve()
+    path = target / "artifacts" / "lenovo-control-plane-pickup" / "evidence.json"
+    if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(target):
+        raise WorkflowBlocked("lenovo_receipt_path_invalid")
+    try:
+        size = path.stat().st_size
+        if not 100 <= size <= 8192:
+            raise WorkflowBlocked("lenovo_receipt_size_invalid")
+        raw = path.read_bytes()
+        if len(raw) != size:
+            raise WorkflowBlocked("lenovo_receipt_changed")
+        report = json.loads(raw.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise WorkflowBlocked("lenovo_receipt_read_blocked") from exc
+    if not isinstance(report, dict):
+        raise WorkflowBlocked("lenovo_receipt_invalid")
+    run_id = _required_env("GITHUB_RUN_ID")
+    attempt = _required_env("GITHUB_RUN_ATTEMPT")
+    if (not run_id.isascii() or not run_id.isdecimal() or int(run_id) < 1
+            or not attempt.isascii() or not attempt.isdecimal() or int(attempt) < 1):
+        raise WorkflowBlocked("lenovo_receipt_run_invalid")
+    task_runtime = report.get("task_runtime")
+    pids = report.get("runner_pids")
+    if (report.get("ok") is not True
+            or report.get("result") != "LENOVO_CONTROL_PLANE_PICKUP_PROVEN"
+            or report.get("host") != EXPECTED_HOST
+            or report.get("runner_name") != EXPECTED_RUNNER
+            or report.get("source_sha") != source_sha
+            or report.get("github_run_id") != run_id
+            or report.get("github_run_attempt") != attempt
+            or report.get("credentials_created") is not False
+            or report.get("production_touched") is not False
+            or report.get("reboot_performed") is not False
+            or report.get("rdc_required") is not False
+            or report.get("watchdog_runner_status") not in ("process_running", "recovered")
+            or not isinstance(task_runtime, dict)
+            or task_runtime.get("state") != 4
+            or task_runtime.get("enabled") is not True
+            or not isinstance(pids, list) or len(pids) != 1
+            or type(pids[0]) is not int or pids[0] < 1):
+        raise WorkflowBlocked("lenovo_receipt_contract_invalid")
+    session_id = _required_env("SESSION_ID")
+    rules_sha = _require_sha(_required_env("RULES_SHA"), "rules_sha_invalid")
+    receipt = {
+        "contract": "lenovo-pickup-job-output-v1",
+        "ok": True,
+        "result": "LENOVO_CONTROL_PLANE_PICKUP_PROVEN",
+        "host": EXPECTED_HOST,
+        "runner_name": EXPECTED_RUNNER,
+        "source_sha": source_sha,
+        "rules_sha": rules_sha,
+        "run_id": run_id,
+        "run_attempt": attempt,
+        "session_id": session_id,
+        "correlation_id": correlation_id,
+        "session_result": "SESSION_LAUNCH_OK",
+        "state_validated": True,
+        "gateway_ok": True,
+        "watchdog_runner_status": report["watchdog_runner_status"],
+        "runner_process_count": 1,
+        "credentials_created": False,
+        "production_touched": False,
+        "reboot_performed": False,
+    }
+    data = json.dumps(receipt, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(data) > 8192:
+        raise WorkflowBlocked("lenovo_receipt_projection_oversized")
+    _write_output("receipt_b64", base64.b64encode(data).decode("ascii"))
+    _write_output("receipt_sha256", hashlib.sha256(data).hexdigest())
+    print("LENOVO_RECEIPT_OUTPUT_READY")
