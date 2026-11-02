@@ -2,12 +2,12 @@
 """Broker administrativo governado do Desktop PC24x7 Runtime.
 
 Canal outbound-only:
-- consulta somente a issue operacional #2 do reposit�rio desktop-pc24x7-runtime;
-- aceita somente coment�rios exatos do owner;
-- n�o abre porta de rede local;
-- n�o aceita shell, caminho, execut�vel, host ou argumento arbitr�rio;
+- consulta somente a issue operacional #2 do repositório desktop-pc24x7-runtime;
+- aceita somente comentários exatos do owner;
+- não abre porta de rede local;
+- não aceita shell, caminho, executável, host ou argumento arbitrário;
 - executa somente handlers versionados e idempotentes;
-- nesta etapa n�o ativa/substitui o watchdog legado.
+- nesta etapa não ativa/substitui o watchdog legado.
 """
 from __future__ import annotations
 
@@ -92,26 +92,26 @@ def now_iso() -> str:
 
 def require_windows_desktop() -> str:
     if os.name != "nt":
-        raise BrokerError("Windows obrigat�rio")
+        raise BrokerError("Windows obrigatório")
     host = socket.gethostname()
     # The pinned Desktop remains authorized even when a legacy updater staged
     # a release without pc24x7_host_policy.py; every other host fails closed.
     if host.casefold() != EXPECTED_HOST.casefold():
-        raise BrokerError("host n�o autorizado: " + host)
+        raise BrokerError("host não autorizado: " + host)
     return host
 
 
 def validate_sha(value: str) -> str:
     value = value.strip().lower()
     if len(value) != 40 or any(ch not in "0123456789abcdef" for ch in value):
-        raise BrokerError("source_sha inv�lido")
+        raise BrokerError("source_sha inválido")
     return value
 
 
 def default_runtime_root() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     if not base:
-        raise BrokerError("LOCALAPPDATA n�o definido")
+        raise BrokerError("LOCALAPPDATA não definido")
     return Path(base) / "DesktopPC24x7" / "AdminBroker"
 
 
@@ -281,7 +281,7 @@ def fetch_comments(since: datetime, timeout_seconds: float = 20.0) -> list[dict[
     with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
         payload = json.loads(response.read().decode("utf-8"))
     if not isinstance(payload, list):
-        raise BrokerError("resposta GitHub inv�lida")
+        raise BrokerError("resposta GitHub inválida")
     return [item for item in payload if isinstance(item, dict)]
 
 
@@ -290,7 +290,7 @@ def _load_module(path: Path, name: str):
         raise BrokerError(f"script governado ausente: {path.name}")
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
-        raise BrokerError(f"script governado n�o carreg�vel: {path.name}")
+        raise BrokerError(f"script governado não carregável: {path.name}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -299,7 +299,7 @@ def _load_module(path: Path, name: str):
 def watchdog_runtime_metadata() -> Path:
     base = os.environ.get("LOCALAPPDATA")
     if not base:
-        raise BrokerError("LOCALAPPDATA n�o definido")
+        raise BrokerError("LOCALAPPDATA não definido")
     return Path(base) / "DesktopPC24x7" / "ControlPlaneWatchdog" / "metadata.json"
 
 
@@ -348,9 +348,9 @@ def _ensure_watchdog_staged(metadata: dict[str, Any]) -> tuple[Any, Path]:
             confirm=staged.CONFIRM,
         )
         if result.get("ok") is not True and result.get("activation_pending") is not True:
-            raise BrokerError("watchdog n�o p�de ser preparado")
+            raise BrokerError("watchdog não pôde ser preparado")
     if not target.is_file():
-        raise BrokerError("metadata do watchdog n�o foi criada")
+        raise BrokerError("metadata do watchdog não foi criada")
     return staged, target
 
 
@@ -372,7 +372,7 @@ def _activate_watchdog(metadata: dict[str, Any]) -> dict[str, Any]:
         except ValueError:
             pass
     if result.get("ok") is not True:
-        raise BrokerError("ativa��o governada do watchdog n�o concluiu")
+        raise BrokerError("ativação governada do watchdog não concluiu")
     return {
         "handler": "activate-watchdog",
         "watchdog_result": result.get("result"),
@@ -471,7 +471,7 @@ def _recover_rdc(metadata: dict[str, Any], correlation_id: str) -> dict[str, Any
     )
     payload = json.loads(evidence.read_text(encoding="utf-8")) if evidence.is_file() else {}
     if completed.returncode != 0 or payload.get("ok") is not True:
-        raise BrokerError("recupera��o governada do RDC falhou")
+        raise BrokerError("recuperação governada do RDC falhou")
     return {
         "handler": "recover-rdc",
         "mode": payload.get("mode"),
@@ -665,7 +665,7 @@ def _reconcile_activation_metadata_file(
     launcher: Path,
     expected_sha: str | None = None,
 ) -> dict[str, Any]:
-    """Reconcilia o fallback sem manter metadata.lock durante I/O f�sico."""
+    """Reconcilia o fallback sem manter metadata.lock durante I/O físico."""
     for _attempt in range(3):
         base = load_installed_metadata(metadata_path)["metadata"]
         if expected_sha is not None:
@@ -852,7 +852,7 @@ def _heartbeat_path(metadata: dict[str, Any]) -> Path:
 
 
 def _write_heartbeat(metadata: dict[str, Any], **updates: Any) -> dict[str, Any]:
-    """Persiste um readback sanitizado para provar que o broker est� vivo."""
+    """Persiste um readback sanitizado para provar que o broker está vivo."""
     path = _heartbeat_path(metadata)
     payload: dict[str, Any] = {}
     if path.is_file():
@@ -977,7 +977,7 @@ def _enable_windows_privilege(name: str) -> bool:
         _fields_ = (("PrivilegeCount", wintypes.DWORD), ("Luid", LUID),
                     ("Attributes", wintypes.DWORD))
 
-    token=[REDACTED]
+    token = wintypes.HANDLE()
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     if not advapi32.OpenProcessToken(
@@ -1080,4 +1080,944 @@ def _qualify_orchestrator_runner_acl(
     """Capture an exact private backup and return only bounded public evidence."""
     require_windows_desktop()
     runtime_root = Path(metadata["runtime_root"])
-    evidenc
+    evidence = runtime_root / "private-evidence" / f"{correlation_id}.orchestrator-runner-acl.json"
+    if evidence.is_file():
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        if (
+            payload.get("schema") == "desktop-orchestrator-runner-acl-qualification/v1"
+            and payload.get("correlation_id") == correlation_id
+            and payload.get("completed") is True
+            and isinstance(payload.get("public_result"), dict)
+        ):
+            return {**payload["public_result"], "reused": True}
+
+    backup_privilege = _enable_windows_privilege("SeBackupPrivilege")
+    security_backup: dict[str, Any] = {}
+    public_targets: dict[str, Any] = {}
+    for key, path in _fixed_orchestrator_runner_targets().items():
+        status, sddl = _read_named_security_descriptor(path)
+        security_backup[key] = {"status": status, "sddl": sddl}
+        public_targets[key] = {
+            "status": status,
+            "descriptor_sha256": hashlib.sha256(sddl.encode("utf-8")).hexdigest() if sddl else None,
+        }
+
+    task_backup: dict[str, Any] = {}
+    public_tasks: dict[str, Any] = {}
+    for key, task_name in {
+        "runtime_watchdog": r"\Automation\DesktopPc24x7RuntimeWatchdog",
+        "runtime_health_supervisor": r"\Automation\DesktopPc24x7RuntimeHealthSupervisor",
+        "admin_broker": r"\Automation\DesktopPc24x7AdminBroker",
+    }.items():
+        status, xml = _query_fixed_task_xml(task_name)
+        task_backup[key] = {"status": status, "xml": xml}
+        public_tasks[key] = {
+            "status": status,
+            "xml_sha256": hashlib.sha256(xml.encode("utf-8")).hexdigest() if xml else None,
+        }
+
+    complete = all(item["status"] == "observed" for item in public_targets.values())
+    public_result = {
+        "handler": "qualify-orchestrator-runner-acl",
+        "state": "qualified" if complete else "incomplete",
+        "reused": False,
+        "receipt": evidence.name,
+        "backup_privilege_enabled": backup_privilege,
+        "targets": public_targets,
+        "tasks": public_tasks,
+        "private_material_published": False,
+        "acl_changed": False,
+        "task_changed": False,
+        "runner_started": False,
+    }
+    payload = {
+        "schema": "desktop-orchestrator-runner-acl-qualification/v1",
+        "correlation_id": correlation_id,
+        "source_sha": validate_sha(str(metadata["source_sha"])),
+        "completed": True,
+        "captured_at": now_iso(),
+        "security_backup": security_backup,
+        "task_backup": task_backup,
+        "public_result": public_result,
+    }
+    atomic_json(evidence, payload)
+    return public_result
+
+
+def execute_action(action: str, metadata: dict[str, Any], comment_id: int) -> dict[str, Any]:
+    correlation_id = f"desktop-admin-gh-comment-{comment_id}"
+    if action == "status":
+        result = _status(metadata)
+    elif action == "recover-rdc":
+        result = _recover_rdc(metadata, correlation_id)
+    elif action == "recover-runner":
+        result = _recover_runner(metadata)
+    elif action == "recover-control-plane":
+        result = _recover_control_plane(metadata)
+    elif action == "activate-watchdog":
+        result = _activate_watchdog(metadata)
+    elif action == "refresh-self":
+        result = _self_refresh(metadata)
+    elif action == "windows-component-health":
+        result = _windows_component_health(metadata, correlation_id)
+    elif action == "qualify-orchestrator-runner-acl":
+        result = _qualify_orchestrator_runner_acl(metadata, correlation_id)
+    else:
+        raise BrokerError("action_id não allowlisted")
+    return {
+        "ok": True,
+        "action": action,
+        "comment_id": comment_id,
+        "correlation_id": correlation_id,
+        "result": result,
+        "production_touched": False,
+        "secrets_read": False,
+        "reboot_performed": False,
+        "completed_at": now_iso(),
+    }
+
+
+def state_path(metadata: dict[str, Any]) -> Path:
+    return Path(metadata["runtime_root"]) / "state.json"
+
+
+def load_state(metadata: dict[str, Any]) -> dict[str, Any]:
+    path = state_path(metadata)
+    if not path.is_file():
+        return {
+            "last_seen_comment_id": 0,
+            "last_seen_at": metadata["not_before"],
+        }
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise BrokerError("state inválido")
+    return payload
+
+
+def process_once(metadata: dict[str, Any], *, reference_time: datetime | None = None) -> dict[str, Any]:
+    state = load_state(metadata)
+    not_before = parse_github_time(metadata["not_before"])
+    since = parse_github_time(str(state.get("last_seen_at") or metadata["not_before"]))
+    last_seen = int(state.get("last_seen_comment_id") or 0)
+    comments = sorted(fetch_comments(since), key=lambda item: int(item.get("id") or 0))
+    accepted = 0
+    restart_requested = False
+    for comment in comments:
+        comment_id = int(comment.get("id") or 0)
+        if comment_id <= last_seen:
+            continue
+        created = parse_github_time(str(comment.get("created_at") or metadata["not_before"]))
+        action = authorize_comment(
+            comment,
+            not_before=not_before,
+            reference_time=reference_time,
+        )
+        state["last_seen_comment_id"] = comment_id
+        state["last_seen_at"] = created.isoformat()
+        state["observed_at"] = now_iso()
+        if action is None:
+            atomic_json(state_path(metadata), state)
+            last_seen = comment_id
+            continue
+        state["accepted"] = {
+            "comment_id": comment_id,
+            "action": action,
+            "status": "inflight",
+            "accepted_at": now_iso(),
+        }
+        atomic_json(state_path(metadata), state)
+        try:
+            outcome = execute_action(action, metadata, comment_id)
+            state["accepted"] = {
+                "comment_id": comment_id,
+                "action": action,
+                "status": "completed",
+                "outcome": outcome,
+            }
+        except Exception as exc:
+            error_code = type(exc).__name__
+            if isinstance(exc, BrokerError):
+                controlled = str(exc).strip()
+                if controlled and len(controlled) <= 120 and all(
+                    ch.isalnum() or ch in "_:-" for ch in controlled
+                ):
+                    error_code = controlled
+            state["accepted"] = {
+                "comment_id": comment_id,
+                "action": action,
+                "status": "failed",
+                "error_code": error_code,
+            }
+        state["observed_at"] = now_iso()
+        atomic_json(state_path(metadata), state)
+        state["readback"] = _publish_readback(metadata, state["accepted"])
+        state["observed_at"] = now_iso()
+        atomic_json(state_path(metadata), state)
+        accepted += 1
+        last_seen = comment_id
+        if action == "refresh-self" and state["accepted"].get("status") == "completed":
+            refresh = state["accepted"].get("outcome", {}).get("result", {})
+            if refresh.get("refresh_state") == "updated":
+                restart_requested = refresh.get("new_broker_started") is True
+                break
+    return {
+        "ok": True,
+        "comments_seen": len(comments),
+        "commands_accepted": accepted,
+        "last_seen_comment_id": last_seen,
+        "restart_requested": restart_requested,
+    }
+
+
+def _lock_contention(exc: OSError) -> bool:
+    if os.name == "nt":
+        winerror = getattr(exc, "winerror", None)
+        if winerror is not None:
+            return winerror in {32, 33}
+    return exc.errno in {errno.EACCES, errno.EAGAIN}
+
+
+def _try_lock_broker_file(handle: Any) -> bool:
+    handle.seek(0)
+    try:
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if _lock_contention(exc):
+            return False
+        raise BrokerError("broker_lock_failed") from exc
+    return True
+
+
+def _acquire_file_lock(
+    runtime_root: Path,
+    *,
+    lock_file: str,
+    timeout_seconds: float = BROKER_LOCK_TIMEOUT_SECONDS,
+    poll_seconds: float = BROKER_LOCK_POLL_SECONDS,
+    timeout_error: str = "broker_lock_timeout",
+) -> Any:
+    path = runtime_root / lock_file
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        handle = path.open("a+b")
+    except OSError as exc:
+        raise BrokerError("broker_lock_open_failed") from exc
+    try:
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"0")
+            handle.flush()
+        deadline = time.monotonic() + max(0.0, timeout_seconds)
+        while True:
+            if _try_lock_broker_file(handle):
+                return handle
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BrokerError(timeout_error)
+            time.sleep(min(max(0.01, poll_seconds), remaining))
+    except Exception:
+        handle.close()
+        raise
+
+
+def _acquire_broker_lock(
+    runtime_root: Path,
+    *,
+    timeout_seconds: float = BROKER_LOCK_TIMEOUT_SECONDS,
+    poll_seconds: float = BROKER_LOCK_POLL_SECONDS,
+) -> Any:
+    return _acquire_file_lock(
+        runtime_root,
+        lock_file=BROKER_LOCK_FILE,
+        timeout_seconds=timeout_seconds,
+        poll_seconds=poll_seconds,
+    )
+
+
+def _acquire_metadata_lock(metadata_path: Path) -> Any:
+    return _acquire_file_lock(
+        metadata_path.parent,
+        lock_file=METADATA_LOCK_FILE,
+        timeout_seconds=METADATA_LOCK_TIMEOUT_SECONDS,
+        poll_seconds=BROKER_LOCK_POLL_SECONDS,
+        timeout_error="metadata_lock_timeout",
+    )
+
+
+def _release_broker_lock(handle: Any) -> None:
+    try:
+        handle.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+    finally:
+        handle.close()
+
+
+def watch(metadata_path: Path) -> int:
+    installation = load_installed_metadata(metadata_path)
+    lock_handle = _acquire_broker_lock(installation["runtime_root"])
+    try:
+        metadata = load_installed_metadata(metadata_path)["metadata"]
+        _write_heartbeat(metadata, status="running", started_at=now_iso())
+        persisted_elevated = _elevated_task_proven(metadata)
+        try:
+            physical_task_ready = persisted_elevated and task_ready(task_status())
+        except Exception:
+            physical_task_ready = False
+        lock_owner_was_degraded = not physical_task_ready
+        while True:
+            metadata = load_installed_metadata(metadata_path)["metadata"]
+            interval = max(
+                30,
+                min(int(metadata.get("poll_seconds") or DEFAULT_POLL_SECONDS), 300),
+            )
+            try:
+                _write_heartbeat(metadata, status="running", last_cycle_started_at=now_iso())
+                if lock_owner_was_degraded and _elevated_task_proven(metadata):
+                    if task_ready(task_status()):
+                        _write_heartbeat(
+                            metadata,
+                            status="handoff_to_elevated_task",
+                            stopped_at=now_iso(),
+                        )
+                        return 0
+                    metadata = _reconcile_activation_metadata_file(
+                        metadata_path,
+                        python_executable=installation["python_executable"],
+                        launcher=installation["launcher"],
+                    )
+                cycle = process_once(metadata)
+                _write_heartbeat(
+                    metadata,
+                    status="running",
+                    last_cycle_completed_at=now_iso(),
+                    last_cycle_ok=True,
+                )
+                if cycle.get("restart_requested") is True:
+                    _write_heartbeat(
+                        metadata,
+                        status="handoff_after_refresh",
+                        stopped_at=now_iso(),
+                    )
+                    return 0
+            except Exception as exc:
+                state = load_state(metadata)
+                state["broker_error"] = {
+                    "error": str(exc)[:1000],
+                    "error_type": type(exc).__name__,
+                    "observed_at": now_iso(),
+                }
+                atomic_json(state_path(metadata), state)
+                _write_heartbeat(
+                    metadata,
+                    status="degraded_retrying",
+                    last_error_code=type(exc).__name__,
+                )
+            deadline = time.monotonic() + interval
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                _write_heartbeat(metadata, status="running")
+                time.sleep(min(BROKER_HEARTBEAT_INTERVAL_SECONDS, remaining))
+    finally:
+        try:
+            _write_heartbeat(
+                metadata,
+                status="stopped",
+                stopped_at=now_iso(),
+            )
+        finally:
+            _release_broker_lock(lock_handle)
+
+
+def current_user_id() -> str:
+    import getpass
+    return f"{socket.gethostname()}\\{getpass.getuser()}"
+
+
+def _scheduler():
+    try:
+        import win32com.client  # type: ignore
+    except ImportError as exc:
+        raise BrokerError("pywin32 indisponível") from exc
+    service = win32com.client.Dispatch("Schedule.Service")
+    service.Connect()
+    return service
+
+
+def _user_autostart_command(*, python_executable: Path, launcher: Path) -> str:
+    return subprocess.list2cmdline(
+        [str(python_executable.resolve()), str(launcher.resolve())]
+    )
+
+
+def user_autostart_status(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    """Lê e valida o fallback per-user sem alterar o Registro."""
+    require_windows_desktop()
+    try:
+        import winreg
+    except ImportError as exc:
+        raise BrokerError("winreg_unavailable") from exc
+
+    command = _user_autostart_command(
+        python_executable=python_executable,
+        launcher=launcher,
+    )
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            USER_RUN_KEY,
+            0,
+            winreg.KEY_QUERY_VALUE,
+        ) as key:
+            observed, value_type = winreg.QueryValueEx(key, USER_RUN_VALUE)
+    except FileNotFoundError:
+        return {
+            "ok": False,
+            "exists": False,
+            "mode": USER_AUTOSTART_MODE,
+            "value_name": USER_RUN_VALUE,
+            "readback_verified": False,
+            "requires_admin": False,
+        }
+    except OSError as exc:
+        raise BrokerError("user_autostart_status_failed") from exc
+    verified = value_type == winreg.REG_SZ and str(observed) == command
+    return {
+        "ok": verified,
+        "exists": True,
+        "mode": USER_AUTOSTART_MODE,
+        "value_name": USER_RUN_VALUE,
+        "readback_verified": verified,
+        "requires_admin": False,
+    }
+
+
+def register_user_autostart(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    """Registra fallback per-user fixo e sem privilégio administrativo."""
+    require_windows_desktop()
+    try:
+        import winreg
+    except ImportError as exc:
+        raise BrokerError("winreg_unavailable") from exc
+
+    command = _user_autostart_command(
+        python_executable=python_executable,
+        launcher=launcher,
+    )
+    access = winreg.KEY_SET_VALUE | winreg.KEY_QUERY_VALUE
+    try:
+        with winreg.CreateKeyEx(
+            winreg.HKEY_CURRENT_USER,
+            USER_RUN_KEY,
+            0,
+            access,
+        ) as key:
+            winreg.SetValueEx(key, USER_RUN_VALUE, 0, winreg.REG_SZ, command)
+            observed, value_type = winreg.QueryValueEx(key, USER_RUN_VALUE)
+    except OSError as exc:
+        raise BrokerError("user_autostart_registration_failed") from exc
+    if value_type != winreg.REG_SZ or str(observed) != command:
+        raise BrokerError("user_autostart_readback_mismatch")
+    return {
+        "ok": True,
+        "exists": True,
+        "mode": USER_AUTOSTART_MODE,
+        "value_name": USER_RUN_VALUE,
+        "readback_verified": True,
+        "requires_admin": False,
+    }
+
+
+def remove_user_autostart() -> dict[str, Any]:
+    """Remove o fallback depois que AtStartup + S4U estiver disponível."""
+    require_windows_desktop()
+    try:
+        import winreg
+    except ImportError as exc:
+        raise BrokerError("winreg_unavailable") from exc
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            USER_RUN_KEY,
+            0,
+            winreg.KEY_SET_VALUE,
+        ) as key:
+            try:
+                winreg.DeleteValue(key, USER_RUN_VALUE)
+            except FileNotFoundError:
+                pass
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        raise BrokerError("user_autostart_remove_failed") from exc
+    return {"ok": True, "removed": True}
+
+
+def start_user_broker(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    """Inicia o fallback fixo e rejeita processo que morre imediatamente."""
+    require_windows_desktop()
+    python_path = python_executable.resolve()
+    launcher_path = launcher.resolve()
+    if not python_path.is_file():
+        raise BrokerError("persisted_python_executable_missing")
+    if not launcher_path.is_file():
+        raise BrokerError("broker_launcher_missing")
+    flags = 0
+    if os.name == "nt":
+        flags |= int(getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        flags |= int(getattr(subprocess, "DETACHED_PROCESS", 0))
+    process = subprocess.Popen(
+        [str(python_path), str(launcher_path)],
+        cwd=launcher_path.parent,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        creationflags=flags,
+    )
+    time.sleep(1.0)
+    exit_code = process.poll()
+    if exit_code is not None:
+        raise BrokerError("user_broker_start_failed")
+    return {
+        "requested": True,
+        "pid": int(process.pid),
+        "startup_survived": True,
+        "functional_success_proven": False,
+    }
+
+
+def register_task(*, python_executable: Path, launcher: Path) -> dict[str, Any]:
+    require_windows_desktop()
+    service = _scheduler()
+    try:
+        folder = service.GetFolder(TASK_FOLDER)
+    except Exception:
+        folder = service.GetFolder("\\").CreateFolder(TASK_FOLDER.lstrip("\\"))
+    definition = service.NewTask(0)
+    definition.RegistrationInfo.Description = "Desktop PC24x7 Runtime governed admin broker"
+    definition.Settings.Enabled = True
+    definition.Settings.StartWhenAvailable = True
+    definition.Settings.MultipleInstances = TASK_INSTANCES_IGNORE_NEW
+    definition.Settings.ExecutionTimeLimit = "PT0S"
+    definition.Settings.RestartCount = 999
+    definition.Settings.RestartInterval = "PT1M"
+    trigger = definition.Triggers.Create(TASK_TRIGGER_BOOT)
+    trigger.Enabled = True
+    trigger.Delay = "PT30S"
+    action = definition.Actions.Create(TASK_ACTION_EXEC)
+    action.Path = str(python_executable)
+    action.Arguments = f'"{launcher}"'
+    action.WorkingDirectory = str(launcher.parent)
+    principal = definition.Principal
+    principal.UserId = current_user_id()
+    principal.LogonType = TASK_LOGON_S4U
+    principal.RunLevel = TASK_RUNLEVEL_HIGHEST
+    try:
+        folder.RegisterTaskDefinition(
+            TASK_LEAF,
+            definition,
+            TASK_CREATE_OR_UPDATE,
+            principal.UserId,
+            "",
+            TASK_LOGON_S4U,
+        )
+    except Exception as exc:
+        detail = repr(exc).casefold()
+        if "0x80070005" in detail or "-2147024891" in detail or "access is denied" in detail or "acesso negado" in detail:
+            raise BrokerError("task_scheduler_access_denied") from exc
+        raise BrokerError(f"registro do broker falhou: {type(exc).__name__}") from exc
+    return {
+        "ok": True,
+        "task_name": TASK_NAME,
+        "trigger": "AtStartup",
+        "logon_type": "S4U",
+        "run_level": "highest",
+        "password_used": False,
+    }
+
+
+def task_status() -> dict[str, Any]:
+    try:
+        service = _scheduler()
+        folder = service.GetFolder(TASK_FOLDER)
+        task = folder.GetTask(TASK_LEAF)
+        definition = task.Definition
+        trigger_at_startup = any(
+            definition.Triggers.Item(i).Type == TASK_TRIGGER_BOOT
+            for i in range(1, definition.Triggers.Count + 1)
+        )
+        return {
+            "exists": True,
+            "trigger_at_startup": trigger_at_startup,
+            "logon_type": "S4U" if definition.Principal.LogonType == TASK_LOGON_S4U else str(definition.Principal.LogonType),
+            "run_level": "highest" if definition.Principal.RunLevel == TASK_RUNLEVEL_HIGHEST else str(definition.Principal.RunLevel),
+            "enabled": bool(task.Enabled),
+        }
+    except Exception:
+        return {"exists": False, "trigger_at_startup": False}
+
+
+def run_task() -> dict[str, Any]:
+    root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    schtasks = root / "System32" / "schtasks.exe"
+    completed = subprocess.run(
+        [str(schtasks), "/Run", "/TN", TASK_NAME],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=20,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise BrokerError("falha ao iniciar tarefa do broker")
+    return {"run_returncode": completed.returncode}
+
+
+def _copy_release(source_root: Path, release_root: Path) -> None:
+    scripts = release_root / "scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    for name in (
+        "desktop_admin_broker.py",
+        "desktop_admin_broker_uac_launcher.py",
+        WATCHDOG_SCRIPT,
+        WATCHDOG_UAC_SCRIPT,
+        RDC_RECOVERY_SCRIPT,
+        RUNNER_BOOTSTRAP_SCRIPT,
+        READBACK_SCRIPT,
+        "pc24x7_host_policy.py",  # consumed by runner and watchdog
+    ):
+        source = source_root / "scripts" / name
+        if not source.is_file():
+            raise BrokerError(f"script obrigatório ausente: {name}")
+        destination = scripts / name
+        destination.write_bytes(source.read_bytes())
+
+
+def _write_launcher(runtime_root: Path) -> Path:
+    """Gera um supervisor per-user que mantém o broker vivo sem nova UAC."""
+    launcher = runtime_root / "run.py"
+    launcher.write_text(
+        "from pathlib import Path\n"
+        "import json, os, runpy, sys, time\n"
+        "metadata = Path(__file__).with_name('metadata.json')\n"
+        "heartbeat = metadata.with_name('broker-heartbeat.json')\n"
+        "restart_delay = 5\n"
+        "restart_count = 0\n"
+        "while True:\n"
+        "    payload = json.loads(metadata.read_text(encoding='utf-8'))\n"
+        "    script = Path(payload['release_root']) / 'scripts' / 'desktop_admin_broker.py'\n"
+        "    try:\n"
+        "        sys.argv = [str(script), 'watch', '--metadata', str(metadata)]\n"
+        "        runpy.run_path(str(script), run_name='__main__')\n"
+        "        latest = json.loads(metadata.read_text(encoding='utf-8'))\n"
+        "        if latest.get('admin_channel_ready') is True and latest.get('requires_uac_activation') is False:\n"
+        "            break\n"
+        "        restart_count += 1\n"
+        "        time.sleep(restart_delay)\n"
+        "    except SystemExit as exc:\n"
+        "        code = exc.code if isinstance(exc.code, int) else 0\n"
+        "        if code == 0:\n"
+        "            try:\n"
+        "                latest = json.loads(metadata.read_text(encoding='utf-8'))\n"
+        "            except Exception:\n"
+        "                latest = {}\n"
+        "            if latest.get('admin_channel_ready') is True and latest.get('requires_uac_activation') is False:\n"
+        "                break\n"
+        "            restart_count += 1\n"
+        "            time.sleep(restart_delay)\n"
+        "            continue\n"
+        "        time.sleep(restart_delay)\n"
+        "    except Exception as exc:\n"
+        "        try:\n"
+        "            observed = {}\n"
+        "            if heartbeat.is_file():\n"
+        "                candidate = json.loads(heartbeat.read_text(encoding='utf-8'))\n"
+        "                if isinstance(candidate, dict):\n"
+        "                    observed.update(candidate)\n"
+        "            observed.update({'pid': os.getpid(), 'status': 'supervisor_retrying', 'restart_count': restart_count, 'last_error_code': type(exc).__name__, 'updated_at': __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(), 'production_touched': False, 'secrets_read': False, 'reboot_performed': False})\n"
+        "            heartbeat.write_text(json.dumps(observed, sort_keys=True), encoding='utf-8')\n"
+        "        except Exception:\n"
+        "            pass\n"
+        "        restart_count += 1\n"
+        "        time.sleep(restart_delay)\n",
+        encoding="utf-8",
+    )
+    return launcher
+
+
+def _write_uac_activation_launcher(
+    runtime_root: Path,
+    *,
+    release_root: Path,
+    python_executable: Path,
+    metadata_path: Path,
+) -> Path:
+    launcher = runtime_root / "Activate-Desktop-Admin-Broker.cmd"
+    uac_script = release_root / "scripts" / "desktop_admin_broker_uac_launcher.py"
+    command = subprocess.list2cmdline(
+        [
+            str(python_executable),
+            str(uac_script),
+            "--metadata",
+            str(metadata_path),
+            "--confirm",
+            "LAUNCH-DESKTOP-ADMIN-BROKER-UAC",
+            "--timeout-seconds",
+            "90",
+        ]
+    )
+    launcher.write_text("@echo off\r\n" + command + "\r\n", encoding="utf-8")
+    return launcher
+
+
+def load_installed_metadata(metadata_path: Path, *, require_current_release: bool = False) -> dict[str, Any]:
+    metadata_path = metadata_path.resolve()
+    if not metadata_path.is_file():
+        raise BrokerError("metadata do broker ausente")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    runtime_root = Path(str(metadata.get("runtime_root") or "")).resolve()
+    release_root = Path(str(metadata.get("release_root") or "")).resolve()
+    source_sha = validate_sha(str(metadata.get("source_sha") or ""))
+    if metadata_path != runtime_root / "metadata.json":
+        raise BrokerError("metadata fora do runtime governado")
+    if os.name == "nt" and runtime_root != default_runtime_root().resolve():
+        raise BrokerError("runtime_root fora do caminho governado")
+    expected_release = runtime_root / "releases" / source_sha
+    if release_root != expected_release:
+        raise BrokerError("release_root não corresponde ao source_sha")
+    release_broker = release_root / "scripts" / "desktop_admin_broker.py"
+    launcher = runtime_root / "run.py"
+    python_executable = Path(str(metadata.get("python_executable") or "")).resolve()
+    for path in (release_broker, launcher, python_executable):
+        if not path.is_file():
+            raise BrokerError(f"arquivo instalado ausente: {path.name}")
+    if require_current_release and release_broker.resolve() != Path(__file__).resolve():
+        raise BrokerError("subcomando elevado deve executar da release imutável")
+    return {
+        "metadata": metadata,
+        "metadata_path": metadata_path,
+        "runtime_root": runtime_root,
+        "release_root": release_root,
+        "release_broker": release_broker,
+        "launcher": launcher,
+        "python_executable": python_executable,
+    }
+
+
+def persist_task_activation(
+    metadata_path: Path,
+    *,
+    observed: dict[str, Any],
+    started: dict[str, Any],
+) -> dict[str, Any]:
+    if not task_ready(observed):
+        raise BrokerError("task_registration_readback_failed")
+    lock_handle = _acquire_metadata_lock(metadata_path)
+    try:
+        latest = load_installed_metadata(
+            metadata_path,
+            require_current_release=False,
+        )["metadata"]
+        metadata = dict(latest)
+        metadata.update(
+            {
+                "activation_pending": False,
+                "requires_uac_activation": False,
+                "admin_channel_ready": True,
+                "admin_task": observed,
+                "admin_task_start": started,
+                "uac_activated_at": now_iso(),
+            }
+        )
+        atomic_json(metadata_path, metadata)
+    finally:
+        _release_broker_lock(lock_handle)
+    remove_user_autostart()
+    return metadata
+
+
+def register_task_from_metadata(metadata_path: Path) -> dict[str, Any]:
+    installation = load_installed_metadata(metadata_path, require_current_release=True)
+    register_task(
+        python_executable=installation["python_executable"],
+        launcher=installation["launcher"],
+    )
+    observed = task_status()
+    ready = task_ready(observed)
+    if not ready:
+        raise BrokerError("task_registration_readback_failed")
+    started = run_task()
+    persist_task_activation(
+        installation["metadata_path"],
+        observed=observed,
+        started=started,
+    )
+    return {"ok": True, "task": observed, "start": started, "metadata_updated": True}
+
+
+def install(
+    source_root: Path,
+    *,
+    source_sha: str,
+    python_executable: Path,
+    runtime_root: Path | None,
+    poll_seconds: int,
+    confirm: str,
+) -> dict[str, Any]:
+    if confirm != INSTALL_CONFIRM:
+        raise BrokerError("confirmação inválida")
+    host = require_windows_desktop()
+    sha = validate_sha(source_sha)
+    runtime = (runtime_root or default_runtime_root()).resolve()
+    runtime.mkdir(parents=True, exist_ok=True)
+    persistent_python = stage_persistent_python(
+        python_executable.resolve(),
+        runtime,
+    )
+    stable_python = Path(persistent_python["python_executable"])
+    release = runtime / "releases" / sha
+    _copy_release(source_root.resolve(), release)
+    launcher = _write_launcher(runtime)
+    metadata_path = runtime / "metadata.json"
+    activation_launcher = _write_uac_activation_launcher(
+        runtime,
+        release_root=release,
+        python_executable=stable_python,
+        metadata_path=metadata_path,
+    )
+    metadata = {
+        "schema_version": "1",
+        "service": "reqsys-desktop-admin-broker",
+        "host": host,
+        "source_sha": sha,
+        "runtime_root": str(runtime),
+        "release_root": str(release),
+        "python_executable": str(stable_python),
+        "python_runtime": {
+            "persistent": True,
+            "version": persistent_python["version"],
+            "executable_sha256": persistent_python["executable_sha256"],
+            "reused": persistent_python["reused"],
+        },
+        "poll_seconds": DEFAULT_POLL_SECONDS,
+        "not_before": now_iso(),
+        "repository": REPOSITORY,
+        "issue_number": ISSUE_NUMBER,
+        "expected_actor": EXPECTED_ACTOR,
+        "activation_pending": False,
+        "requires_uac_activation": False,
+        "production_touched": False,
+        "secrets_read": False,
+        "installed_at": now_iso(),
+        "activation_launcher": str(activation_launcher),
+        "broker_supervisor_version": BROKER_SUPERVISOR_VERSION,
+    }
+    atomic_json(metadata_path, metadata)
+    activation_pending = False
+    user_autostart = None
+    started = None
+    try:
+        task = register_task(python_executable=stable_python, launcher=launcher)
+    except BrokerError as exc:
+        if str(exc) != "task_scheduler_access_denied":
+            raise
+        activation_pending = True
+        task = {"exists": False, "error": "access_denied"}
+        user_autostart = register_user_autostart(
+            python_executable=stable_python,
+            launcher=launcher,
+        )
+        metadata.update(
+            {
+                "activation_pending": True,
+                "requires_uac_activation": True,
+                "fallback_persistence": user_autostart,
+                "fallback_start_requested": True,
+                "functional_success_proven": False,
+            }
+        )
+        atomic_json(metadata_path, metadata)
+        started = start_user_broker(
+            python_executable=stable_python,
+            launcher=launcher,
+        )
+    if not activation_pending:
+        started = run_task()
+    return {
+        "ok": True,
+        "activation_pending": activation_pending,
+        "requires_uac_activation": activation_pending,
+        "task": task,
+        "user_autostart": user_autostart,
+        "start": started,
+        "functional_success_proven": False if activation_pending else None,
+        "metadata_path": str(metadata_path),
+        "activation_launcher": str(activation_launcher),
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    install_p = sub.add_parser("install")
+    install_p.add_argument("--source-root", type=Path, required=True)
+    install_p.add_argument("--source-sha", required=True)
+    install_p.add_argument("--python-executable", type=Path, default=Path(sys.executable))
+    install_p.add_argument("--runtime-root", type=Path)
+    install_p.add_argument("--poll-seconds", type=int, default=DEFAULT_POLL_SECONDS)
+    install_p.add_argument("--confirm", required=True)
+
+    watch_p = sub.add_parser("watch")
+    watch_p.add_argument("--metadata", type=Path, required=True)
+
+    once_p = sub.add_parser("once")
+    once_p.add_argument("--metadata", type=Path, required=True)
+
+    register_p = sub.add_parser("register-task-com")
+    register_p.add_argument("--metadata", type=Path, required=True)
+
+    args = parser.parse_args()
+    try:
+        if args.command == "install":
+            payload = install(
+                args.source_root,
+                source_sha=args.source_sha,
+                python_executable=args.python_executable,
+                runtime_root=args.runtime_root,
+                poll_seconds=args.poll_seconds,
+                confirm=args.confirm,
+            )
+        elif args.command == "watch":
+            return watch(args.metadata.resolve())
+        elif args.command == "once":
+            metadata = load_installed_metadata(args.metadata.resolve())["metadata"]
+            payload = process_once(metadata)
+        else:
+            payload = register_task_from_metadata(args.metadata.resolve())
+    except Exception as exc:
+        print(json.dumps({"ok": False, "error": str(exc)[:1000], "error_type": type(exc).__name__}, sort_keys=True))
+        return 2
+    print(json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    return 0 if payload.get("ok") else 3
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
