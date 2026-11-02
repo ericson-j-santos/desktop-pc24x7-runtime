@@ -41,7 +41,7 @@ def gh_comment(
 def test_rejects_other_host(monkeypatch) -> None:
     monkeypatch.setattr(m.os, "name", "nt")
     monkeypatch.setattr(m.socket, "gethostname", lambda: "UNKNOWN-HOST")
-    with pytest.raises(m.BrokerError, match="host n�o autorizado"):
+    with pytest.raises(m.BrokerError, match="host não autorizado"):
         m.require_windows_desktop()
 
 
@@ -1034,7 +1034,7 @@ def test_self_refresh_is_idempotent_when_main_is_current(
         m,
         "register_user_autostart",
         lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError("fallback f�sico v�lido n�o deve ser regravado")
+            AssertionError("fallback físico válido não deve ser regravado")
         ),
     )
     def fake_atomic_json(path, payload):
@@ -1135,7 +1135,7 @@ def test_self_refresh_stages_main_updates_metadata_and_starts_handoff(
         m,
         "register_user_autostart",
         lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError("fallback f�sico v�lido n�o deve ser regravado")
+            AssertionError("fallback físico válido não deve ser regravado")
         ),
     )
     monkeypatch.setattr(
@@ -1363,7 +1363,7 @@ def test_reconcile_does_not_demote_verified_elevated_task(
         m,
         "user_autostart_status",
         lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError("task elevada comprovada n�o deve recriar HKCU")
+            AssertionError("task elevada comprovada não deve recriar HKCU")
         ),
     )
 
@@ -1413,7 +1413,7 @@ def test_reconcile_demotes_stale_elevated_proof_when_physical_task_is_missing(
         m,
         "register_user_autostart",
         lambda **kwargs: (_ for _ in ()).throw(
-            AssertionError("HKCU v�lido n�o deve ser regravado")
+            AssertionError("HKCU válido não deve ser regravado")
         ),
     )
 
@@ -1726,7 +1726,7 @@ def test_pinned_host_identity_does_not_require_external_policy(monkeypatch) -> N
 def test_broker_rejects_other_hosts_even_if_generic_policy_knows_them(monkeypatch, host):
     monkeypatch.setattr(m.os, "name", "nt")
     monkeypatch.setattr(m.socket, "gethostname", lambda: host)
-    with pytest.raises(m.BrokerError, match="host n�o autorizado"):
+    with pytest.raises(m.BrokerError, match="host não autorizado"):
         m.require_windows_desktop()
 
 
@@ -1754,5 +1754,5 @@ def test_missing_manifest_dependency_fails_closed(tmp_path: Path) -> None:
                  m.WATCHDOG_SCRIPT, m.WATCHDOG_UAC_SCRIPT,
                  m.RDC_RECOVERY_SCRIPT, m.RUNNER_BOOTSTRAP_SCRIPT, m.READBACK_SCRIPT):
         (src / name).write_text("# fixture\n", encoding="utf-8")
-    with pytest.raises(m.BrokerError, match="script obrigat�rio ausente: pc24x7_host_policy.py"):
+    with pytest.raises(m.BrokerError, match="script obrigatório ausente: pc24x7_host_policy.py"):
         m._copy_release(src.parent, tmp_path / "release")
