@@ -54,6 +54,7 @@ def test_allowlist_is_exact_and_has_no_shell_action() -> None:
         "/desktop-runtime admin activate-watchdog",
         "/desktop-runtime admin refresh-self",
         "/desktop-runtime admin windows-component-health",
+        "/desktop-runtime admin qualify-orchestrator-runner-acl",
     }
     source = MODULE.read_text(encoding="utf-8").casefold()
     assert "shell=true" not in source
@@ -166,6 +167,81 @@ def test_windows_component_health_unknown_command_remains_rejected() -> None:
     now=datetime.now(timezone.utc)
     comment=gh_comment(body="/desktop-runtime admin windows-component-health --command whoami",created=now)
     assert m.authorize_comment(comment,not_before=now-timedelta(seconds=5),reference_time=now) is None
+
+
+def test_orchestrator_acl_qualification_is_fixed_private_and_idempotent(monkeypatch, tmp_path: Path) -> None:
+    runtime = tmp_path / "runtime"
+    profile = tmp_path / "profile"
+    local = profile / "AppData" / "Local"
+    local.mkdir(parents=True)
+    metadata = {"runtime_root": str(runtime), "source_sha": "a" * 40}
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m.os, "environ", {**m.os.environ, "USERPROFILE": str(profile), "LOCALAPPDATA": str(local)})
+    monkeypatch.setattr(m, "_enable_windows_privilege", lambda name: name == "SeBackupPrivilege")
+    descriptors = {
+        "GitHubRunner": "O:SYG:SYD:AI(A;OICI;FA;;;SY)",
+        ".runner": "O:SYG:SYD:AI(A;;FR;;;SY)",
+    }
+    monkeypatch.setattr(
+        m,
+        "_read_named_security_descriptor",
+        lambda path: ("observed", descriptors[path.name]),
+    )
+    monkeypatch.setattr(
+        m,
+        "_query_fixed_task_xml",
+        lambda task_name: ("observed", "<Task><URI>fixed</URI></Task>"),
+    )
+
+    first = m._qualify_orchestrator_runner_acl(metadata, "desktop-admin-gh-comment-501")
+    second = m._qualify_orchestrator_runner_acl(metadata, "desktop-admin-gh-comment-501")
+
+    assert first["state"] == "qualified" and first["reused"] is False
+    assert second["state"] == "qualified" and second["reused"] is True
+    assert first["acl_changed"] is False and first["task_changed"] is False
+    assert first["runner_started"] is False and first["private_material_published"] is False
+    rendered = json.dumps(first) + json.dumps(second)
+    assert "O:SY" not in rendered and "<Task>" not in rendered
+    receipt = runtime / "private-evidence" / "desktop-admin-gh-comment-501.orchestrator-runner-acl.json"
+    payload = json.loads(receipt.read_text(encoding="utf-8"))
+    assert payload["security_backup"]["runner_home"]["sddl"] == descriptors["GitHubRunner"]
+    assert payload["task_backup"]["admin_broker"]["xml"].startswith("<Task>")
+
+
+def test_orchestrator_acl_qualification_records_access_denied_without_mutation(monkeypatch, tmp_path: Path) -> None:
+    profile = tmp_path / "profile"
+    local = profile / "AppData" / "Local"
+    local.mkdir(parents=True)
+    metadata = {"runtime_root": str(tmp_path / "runtime"), "source_sha": "b" * 40}
+    monkeypatch.setattr(m, "require_windows_desktop", lambda: m.EXPECTED_HOST)
+    monkeypatch.setattr(m.os, "environ", {**m.os.environ, "USERPROFILE": str(profile), "LOCALAPPDATA": str(local)})
+    monkeypatch.setattr(m, "_enable_windows_privilege", lambda name: False)
+    monkeypatch.setattr(m, "_read_named_security_descriptor", lambda path: ("access_denied", None))
+    monkeypatch.setattr(m, "_query_fixed_task_xml", lambda task_name: ("not_observed_or_unavailable", None))
+
+    result = m._qualify_orchestrator_runner_acl(metadata, "desktop-admin-gh-comment-502")
+
+    assert result["state"] == "incomplete"
+    assert result["targets"]["runner_home"]["status"] == "access_denied"
+    assert result["acl_changed"] is False and result["task_changed"] is False
+
+
+def test_orchestrator_acl_qualification_rejects_command_arguments() -> None:
+    now = datetime.now(timezone.utc)
+    comment = gh_comment(
+        body="/desktop-runtime admin qualify-orchestrator-runner-acl --grant full",
+        created=now,
+    )
+    assert m.authorize_comment(
+        comment, not_before=now - timedelta(seconds=5), reference_time=now
+    ) is None
+
+
+@pytest.mark.skipif(m.os.name != "nt", reason="Windows security descriptor API")
+def test_windows_security_descriptor_reader_is_read_only(tmp_path: Path) -> None:
+    status, sddl = m._read_named_security_descriptor(tmp_path)
+    assert status == "observed"
+    assert isinstance(sddl, str) and "D:" in sddl
 
 def test_install_stages_release_and_marks_uac_pending(monkeypatch, tmp_path: Path) -> None:
     source = tmp_path / "source"

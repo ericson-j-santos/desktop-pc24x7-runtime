@@ -74,6 +74,7 @@ ALLOWED_COMMANDS = {
     "/desktop-runtime admin activate-watchdog": "activate-watchdog",
     "/desktop-runtime admin refresh-self": "refresh-self",
     "/desktop-runtime admin windows-component-health": "windows-component-health",
+    "/desktop-runtime admin qualify-orchestrator-runner-acl": "qualify-orchestrator-runner-acl",
 }
 
 
@@ -962,6 +963,187 @@ def _windows_component_health(metadata: dict[str, Any], correlation_id: str) -> 
             "cipolicy_schema_present": payload["cipolicy_schema_present"]}
 
 
+def _enable_windows_privilege(name: str) -> bool:
+    """Enable one privilege already assigned to this fixed broker process."""
+    if os.name != "nt":
+        return False
+    import ctypes
+    from ctypes import wintypes
+
+    class LUID(ctypes.Structure):
+        _fields_ = (("LowPart", wintypes.DWORD), ("HighPart", wintypes.LONG))
+
+    class TOKEN_PRIVILEGES(ctypes.Structure):
+        _fields_ = (("PrivilegeCount", wintypes.DWORD), ("Luid", LUID),
+                    ("Attributes", wintypes.DWORD))
+
+    token = wintypes.HANDLE()
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), 0x0020 | 0x0008, ctypes.byref(token)
+    ):
+        return False
+    try:
+        luid = LUID()
+        if not advapi32.LookupPrivilegeValueW(None, name, ctypes.byref(luid)):
+            return False
+        privileges = TOKEN_PRIVILEGES(1, luid, 0x00000002)
+        ctypes.set_last_error(0)
+        adjusted = advapi32.AdjustTokenPrivileges(
+            token, False, ctypes.byref(privileges), 0, None, None
+        )
+        return bool(adjusted) and ctypes.get_last_error() == 0
+    finally:
+        kernel32.CloseHandle(token)
+
+
+def _read_named_security_descriptor(path: Path) -> tuple[str, str | None]:
+    """Read owner/group/DACL as SDDL without taking ownership or changing access."""
+    if os.name != "nt":
+        return "windows_required", None
+    import ctypes
+    from ctypes import wintypes
+
+    attributes = ctypes.WinDLL("kernel32", use_last_error=True).GetFileAttributesW(str(path))
+    if attributes == 0xFFFFFFFF:
+        error = ctypes.get_last_error()
+        return ("missing" if error in {2, 3} else "access_denied" if error == 5
+                else f"winerror_{error}"), None
+    if attributes & 0x400:
+        return "reparse_point_rejected", None
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    descriptor = ctypes.c_void_p()
+    security_information = 0x00000001 | 0x00000002 | 0x00000004
+    status = advapi32.GetNamedSecurityInfoW(
+        str(path), 1, security_information, None, None, None, None,
+        ctypes.byref(descriptor),
+    )
+    if status != 0:
+        return ("access_denied" if status == 5 else f"winerror_{status}"), None
+    rendered = ctypes.c_void_p()
+    try:
+        if not advapi32.ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor, 1, security_information, ctypes.byref(rendered), None
+        ):
+            error = ctypes.get_last_error()
+            return f"render_winerror_{error}", None
+        return "observed", ctypes.cast(rendered, ctypes.c_wchar_p).value
+    finally:
+        if rendered.value:
+            kernel32.LocalFree(rendered)
+        if descriptor.value:
+            kernel32.LocalFree(descriptor)
+
+
+def _query_fixed_task_xml(task_name: str) -> tuple[str, str | None]:
+    if task_name not in {
+        r"\Automation\DesktopPc24x7RuntimeWatchdog",
+        r"\Automation\DesktopPc24x7RuntimeHealthSupervisor",
+        r"\Automation\DesktopPc24x7AdminBroker",
+    }:
+        raise BrokerError("task_name_not_allowlisted")
+    system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+    completed = subprocess.run(
+        [str(system_root / "System32" / "schtasks.exe"), "/Query", "/TN", task_name, "/XML"],
+        capture_output=True, timeout=20, check=False,
+    )
+    if completed.returncode != 0:
+        return "not_observed_or_unavailable", None
+    if len(completed.stdout) > 262144:
+        return "response_too_large", None
+    encoding = "utf-16" if completed.stdout.startswith(b"\xff\xfe") or b"\x00" in completed.stdout[:80] else "utf-8-sig"
+    try:
+        return "observed", completed.stdout.decode(encoding)
+    except UnicodeError:
+        return "invalid_encoding", None
+
+
+def _fixed_orchestrator_runner_targets() -> dict[str, Path]:
+    local = Path(str(os.environ.get("LOCALAPPDATA") or ""))
+    profile = Path(str(os.environ.get("USERPROFILE") or ""))
+    if not local.is_absolute() or not profile.is_absolute():
+        raise BrokerError("profile_path_unavailable")
+    try:
+        local.resolve(strict=False).relative_to(profile.resolve(strict=False))
+    except (OSError, ValueError):
+        raise BrokerError("localappdata_profile_mismatch") from None
+    home = local / "EngineeringOrchestratorDEV" / "GitHubRunner"
+    return {"runner_home": home, "runner_metadata": home / ".runner"}
+
+
+def _qualify_orchestrator_runner_acl(
+    metadata: dict[str, Any], correlation_id: str,
+) -> dict[str, Any]:
+    """Capture an exact private backup and return only bounded public evidence."""
+    require_windows_desktop()
+    runtime_root = Path(metadata["runtime_root"])
+    evidence = runtime_root / "private-evidence" / f"{correlation_id}.orchestrator-runner-acl.json"
+    if evidence.is_file():
+        payload = json.loads(evidence.read_text(encoding="utf-8"))
+        if (
+            payload.get("schema") == "desktop-orchestrator-runner-acl-qualification/v1"
+            and payload.get("correlation_id") == correlation_id
+            and payload.get("completed") is True
+            and isinstance(payload.get("public_result"), dict)
+        ):
+            return {**payload["public_result"], "reused": True}
+
+    backup_privilege = _enable_windows_privilege("SeBackupPrivilege")
+    security_backup: dict[str, Any] = {}
+    public_targets: dict[str, Any] = {}
+    for key, path in _fixed_orchestrator_runner_targets().items():
+        status, sddl = _read_named_security_descriptor(path)
+        security_backup[key] = {"status": status, "sddl": sddl}
+        public_targets[key] = {
+            "status": status,
+            "descriptor_sha256": hashlib.sha256(sddl.encode("utf-8")).hexdigest() if sddl else None,
+        }
+
+    task_backup: dict[str, Any] = {}
+    public_tasks: dict[str, Any] = {}
+    for key, task_name in {
+        "runtime_watchdog": r"\Automation\DesktopPc24x7RuntimeWatchdog",
+        "runtime_health_supervisor": r"\Automation\DesktopPc24x7RuntimeHealthSupervisor",
+        "admin_broker": r"\Automation\DesktopPc24x7AdminBroker",
+    }.items():
+        status, xml = _query_fixed_task_xml(task_name)
+        task_backup[key] = {"status": status, "xml": xml}
+        public_tasks[key] = {
+            "status": status,
+            "xml_sha256": hashlib.sha256(xml.encode("utf-8")).hexdigest() if xml else None,
+        }
+
+    complete = all(item["status"] == "observed" for item in public_targets.values())
+    public_result = {
+        "handler": "qualify-orchestrator-runner-acl",
+        "state": "qualified" if complete else "incomplete",
+        "reused": False,
+        "receipt": evidence.name,
+        "backup_privilege_enabled": backup_privilege,
+        "targets": public_targets,
+        "tasks": public_tasks,
+        "private_material_published": False,
+        "acl_changed": False,
+        "task_changed": False,
+        "runner_started": False,
+    }
+    payload = {
+        "schema": "desktop-orchestrator-runner-acl-qualification/v1",
+        "correlation_id": correlation_id,
+        "source_sha": validate_sha(str(metadata["source_sha"])),
+        "completed": True,
+        "captured_at": now_iso(),
+        "security_backup": security_backup,
+        "task_backup": task_backup,
+        "public_result": public_result,
+    }
+    atomic_json(evidence, payload)
+    return public_result
+
+
 def execute_action(action: str, metadata: dict[str, Any], comment_id: int) -> dict[str, Any]:
     correlation_id = f"desktop-admin-gh-comment-{comment_id}"
     if action == "status":
@@ -978,6 +1160,8 @@ def execute_action(action: str, metadata: dict[str, Any], comment_id: int) -> di
         result = _self_refresh(metadata)
     elif action == "windows-component-health":
         result = _windows_component_health(metadata, correlation_id)
+    elif action == "qualify-orchestrator-runner-acl":
+        result = _qualify_orchestrator_runner_acl(metadata, correlation_id)
     else:
         raise BrokerError("action_id não allowlisted")
     return {
