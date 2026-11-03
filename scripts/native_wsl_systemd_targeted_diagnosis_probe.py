@@ -202,6 +202,7 @@ def validate(report: dict) -> None:
         or report["failed_unit_count"] != len(units)
     ):
         raise ProbeBlocked("invalid_failed_units")
+    seen_units: set[str] = set()
     for item in units:
         if (
             not isinstance(item, dict)
@@ -215,6 +216,12 @@ def validate(report: dict) -> None:
             or set(item["journal"]) != {"record_count", "evidence_codes"}
         ):
             raise ProbeBlocked("invalid_unit_detail")
+        normalized = item["unit"].casefold()
+        if normalized in seen_units:
+            raise ProbeBlocked("duplicate_failed_unit")
+        seen_units.add(normalized)
+        if item["category"] != details.category_for_unit(item["unit"]):
+            raise ProbeBlocked("unit_category_mismatch")
         parse_show_output(item["unit"], "\n".join(
             f"{key}={item['properties'][key]}" for key in DIAG_PROPERTIES
         ))

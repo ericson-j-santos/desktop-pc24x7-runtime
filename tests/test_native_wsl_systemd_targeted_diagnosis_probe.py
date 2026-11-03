@@ -154,6 +154,21 @@ def test_blocked_report_exposes_only_fixed_reason():
     }
 
 
+def test_targeted_reject_duplicate_and_incoherent_category_receipts():
+    duplicate = module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
+                               "win32", FakeProbe)
+    duplicate["failed_units"].append(duplicate["failed_units"][0])
+    duplicate["failed_unit_count"] += 1
+    with pytest.raises(module.ProbeBlocked, match="duplicate_failed_unit"):
+        module.validate(duplicate)
+
+    mismatch = module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
+                              "win32", FakeProbe)
+    mismatch["failed_units"][0]["category"] = "other"
+    with pytest.raises(module.ProbeBlocked, match="unit_category_mismatch"):
+        module.validate(mismatch)
+
+
 def test_false_success_fields_are_blocked():
     probe = FakeProbe()
     result = module.collect(

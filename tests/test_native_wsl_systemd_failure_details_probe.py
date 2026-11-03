@@ -125,6 +125,21 @@ def test_fixed_probe_never_uses_mutating_or_shell_commands():
     assert commands[0][1]["timeout"] == 20
 
 
+def test_reject_duplicate_and_incoherent_category_receipts():
+    duplicate = module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
+                               "win32", FakeProbe)
+    duplicate["failed_units"].append(duplicate["failed_units"][0])
+    duplicate["failed_unit_count"] += 1
+    with pytest.raises(module.ProbeBlocked, match="duplicate_failed_unit"):
+        module.validate(duplicate)
+
+    mismatch = module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
+                              "win32", FakeProbe)
+    mismatch["failed_units"][0]["category"] = "other"
+    with pytest.raises(module.ProbeBlocked, match="unit_category_mismatch"):
+        module.validate(mismatch)
+
+
 def test_false_success_fields_are_blocked():
     probe = FakeProbe()
     result = module.collect(valid_env(), module.wsl.base.EXPECTED_HOST, "win32",

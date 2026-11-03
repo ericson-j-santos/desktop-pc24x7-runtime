@@ -65,6 +65,17 @@ def parse_failed_rows(raw: str) -> list[tuple[str, str]]:
     return rows
 
 
+def category_for_unit(unit: str) -> str:
+    """Recompute the category from the unit's name, not the reported label."""
+    if not isinstance(unit, str) or not categories.UNIT.fullmatch(unit):
+        raise ProbeBlocked("unit_name_invalid")
+    counts = categories.parse_failed_units(f"{unit} loaded failed failed\n")
+    matches = [key for key, value in counts.items() if value == 1]
+    if len(matches) != 1:
+        raise ProbeBlocked("unit_category_unknown")
+    return matches[0]
+
+
 def parse_show_output(unit: str, raw: str) -> dict[str, str]:
     if not categories.UNIT.fullmatch(unit):
         raise ProbeBlocked("unit_name_invalid")
@@ -151,6 +162,7 @@ def validate(report: dict) -> None:
         or report["failed_unit_count"] != len(units)
     ):
         raise ProbeBlocked("invalid_failed_units")
+    seen_units: set[str] = set()
     for item in units:
         if (
             not isinstance(item, dict)
@@ -162,6 +174,12 @@ def validate(report: dict) -> None:
             or set(item["properties"]) != set(PROPERTIES)
         ):
             raise ProbeBlocked("invalid_unit_detail")
+        normalized = item["unit"].casefold()
+        if normalized in seen_units:
+            raise ProbeBlocked("duplicate_failed_unit")
+        seen_units.add(normalized)
+        if item["category"] != category_for_unit(item["unit"]):
+            raise ProbeBlocked("unit_category_mismatch")
         parse_show_output(item["unit"], "\n".join(
             f"{key}={item['properties'][key]}" for key in PROPERTIES
         ))
