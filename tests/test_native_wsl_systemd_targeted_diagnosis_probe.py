@@ -111,6 +111,15 @@ def test_parse_journal_rejects_cross_unit_and_raw_invalid_data():
         module.parse_journal("postgresql.service", "not-json\n")
 
 
+def test_parse_show_output_reports_fixed_missing_property():
+    raw = show("postgresql@15-main.service")
+    raw = raw.replace("DropInPaths=\\n", "")
+    with pytest.raises(
+        module.ProbeBlocked, match="show_output_missing_DropInPaths"
+    ):
+        module.parse_show_output("postgresql@15-main.service", raw)
+
+
 def test_collect_preserves_parser_block_reason():
     class BrokenProbe(FakeProbe):
         def _run(self, *args):
