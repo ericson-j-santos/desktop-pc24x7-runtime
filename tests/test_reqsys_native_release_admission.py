@@ -116,24 +116,39 @@ def test_replay_has_same_fingerprint_without_automatic_retry():
     assert first["automatic_retry"] is False
 
 
-def test_cli_blocks_and_produces_sanitized_evidence(tmp_path, capsys):
-    data = tmp_path / "inventory.json"
-    out = tmp_path / "out.json"
+def test_cli_blocks_and_produces_sanitized_evidence(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "artifacts" / "native-pg-inventory"
+    input_dir.mkdir(parents=True)
+    data = input_dir / "evidence.json"
+    out = tmp_path / "artifacts" / "reqsys-native-dev-admission" / "decision.json"
     data.write_text(json.dumps(qualification()), encoding="utf-8")
-    rc = gate.main(["--qualification", str(data), "--runtime-sha", S,
-                    "--rules-sha", R, "--run-id", ID, "--output", str(out)])
-    assert rc == 3
-    value = json.loads(out.read_text(encoding="utf-8"))
-    assert "postgresql" not in value
-    assert "mounts" not in value
-    assert value["deployment_performed"] is False
+    opts = ["--runtime-sha", S, "--rules-sha", R, "--run-id", ID]
+    assert gate.main(opts) == 3
+    result = json.loads(out.read_text(encoding="utf-8"))
+    assert "postgresql" not in result and "mounts" not in result
+    assert result["deployment_performed"] is False
+    assert gate.main(opts) == 3  # replay: no duplicate write
     assert "NATIVE_REQSYS_DEV_RELEASE_BLOCKED" in capsys.readouterr().out
 
 
-def test_invalid_input_no_output(tmp_path):
-    data, out = tmp_path / "bad.json", tmp_path / "out.json"
-    data.write_text("{not json", encoding="utf-8")
-    rc = gate.main(["--qualification", str(data), "--runtime-sha", S,
-                    "--rules-sha", R, "--run-id", ID, "--output", str(out)])
+def test_existing_receipt_conflict_fails_closed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    input_dir = tmp_path / "artifacts" / "native-pg-inventory"
+    input_dir.mkdir(parents=True)
+    (input_dir / "evidence.json").write_text(json.dumps(qualification()), encoding="utf-8")
+    out_dir = tmp_path / "artifacts" / "reqsys-native-dev-admission"
+    out_dir.mkdir()
+    out = out_dir / "decision.json"
+    out.write_text('{"different": true}', encoding="utf-8")
+    assert gate.main(["--runtime-sha", S, "--rules-sha", R, "--run-id", ID]) == 2
+    assert out.read_text(encoding="utf-8") == '{"different": true}'
+
+def test_invalid_input_no_output(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    d = tmp_path / "artifacts" / "native-pg-inventory"
+    d.mkdir(parents=True)
+    (d / "evidence.json").write_text("{not json", encoding="utf-8")
+    rc = gate.main(["--runtime-sha", S, "--rules-sha", R, "--run-id", ID])
     assert rc == 2
-    assert not out.exists()
+    assert not (tmp_path / "artifacts" / "reqsys-native-dev-admission").exists()

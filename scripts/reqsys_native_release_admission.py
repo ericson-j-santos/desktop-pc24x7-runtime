@@ -132,27 +132,43 @@ def evaluate(report: dict, runtime_sha: str, rules_sha: str, run_id: str) -> dic
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Classify DEV WSL posture; no deployment")
-    parser.add_argument("--qualification", type=Path, required=True)
     parser.add_argument("--runtime-sha", required=True)
     parser.add_argument("--rules-sha", required=True)
     parser.add_argument("--run-id", required=True)
-    parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    root = Path.cwd()
+    artifacts = root / "artifacts"
+    input_dir = artifacts / "native-pg-inventory"
+    output_dir = artifacts / "reqsys-native-dev-admission"
+    evidence_file = input_dir / "evidence.json"
+    output_file = output_dir / "decision.json"
     try:
-        if not args.qualification.is_file() or args.qualification.stat().st_size > MAX_BYTES:
+        # Nunca aceitar input/output externo ao worktree governado nem reparse point.
+        for item in (root, artifacts, input_dir, evidence_file, output_dir, output_file):
+            if item.is_symlink():
+                raise AdmissionBlocked("reparse_path_rejected")
+        if not artifacts.is_dir() or not input_dir.is_dir():
+            raise AdmissionBlocked("fixed_artifact_root_missing")
+        if not evidence_file.is_file() or evidence_file.stat().st_size > MAX_BYTES:
             raise AdmissionBlocked("source_missing_or_large")
-        report = json.loads(args.qualification.read_text(encoding="utf-8"))
+        report = json.loads(evidence_file.read_text(encoding="utf-8"))
         result = evaluate(report, args.runtime_sha, args.rules_sha, args.run_id)
-        if args.output.resolve() == args.qualification.resolve():
-            raise AdmissionBlocked("output_overlaps_source")
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+        serialized = json.dumps(result, sort_keys=True, indent=2) + "\n"
+        if output_file.exists():
+            if not output_file.is_file() or output_file.read_text(encoding="utf-8") != serialized:
+                raise AdmissionBlocked("existing_receipt_conflict")
+        else:
+            output_dir.mkdir(exist_ok=True)
+            if output_dir.is_symlink():
+                raise AdmissionBlocked("reparse_path_rejected")
+            # Exclusivo e sem overwrite; replay idempotente não cria nova versão.
+            with output_file.open("x", encoding="utf-8") as stream:
+                stream.write(serialized)
     except (AdmissionBlocked, OSError, TypeError, ValueError):
         print("NATIVE_REQSYS_DEV_ADMISSION_BLOCKED", file=sys.stderr)
         return 2
     print("NATIVE_REQSYS_DEV_RELEASE_BLOCKED")
     return 3
-
 
 if __name__ == "__main__":
     raise SystemExit(main())
