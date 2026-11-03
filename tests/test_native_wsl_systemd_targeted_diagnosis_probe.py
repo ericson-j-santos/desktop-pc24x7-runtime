@@ -113,9 +113,9 @@ def test_parse_journal_rejects_cross_unit_and_raw_invalid_data():
 
 def test_parse_show_output_reports_fixed_missing_property():
     raw = show("postgresql@15-main.service")
-    raw = "\\n".join(
+    raw = "\n".join(
         line for line in raw.splitlines() if not line.startswith("DropInPaths=")
-    ) + "\\n"
+    ) + "\n"
     with pytest.raises(
         module.ProbeBlocked, match="show_output_missing_DropInPaths"
     ):
