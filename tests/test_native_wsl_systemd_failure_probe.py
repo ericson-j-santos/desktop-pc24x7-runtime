@@ -56,8 +56,31 @@ def test_multiple_categories_are_bounded_and_sanitized():
            "mnt-backup.mount loaded failed failed more-description\n"
            "foo.service loaded failed failed arbitrary\n")
     assert module.parse_failed_units(raw) == {
-        "postgresql": 0, "network": 1, "mount": 1, "wsl": 0, "other": 1,
+        "postgresql": 0, "legacy_container": 0,
+        "network": 1, "systemd": 1, "other": 1,
     }
+
+
+def test_legacy_container_failure_is_not_a_postgresql_failure():
+    result = module.parse_failed_units(
+        "● docker.service loaded failed failed unrelated legacy service\n"
+    )
+    assert result["legacy_container"] == 1
+    assert result["postgresql"] == 0
+    with pytest.raises(module.ProbeBlocked, match="failed_output_state"):
+        module.parse_failed_units("postgresql.service loaded active running healthy")
+
+
+def test_first_category_follows_first_nonzero_count():
+    report = module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
+                            "win32", FakeProbe)
+    assert report["categories"]["postgresql"] == 1
+    report["first_category"] = "none_observed"
+    with pytest.raises(module.ProbeBlocked, match="incoherent_first_category"):
+        module.validate(report)
+    report["first_category"] = "other"
+    with pytest.raises(module.ProbeBlocked, match="incoherent_first_category"):
+        module.validate(report)
 
 
 def test_empty_list_does_not_prove_systemd_recovered():

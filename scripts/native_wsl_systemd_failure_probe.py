@@ -20,7 +20,7 @@ except ImportError:
 
 CONTRACT = "native-wsl-systemd-failure-probe-v1"
 MAX_FAILED = 32
-CATEGORIES = ("postgresql", "network", "mount", "wsl", "other")
+CATEGORIES = ("postgresql", "legacy_container", "network", "systemd", "other")
 UNIT = re.compile(r"[a-zA-Z0-9_.@:-]{1,120}\.(service|mount|socket|device|target|timer|path)\Z")
 
 
@@ -47,12 +47,13 @@ def parse_failed_units(raw: str) -> dict[str, int]:
         suffix = name.rsplit(".", 1)[1]
         if name.startswith(("postgresql", "postgres-")):
             category = "postgresql"
-        elif name.startswith(("systemd-network", "networking", "systemd-resolved")):
+        elif name.startswith(("docker", "containerd", "podman", "cri-", "libpod")):
+            category = "legacy_container"
+        elif name.startswith(("systemd-network", "networking", "systemd-resolved",
+                              "networkmanager")):
             category = "network"
-        elif suffix in ("mount", "device") or name.startswith("systemd-fsck"):
-            category = "mount"
-        elif name.startswith(("wsl", "systemd-binfmt")):
-            category = "wsl"
+        elif suffix in ("mount", "device") or name.startswith(("systemd-", "wsl")):
+            category = "systemd"
         else:
             category = "other"
         counts[category] += 1
@@ -103,6 +104,9 @@ def validate(report: dict) -> None:
         report["failed_unit_count"] > MAX_FAILED or
         report["first_category"] not in (*CATEGORIES, "none_observed")):
         raise ProbeBlocked("invalid_counts")
+    expected_first = next((key for key in CATEGORIES if c[key] > 0), "none_observed")
+    if report["first_category"] != expected_first:
+        raise ProbeBlocked("incoherent_first_category")
     for key in ("cause_proven", "postgresql_modified", "systemd_repaired",
                 "backup_created", "deployment_performed", "ready_for_installation"):
         if report[key] is not False:
