@@ -159,6 +159,8 @@ def collect(env: dict, host: str, platform: str, probe_factory=wsl.WslProbe) -> 
                 "properties": parse_show_output(unit, shown),
                 "journal": parse_journal(unit, journal),
             })
+    except ProbeBlocked:
+        raise
     except (details.wsl.QualificationBlocked, OSError, subprocess.SubprocessError,
             TypeError, ValueError):
         raise ProbeBlocked("fixed_probe_failed") from None
