@@ -566,6 +566,33 @@ jobs:
           & python $gateway @gatewayArgs
           exit $LASTEXITCODE
 
+      - name: Diagnose failed WSL systemd units through Command Gateway
+        if: inputs.diagnostic == 'native-wsl-postgres-qualification'
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+          INVENTORY_SESSION_VALIDATED: 'true'
+        run: |
+          $ErrorActionPreference = "Stop"
+          $gateway = Join-Path $env:GITHUB_WORKSPACE "_rules\\scripts\\command_gateway.py"
+          $policy = Join-Path $env:GITHUB_WORKSPACE "_rules\\config\\command-gateway.policy.json"
+          $script = Join-Path $env:TARGET_PATH "scripts\\native_wsl_systemd_targeted_diagnosis_probe.py"
+          $gatewayArgs = @(
+            "--policy", $policy,
+            "--correlation-id", $env:CORRELATION_ID,
+            "run",
+            "--cwd", $env:TARGET_PATH,
+            "--session-id", $env:SESSION_ID,
+            "--risk", "1",
+            "--timeout", "60",
+            "--expected-head", $env:ANCHOR_SHA,
+            "--",
+            "python", "-B", $script
+          )
+          & python $gateway @gatewayArgs
+          exit $LASTEXITCODE
       - name: Prove orchestrator readonly preflight, negative SHA and replay through Command Gateway
         id: orchestrator_proof
         if: inputs.diagnostic == 'orchestrator-runner-preflight'
