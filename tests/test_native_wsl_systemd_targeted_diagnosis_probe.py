@@ -111,6 +111,39 @@ def test_parse_journal_rejects_cross_unit_and_raw_invalid_data():
         module.parse_journal("postgresql.service", "not-json\n")
 
 
+def test_parse_show_output_reports_fixed_missing_property():
+    raw = show("postgresql@15-main.service")
+    raw = "\n".join(
+        line for line in raw.splitlines() if not line.startswith("DropInPaths=")
+    ) + "\n"
+    with pytest.raises(
+        module.ProbeBlocked, match="show_output_missing_DropInPaths"
+    ):
+        module.parse_show_output("postgresql@15-main.service", raw)
+
+
+def test_parse_show_output_treats_job_result_as_optional():
+    raw = show("postgresql@15-main.service")
+    raw = "\n".join(
+        line for line in raw.splitlines() if not line.startswith("JobResult=")
+    ) + "\n"
+    parsed = module.parse_show_output("postgresql@15-main.service", raw)
+    assert parsed["JobResult"] == ""
+
+
+def test_collect_preserves_parser_block_reason():
+    class BrokenProbe(FakeProbe):
+        def _run(self, *args):
+            if args[0] == "/usr/bin/journalctl":
+                return 0, "not-json\\n"
+            return super()._run(*args)
+
+    with pytest.raises(module.ProbeBlocked, match="journal_schema"):
+        module.collect(
+            valid_env(), module.wsl.base.EXPECTED_HOST, "win32", BrokenProbe
+        )
+
+
 def test_fixed_probe_never_uses_mutating_or_unbounded_commands():
     source = (
         SCRIPTS / "native_wsl_systemd_targeted_diagnosis_probe.py"
@@ -167,24 +200,6 @@ def test_targeted_reject_duplicate_and_incoherent_category_receipts():
     mismatch["failed_units"][0]["category"] = "other"
     with pytest.raises(module.ProbeBlocked, match="unit_category_mismatch"):
         module.validate(mismatch)
-
-
-def test_collect_preserves_sanitized_parse_failure_reason():
-    class WrongJournal(FakeProbe):
-        def _run(self, *args):
-            if args[0] == "/usr/bin/journalctl":
-                return 0, json.dumps({
-                    "_SYSTEMD_UNIT": "different.service",
-                    "MESSAGE": "private text must never be printed",
-                }) + "\n"
-            return super()._run(*args)
-
-    with pytest.raises(module.ProbeBlocked, match="journal_unit_mismatch"):
-        module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
-                       "win32", WrongJournal)
-    assert module.blocked_report("journal_unit_mismatch")["reason"] == (
-        "journal_unit_mismatch"
-    )
 
 
 def test_collect_rejects_corrupt_failed_unit_listing():
