@@ -81,6 +81,34 @@ class RequestWorkflowTests(unittest.TestCase):
         self.assertIn("REPARSE_REJECTED", native)
         self.assertNotIn("self.skipTest", native)
 
+    def test_claim_denial_is_classified_without_raw_output(self):
+        workflow = FILE.read_text()
+        claim = workflow.split("      - name: Consume issue request", 1)[1].split("      - name: Measure native", 1)[0]
+
+        def guard(script):
+            self.assertIn("$gatewayExit = $LASTEXITCODE", script)
+            self.assertIn("if ($gatewayExit -ne 0 -or -not $raw)", script)
+            self.assertIn("$failureClass = 'UNCLASSIFIED'", script)
+            self.assertIn("if ($allowedClasses -ccontains $candidate)", script)
+            self.assertIn("'SOURCE_CHANGED'", script)
+            self.assertIn("'REQUEST_ALREADY_CONSUMED_OR_UNCERTAIN'", script)
+            self.assertIn("Write-Output (\"AUDIT_CLAIM_FAILURE_CLASS=\" + $failureClass)", script)
+            self.assertIn("throw 'AUDIT_CLAIM_BLOCKED'", script)
+            self.assertNotIn("Write-Output $raw", script)
+            self.assertNotIn("Write-Output $candidate", script)
+            self.assertNotIn("Write-Output $gatewayReply", script)
+            self.assertLess(script.index('Write-Output ("AUDIT_CLAIM_FAILURE_CLASS='), script.index("throw 'AUDIT_CLAIM_BLOCKED'"))
+
+        guard(claim)
+        for old, replacement in (
+            ("-ccontains $candidate", "-contains $candidate"),
+            ("throw 'AUDIT_CLAIM_BLOCKED'", "Write-Output 'CLAIM_NOT_BLOCKED'"),
+            ("$failureClass = 'UNCLASSIFIED'", "$failureClass = $candidate"),
+            ('Write-Output ("AUDIT_CLAIM_FAILURE_CLASS=" + $failureClass)', 'Write-Output $raw'),
+        ):
+            with self.subTest(old=old), self.assertRaises(AssertionError):
+                guard(claim.replace(old, replacement))
+
     def test_ci_automatically_discovers_python_tests(self):
         self.assertIn("python -m pytest -ra", (ROOT / ".github/workflows/ci.yml").read_text())
 
