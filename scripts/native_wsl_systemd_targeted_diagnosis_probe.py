@@ -62,6 +62,7 @@ BLOCK_REASONS = frozenset({
     "journal_evidence_limit", "origin_unverified", "fixed_probe_failed",
     "invalid_report_schema", "invalid_report_status", "journal_read_not_proven",
     "invalid_failed_units", "invalid_unit_detail", "invalid_journal_evidence",
+    "failed_units_invalid", "duplicate_failed_unit", "unit_category_mismatch",
     "false_success", "report_oversize", "arguments_not_permitted",
 })
 
@@ -159,6 +160,10 @@ def collect(env: dict, host: str, platform: str, probe_factory=wsl.WslProbe) -> 
                 "properties": parse_show_output(unit, shown),
                 "journal": parse_journal(unit, journal),
             })
+    except ProbeBlocked:
+        raise
+    except details.ProbeBlocked:
+        raise ProbeBlocked("failed_units_invalid") from None
     except (details.wsl.QualificationBlocked, OSError, subprocess.SubprocessError,
             TypeError, ValueError):
         raise ProbeBlocked("fixed_probe_failed") from None

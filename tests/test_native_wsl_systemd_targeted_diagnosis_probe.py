@@ -169,6 +169,36 @@ def test_targeted_reject_duplicate_and_incoherent_category_receipts():
         module.validate(mismatch)
 
 
+def test_collect_preserves_sanitized_parse_failure_reason():
+    class WrongJournal(FakeProbe):
+        def _run(self, *args):
+            if args[0] == "/usr/bin/journalctl":
+                return 0, json.dumps({
+                    "_SYSTEMD_UNIT": "different.service",
+                    "MESSAGE": "private text must never be printed",
+                }) + "\n"
+            return super()._run(*args)
+
+    with pytest.raises(module.ProbeBlocked, match="journal_unit_mismatch"):
+        module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
+                       "win32", WrongJournal)
+    assert module.blocked_report("journal_unit_mismatch")["reason"] == (
+        "journal_unit_mismatch"
+    )
+
+
+def test_collect_rejects_corrupt_failed_unit_listing():
+    class DuplicateUnits(FakeProbe):
+        failed = (
+            "postgresql@15-main.service loaded failed failed\n"
+            "postgresql@15-main.service loaded failed failed\n"
+        )
+
+    with pytest.raises(module.ProbeBlocked, match="failed_units_invalid"):
+        module.collect(valid_env(), module.wsl.base.EXPECTED_HOST,
+                       "win32", DuplicateUnits)
+
+
 def test_false_success_fields_are_blocked():
     probe = FakeProbe()
     result = module.collect(
