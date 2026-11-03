@@ -21,7 +21,7 @@ except ImportError:
 wsl = categories.wsl
 CONTRACT = "native-wsl-systemd-failure-details-v1"
 MAX_FAILED = 32
-SAFE_VALUE = re.compile(r"[A-Za-z0-9_.:@+/\\- ]{0,160}\\Z")
+SAFE_VALUE = re.compile(r"[A-Za-z0-9_.:@+/ -]{0,160}\Z")
 PROPERTIES = (
     "Id",
     "LoadState",
