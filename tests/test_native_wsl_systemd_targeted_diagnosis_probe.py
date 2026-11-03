@@ -111,6 +111,19 @@ def test_parse_journal_rejects_cross_unit_and_raw_invalid_data():
         module.parse_journal("postgresql.service", "not-json\n")
 
 
+def test_collect_preserves_parser_block_reason():
+    class BrokenProbe(FakeProbe):
+        def _run(self, *args):
+            if args[0] == "/usr/bin/journalctl":
+                return 0, "not-json\\n"
+            return super()._run(*args)
+
+    with pytest.raises(module.ProbeBlocked, match="journal_schema"):
+        module.collect(
+            valid_env(), module.wsl.base.EXPECTED_HOST, "win32", BrokenProbe
+        )
+
+
 def test_fixed_probe_never_uses_mutating_or_unbounded_commands():
     source = (
         SCRIPTS / "native_wsl_systemd_targeted_diagnosis_probe.py"
