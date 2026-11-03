@@ -63,6 +63,8 @@ BLOCK_REASONS = frozenset({
     "invalid_report_schema", "invalid_report_status", "journal_read_not_proven",
     "invalid_failed_units", "invalid_unit_detail", "invalid_journal_evidence",
     "false_success", "report_oversize", "arguments_not_permitted",
+    "show_output_id_mismatch",
+    *(f"show_output_missing_{name}" for name in DIAG_PROPERTIES),
 })
 
 
@@ -89,8 +91,11 @@ def parse_show_output(unit: str, raw: str) -> dict[str, str]:
         if not SAFE_VALUE.fullmatch(value):
             raise ProbeBlocked("show_output_value_invalid")
         values[key] = value
-    if set(values) != set(DIAG_PROPERTIES) or values.get("Id", "").casefold() != unit.casefold():
-        raise ProbeBlocked("show_output_incomplete")
+    missing = [name for name in DIAG_PROPERTIES if name not in values]
+    if missing:
+        raise ProbeBlocked(f"show_output_missing_{missing[0]}")
+    if values.get("Id", "").casefold() != unit.casefold():
+        raise ProbeBlocked("show_output_id_mismatch")
     return values
 
 
