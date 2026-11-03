@@ -76,7 +76,7 @@ class FakeProbe:
             return 0, self.failed
         assert args[1] == "show" or args[0] == "/usr/bin/journalctl"
         if args[0] == "/usr/bin/journalctl":
-            return 0, journal(args[1])
+            return 0, journal(args[2])
         return 0, show(args[2])
 
 
