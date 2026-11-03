@@ -171,7 +171,36 @@ jobs:
           $raw = @(& $python -B $gateway --policy $policy --correlation-id $env:CORRELATION_ID `
             run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 2 --timeout 60 `
             --expected-head $env:EXPECTED_HEAD -- python -B scripts/desktop_gitlab_capacity_claim.py)
-          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'AUDIT_CLAIM_BLOCKED' }
+          $gatewayExit = $LASTEXITCODE
+          if ($gatewayExit -ne 0 -or -not $raw) {
+            # Never log raw Gateway output, paths, credentials or untrusted free text.
+            $failureClass = 'UNCLASSIFIED'
+            if ($raw) {
+              try {
+                $gatewayReply = @($raw)[-1] | ConvertFrom-Json -ErrorAction Stop
+                $candidate = [string]$gatewayReply.reason
+                if ($gatewayReply.stdout) {
+                  $commandReply = $gatewayReply.stdout | ConvertFrom-Json -ErrorAction Stop
+                  $candidate = [string]$commandReply.reason
+                }
+                $allowedClasses = @(
+                  'SOURCE_CHANGED', 'ISSUE_CHANGED', 'ISSUE_STALE',
+                  'REQUEST_ALREADY_CONSUMED_OR_UNCERTAIN',
+                  'AUDIT_OWNER_REJECTED', 'AUDIT_SECURITY_UNAVAILABLE',
+                  'AUDIT_DIRECTORY_HANDLE_UNAVAILABLE',
+                  'DACL_CURRENT_IDENTITY_REQUIRED', 'DACL_OTHER_PRINCIPAL_REJECTED',
+                  'CLAIM_READBACK_FAILED', 'FileNotFoundError'
+                )
+                if ($allowedClasses -ccontains $candidate) {
+                  $failureClass = $candidate
+                }
+              } catch {
+                # Parse failure is not permission to infer or print a reason.
+              }
+            }
+            Write-Output ("AUDIT_CLAIM_FAILURE_CLASS=" + $failureClass)
+            throw 'AUDIT_CLAIM_BLOCKED'
+          }
           $event = @($raw)[-1] | ConvertFrom-Json
           if ($event.result -ne 'ok' -or $event.command_exit_code -ne 0 -or $event.state_changed -ne $false) { throw 'AUDIT_CLAIM_GATEWAY_INVALID' }
           $receipt = $event.stdout | ConvertFrom-Json
