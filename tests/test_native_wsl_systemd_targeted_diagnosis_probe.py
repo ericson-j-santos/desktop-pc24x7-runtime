@@ -122,6 +122,15 @@ def test_parse_show_output_reports_fixed_missing_property():
         module.parse_show_output("postgresql@15-main.service", raw)
 
 
+def test_parse_show_output_treats_job_result_as_optional():
+    raw = show("postgresql@15-main.service")
+    raw = "\n".join(
+        line for line in raw.splitlines() if not line.startswith("JobResult=")
+    ) + "\n"
+    parsed = module.parse_show_output("postgresql@15-main.service", raw)
+    assert parsed["JobResult"] == ""
+
+
 def test_collect_preserves_parser_block_reason():
     class BrokenProbe(FakeProbe):
         def _run(self, *args):
