@@ -14,3 +14,5 @@ A execução física Dedicated Runtime Runner E2E 41698530586 comprovou sessão/
 
 ## Próxima mudança responsável
 Runtime Platform deve qualificar o banco e preparar publicador/recuperador nativo com os controles acima. Não desativar o serviço legado até migração provada. Custo incremental R$ 0,00.
+
+9. Investigar o estado `systemd=degraded` por sonda fixa `systemctl --failed --no-legend --no-pager --plain`, usando o mesmo modo `native-wsl-postgres-qualification`, Session Launcher, Gateway e identidade de runner; reportar apenas contagens e categorias, sem nomes/descrições. Controles negativos: origem errada, admissão vencida, saída anômala, falso sucesso. A sonda não restaura serviços nem atesta atualização do DEV; o E2E físico do novo SHA segue obrigatório antes de considerá-la aplicada no Desktop.

@@ -253,6 +253,28 @@ class NativeInventoryWorkflowTests(unittest.TestCase):
             ["runner-identity", *NATIVE_MODES, "orchestrator-runner-preflight"],
         )
 
+    def test_systemd_failed_units_probe_reuses_governed_native_dispatch(self):
+        config = workflow_config()
+        trigger = config.get("on", config.get(True))["workflow_dispatch"]["inputs"]
+        self.assertEqual(trigger["diagnostic"]["options"],
+                         ["runner-identity", *NATIVE_MODES, "orchestrator-runner-preflight"])
+        job = config["jobs"]["e2e"]
+        name = "Classify failed WSL systemd units through Command Gateway"
+        step = workflow_step(job, name)
+        self.assertEqual(step["if"], "inputs.diagnostic == 'native-wsl-postgres-qualification'")
+        self.assertEqual(step["shell"], "powershell")
+        for key in ("command_gateway.py", "native_wsl_systemd_failure_probe.py",
+                    "--expected-head", "--session-id", "--risk", "1",
+                    "--timeout", "60", "python", "-B"):
+            self.assertIn(key, step["run"])
+        self.assertNotIn("docker", step["run"].casefold())
+        names = [x["name"] for x in job["steps"]]
+        self.assertLess(names.index(
+            "Qualify default WSL for native PostgreSQL through Command Gateway"),
+            names.index(name))
+        self.assertLess(names.index(name), names.index(
+            "Prove orchestrator readonly preflight, negative SHA and replay through Command Gateway"))
+
     def test_gateway_and_session_preserved(self):
         raw = WORKFLOW.read_text(encoding="utf-8")
         native = raw.split("      - name: Read fixed native PostgreSQL metadata", 1)[1]
