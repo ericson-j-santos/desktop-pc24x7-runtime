@@ -1,0 +1,22 @@
+{
+  "feature_name": "reqsys-native-dev-release-admission",
+  "project": "Desktop PC24x7 Runtime",
+  "created_at": "2026-11-03",
+  "phase": "implementation",
+  "description": "Fail-closed read-only admission of native PostgreSQL WSL and ReqSys DEV release prerequisites",
+  "approvals": {
+    "requirements": true,
+    "design": true,
+    "tasks": true
+  },
+  "sdd_gate": {
+    "tests": [
+      "tests/test_reqsys_native_release_admission.py"
+    ]
+  },
+  "controls": {
+    "no_docker": true,
+    "no_deploy": true,
+    "physical_e2e_required_before_activation": true
+  }
+}
