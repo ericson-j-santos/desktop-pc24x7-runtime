@@ -125,6 +125,27 @@ def test_fixed_probe_never_uses_mutating_or_shell_commands():
     assert commands[0][1]["timeout"] == 20
 
 
+def test_readback_rejects_forged_category_and_duplicate_unit():
+    from copy import deepcopy
+
+    original = module.collect(
+        valid_env(), module.wsl.base.EXPECTED_HOST, "win32", FakeProbe
+    )
+    forged = deepcopy(original)
+    forged["failed_units"][0]["category"] = "network"
+    with pytest.raises(module.ProbeBlocked, match="unit_category_mismatch"):
+        module.validate(forged)
+
+    duplicated = deepcopy(original)
+    duplicated["failed_units"].append(deepcopy(duplicated["failed_units"][0]))
+    duplicated["failed_unit_count"] += 1
+    with pytest.raises(module.ProbeBlocked, match="duplicate_failed_unit"):
+        module.validate(duplicated)
+
+    assert module.validate(original) is None
+    assert module.validate(original) is None  # idempotent replay
+
+
 def test_false_success_fields_are_blocked():
     probe = FakeProbe()
     result = module.collect(valid_env(), module.wsl.base.EXPECTED_HOST, "win32",

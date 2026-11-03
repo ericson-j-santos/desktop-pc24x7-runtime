@@ -55,14 +55,19 @@ def parse_failed_rows(raw: str) -> list[tuple[str, str]]:
         if parts[1:4] != ["loaded", "failed", "failed"]:
             raise ProbeBlocked("failed_output_state")
         unit = parts[0].lower()
-        category_counts = categories.parse_failed_units(
-            " ".join(parts[:4]) + "\n"
-        )
-        category = next(key for key, value in category_counts.items() if value)
+        category = category_for_unit(unit)
         rows.append((unit, category))
     if len({unit for unit, _ in rows}) != len(rows):
         raise ProbeBlocked("duplicate_failed_unit")
     return rows
+
+
+def category_for_unit(unit: str) -> str:
+    """Use the canonical failed-unit classifier, also on receipt readback."""
+    if not isinstance(unit, str) or not categories.UNIT.fullmatch(unit):
+        raise ProbeBlocked("unit_name_invalid")
+    counts = categories.parse_failed_units(f"{unit} loaded failed failed\n")
+    return next(name for name, value in counts.items() if value)
 
 
 def parse_show_output(unit: str, raw: str) -> dict[str, str]:
@@ -151,6 +156,7 @@ def validate(report: dict) -> None:
         or report["failed_unit_count"] != len(units)
     ):
         raise ProbeBlocked("invalid_failed_units")
+    seen_units: set[str] = set()
     for item in units:
         if (
             not isinstance(item, dict)
@@ -162,6 +168,12 @@ def validate(report: dict) -> None:
             or set(item["properties"]) != set(PROPERTIES)
         ):
             raise ProbeBlocked("invalid_unit_detail")
+        normalized = item["unit"].casefold()
+        if normalized in seen_units:
+            raise ProbeBlocked("duplicate_failed_unit")
+        seen_units.add(normalized)
+        if item["category"] != category_for_unit(item["unit"]):
+            raise ProbeBlocked("unit_category_mismatch")
         parse_show_output(item["unit"], "\n".join(
             f"{key}={item['properties'][key]}" for key in PROPERTIES
         ))

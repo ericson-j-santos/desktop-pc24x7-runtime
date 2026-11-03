@@ -154,6 +154,32 @@ def test_blocked_report_exposes_only_fixed_reason():
     }
 
 
+def test_targeted_readback_rejects_incoherent_category_and_duplicate():
+    from copy import deepcopy
+
+    original = module.collect(
+        valid_env(), module.wsl.base.EXPECTED_HOST, "win32", FakeProbe
+    )
+    forged = deepcopy(original)
+    forged["failed_units"][0]["category"] = "network"
+    with pytest.raises(module.ProbeBlocked, match="unit_category_mismatch"):
+        module.validate(forged)
+
+    duplicated = deepcopy(original)
+    duplicated["failed_units"].append(deepcopy(duplicated["failed_units"][0]))
+    duplicated["failed_unit_count"] += 1
+    with pytest.raises(module.ProbeBlocked, match="duplicate_failed_unit"):
+        module.validate(duplicated)
+
+    assert module.validate(original) is None
+    assert module.validate(original) is None
+
+
+def test_blocked_report_recognizes_integrity_errors():
+    for name in ("unit_category_mismatch", "duplicate_failed_unit"):
+        assert module.blocked_report(name)["reason"] == name
+
+
 def test_false_success_fields_are_blocked():
     probe = FakeProbe()
     result = module.collect(
