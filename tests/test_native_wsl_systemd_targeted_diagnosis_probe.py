@@ -141,6 +141,19 @@ def test_fixed_probe_never_uses_mutating_or_unbounded_commands():
     assert commands[0][1]["timeout"] == 20
 
 
+def test_blocked_report_exposes_only_fixed_reason():
+    assert module.blocked_report("journal_schema") == {
+        "contract": module.CONTRACT,
+        "reason": "journal_schema",
+        "status": "blocked",
+    }
+    assert module.blocked_report("raw host output") == {
+        "contract": module.CONTRACT,
+        "reason": "fixed_probe_failed",
+        "status": "blocked",
+    }
+
+
 def test_false_success_fields_are_blocked():
     probe = FakeProbe()
     result = module.collect(

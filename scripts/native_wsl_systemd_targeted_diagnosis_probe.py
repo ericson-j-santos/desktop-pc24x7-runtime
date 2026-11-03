@@ -54,6 +54,24 @@ class ProbeBlocked(ValueError):
     """Fail closed without propagating raw host output."""
 
 
+BLOCK_REASONS = frozenset({
+    "unit_name_invalid", "show_output_invalid", "show_output_schema",
+    "show_output_property_invalid", "show_output_value_invalid",
+    "show_output_incomplete", "journal_output_invalid", "journal_record_limit",
+    "journal_schema", "journal_unit_mismatch", "journal_message_invalid",
+    "journal_evidence_limit", "origin_unverified", "fixed_probe_failed",
+    "invalid_report_schema", "invalid_report_status", "journal_read_not_proven",
+    "invalid_failed_units", "invalid_unit_detail", "invalid_journal_evidence",
+    "false_success", "report_oversize", "arguments_not_permitted",
+})
+
+
+def blocked_report(reason: str) -> dict[str, str]:
+    """Expose only a fixed internal reason, never host-provided text."""
+    safe_reason = reason if reason in BLOCK_REASONS else "fixed_probe_failed"
+    return {"contract": CONTRACT, "reason": safe_reason, "status": "blocked"}
+
+
 def parse_show_output(unit: str, raw: str) -> dict[str, str]:
     if not details.categories.UNIT.fullmatch(unit):
         raise ProbeBlocked("unit_name_invalid")
@@ -228,8 +246,8 @@ def main() -> int:
             raise ProbeBlocked("arguments_not_permitted")
         environment = {key: os.environ.get(key, "") for key in wsl.base.CI_KEYS}
         result = collect(environment, socket.gethostname(), sys.platform)
-    except ProbeBlocked:
-        print(json.dumps({"contract": CONTRACT, "status": "blocked"}, sort_keys=True))
+    except ProbeBlocked as exc:
+        print(json.dumps(blocked_report(str(exc)), sort_keys=True))
         return 3
     print(json.dumps(result, sort_keys=True))
     return 0
