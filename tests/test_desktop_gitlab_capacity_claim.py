@@ -86,14 +86,24 @@ class ClaimTests(unittest.TestCase):
     def test_existing_symlink_is_never_followed(self):
         outside = self.root / "outside"
         outside.write_bytes(b"unchanged")
-        self.target().symlink_to(outside)
+        try:
+            self.target().symlink_to(outside)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows symbolic-link privilege is unavailable; native reparse coverage runs separately")
+            raise
         with self.assertRaises(m.ClaimError):
             self.call()
         self.assertEqual(outside.read_bytes(), b"unchanged")
 
     def test_root_symlink_is_rejected(self):
         alias = self.root / "alias"
-        alias.symlink_to(self.root, target_is_directory=True)
+        try:
+            alias.symlink_to(self.root, target_is_directory=True)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                self.skipTest("Windows symbolic-link privilege is unavailable; native reparse coverage runs separately")
+            raise
         with self.assertRaises(m.ClaimError):
             m.claim(alias, META, local_test_guard)
 
