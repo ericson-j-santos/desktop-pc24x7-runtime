@@ -133,6 +133,16 @@ jobs:
               await new Promise(resolve => setTimeout(resolve, 750));
             }
             if (!admitted) throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
+            // Close the time-of-check/time-of-use window after any bounded API wait.
+            const {data: finalMain} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
+            const {data: finalRules} = await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'
+            });
+            if (finalMain.commit.sha !== expected || finalRules.commit.sha !== rulesExpected) {
+              core.error('CAPACITY_ADMISSION_CLASS=' +
+                (finalMain.commit.sha !== expected ? 'SOURCE_SHA_CHANGED_AFTER_STATUS' : 'RULES_SHA_CHANGED_AFTER_STATUS'));
+              throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
+            }
             core.info('CAPACITY_READ_ONLY_ADMISSION_OK');
 
       - name: Checkout exact Desktop source

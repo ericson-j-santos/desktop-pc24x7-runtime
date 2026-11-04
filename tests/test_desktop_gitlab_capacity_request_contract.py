@@ -180,6 +180,7 @@ class RequestWorkflowTests(unittest.TestCase):
   const RULES = '11e2e86d0283e83247d8058d05bbabe3dd7cc2c2';
   const lines = [];
   let calls = 0;
+  let mainReads = 0, rulesReads = 0;
   const context = {
     eventName: 'workflow_dispatch', actor: 'ericson-j-santos',
     repo: {owner: 'ericson-j-santos', repo: 'desktop-pc24x7-runtime'},
@@ -191,10 +192,14 @@ class RequestWorkflowTests(unittest.TestCase):
     RUNNER_NAME: 'DESKTOP-PDQK954-runtime'
   };
   const github = {rest: {
-    repos: {getBranch: async ({repo}) => ({
-      data: {commit: {sha: repo === 'chatgpt-operational-rules' ?
-        (scenario.rulesSha || RULES) : (scenario.mainSha || HEAD)}}
-    })},
+    repos: {getBranch: async ({repo}) => {
+      const isRules = repo === 'chatgpt-operational-rules';
+      if (isRules) rulesReads++; else mainReads++;
+      const sha = isRules
+        ? (scenario.rulesDriftAfterFirst && rulesReads > 1 ? 'e'.repeat(40) : (scenario.rulesSha || RULES))
+        : (scenario.mainDriftAfterFirst && mainReads > 1 ? 'f'.repeat(40) : (scenario.mainSha || HEAD));
+      return {data: {commit: {sha}}};
+    }},
     actions: {listJobsForWorkflowRun: async () => {
       const status = (scenario.statuses || ['in_progress'])[
         Math.min(calls, (scenario.statuses || ['in_progress']).length - 1)];
@@ -229,6 +234,8 @@ class RequestWorkflowTests(unittest.TestCase):
             ({"runnerId": 3}, False, 1, "PHYSICAL_RUNNER_ID_CHANGED"),
             ({"mainSha": "c" * 40}, False, 0, "SOURCE_SHA_CHANGED"),
             ({"rulesSha": "d" * 40}, False, 0, "RULES_SHA_CHANGED"),
+            ({"mainDriftAfterFirst": True}, False, 1, "SOURCE_SHA_CHANGED_AFTER_STATUS"),
+            ({"rulesDriftAfterFirst": True}, False, 1, "RULES_SHA_CHANGED_AFTER_STATUS"),
         ]
         for scenario, admitted, calls, marker in cases:
             with self.subTest(scenario=scenario):
