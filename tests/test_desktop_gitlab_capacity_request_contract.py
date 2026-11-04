@@ -166,7 +166,9 @@ class RequestWorkflowTests(unittest.TestCase):
 
         node = shutil.which("node")
         self.assertIsNotNone(node, "GitHub standard Windows and Linux CI runners must have node")
-        syntax = subprocess.run([node, "--check", "-"], input=source, text=True,
+        # github-script evaluates the snippet as an async function, not CJS stdin.
+        wrapped = "async function validate_github_script() {\n" + source + "\n}\n"
+        syntax = subprocess.run([node, "--check", "-"], input=wrapped, text=True,
                                 capture_output=True, timeout=15)
         self.assertEqual(syntax.returncode, 0, syntax.stderr)
 
