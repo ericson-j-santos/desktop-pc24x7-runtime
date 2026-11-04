@@ -147,6 +147,109 @@ class RequestWorkflowTests(unittest.TestCase):
                 self.assertIn("AUDIT_CLAIM_BLOCKED", combined)
                 self.assertNotIn("PRIVATE_SENTINEL", combined)
 
+    def test_admission_short_retry_is_bounded_and_fail_closed(self):
+        import json
+        import shutil
+        import subprocess
+        text = FILE.read_text()
+        section = text.split("      - name: Require owner, current source, dedicated runner and read-only scope", 1)[1].split("      - name: Checkout exact Desktop source", 1)[0]
+        lines = section.split("          script: |\n", 1)[1].splitlines()
+        source = "\n".join(line[12:] if line.startswith("            ") else line for line in lines)
+        self.assertIn("CAPACITY_ADMISSION_CLASS=", source)
+        self.assertIn("matches[0].runner_id !== 2", source)
+        self.assertIn("matches[0].status !== 'in_progress'", source)
+        self.assertIn("for (let attempt = 0; attempt < 3; attempt++)", source)
+        self.assertIn("if (attempt === 2 || permanentFailures.length)", source)
+        self.assertIn("setTimeout(resolve, 750)", source)
+        self.assertNotIn("core.info(jobs)", source)
+        self.assertNotIn("core.error(JSON.stringify", source)
+
+        node = shutil.which("node")
+        self.assertIsNotNone(node, "GitHub standard Windows and Linux CI runners must have node")
+        # github-script evaluates the snippet as an async function, not CJS stdin.
+        wrapped = "async function validate_github_script() {\n" + source + "\n}\n"
+        syntax = subprocess.run([node, "--check", "-"], input=wrapped, text=True,
+                                capture_output=True, timeout=15)
+        self.assertEqual(syntax.returncode, 0, syntax.stderr)
+
+        harness = r"""
+(async () => {
+  const source = process.argv[1];
+  const scenario = JSON.parse(process.argv[2]);
+  const HEAD = '81367c77254cb5bbc175645f3cc825998bbce9cf';
+  const RULES = '11e2e86d0283e83247d8058d05bbabe3dd7cc2c2';
+  const lines = [];
+  let calls = 0;
+  let mainReads = 0, rulesReads = 0;
+  const context = {
+    eventName: 'workflow_dispatch', actor: 'ericson-j-santos',
+    repo: {owner: 'ericson-j-santos', repo: 'desktop-pc24x7-runtime'},
+    ref: 'refs/heads/main', sha: HEAD, runId: 123,
+    payload: {inputs: {scope: 'READ_ONLY_CAPACITY_NO_INSTALL'}}
+  };
+  const env = {
+    EXPECTED_HEAD: HEAD, EXPECTED_RULES: RULES, GITHUB_RUN_ATTEMPT: '1',
+    RUNNER_NAME: 'DESKTOP-PDQK954-runtime'
+  };
+  const github = {rest: {
+    repos: {getBranch: async ({repo}) => {
+      const isRules = repo === 'chatgpt-operational-rules';
+      if (isRules) rulesReads++; else mainReads++;
+      const sha = isRules
+        ? (scenario.rulesDriftAfterFirst && rulesReads > 1 ? 'e'.repeat(40) : (scenario.rulesSha || RULES))
+        : (scenario.mainDriftAfterFirst && mainReads > 1 ? 'f'.repeat(40) : (scenario.mainSha || HEAD));
+      return {data: {commit: {sha}}};
+    }},
+    actions: {listJobsForWorkflowRun: async () => {
+      const status = (scenario.statuses || ['in_progress'])[
+        Math.min(calls, (scenario.statuses || ['in_progress']).length - 1)];
+      calls++;
+      return {data: {total_count: 3, jobs: [
+        {name: 'Collect Desktop capacity through governed Gateway',
+         runner_id: scenario.runnerId ?? 2,
+         runner_name: scenario.runnerName || 'DESKTOP-PDQK954-runtime', status},
+        {name: 'Stop a capacity probe that never gets a Desktop runner'},
+        {name: 'Admit typed owner issue before Desktop scheduling'}
+      ]}};
+    }}
+  }};
+  const fn = new (Object.getPrototypeOf(async function(){}).constructor)(
+    'github', 'context', 'core', 'require', 'process', 'setTimeout', source);
+  let ok = true, error = '';
+  try {
+    await fn(github, context, {
+      info: msg => lines.push(msg), error: msg => lines.push(msg)
+    }, name => {
+      if (name !== 'os') throw Error('unexpected require');
+      return {hostname: () => 'DESKTOP-PDQK954'};
+    }, {env}, callback => callback());
+  } catch (e) {ok = false; error = e.message}
+  process.stdout.write(JSON.stringify({ok, error, calls, lines}));
+})().catch(e => {console.error(e); process.exitCode = 2});
+"""
+        cases = [
+            ({"statuses": ["in_progress"]}, True, 1, "CAPACITY_READ_ONLY_ADMISSION_OK"),
+            ({"statuses": ["queued", "in_progress"]}, True, 2, "CAPACITY_READ_ONLY_ADMISSION_OK"),
+            ({"statuses": ["queued"]}, False, 3, "JOB_STATUS_NOT_IN_PROGRESS"),
+            ({"runnerId": 3}, False, 1, "PHYSICAL_RUNNER_ID_CHANGED"),
+            ({"mainSha": "c" * 40}, False, 0, "SOURCE_SHA_CHANGED"),
+            ({"rulesSha": "d" * 40}, False, 0, "RULES_SHA_CHANGED"),
+            ({"mainDriftAfterFirst": True}, False, 1, "SOURCE_SHA_CHANGED_AFTER_STATUS"),
+            ({"rulesDriftAfterFirst": True}, False, 1, "RULES_SHA_CHANGED_AFTER_STATUS"),
+        ]
+        for scenario, admitted, calls, marker in cases:
+            with self.subTest(scenario=scenario):
+                result = subprocess.run([node, "-e", harness, source, json.dumps(scenario)],
+                                        capture_output=True, text=True, timeout=15)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                actual = json.loads(result.stdout)
+                self.assertEqual(actual["ok"], admitted)
+                self.assertEqual(actual["calls"], calls)
+                self.assertTrue(any(marker in line for line in actual["lines"]))
+                if not admitted:
+                    self.assertEqual(actual["error"], "CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED")
+                self.assertFalse(any("private" in line.lower() for line in actual["lines"]))
+
     def test_ci_automatically_discovers_python_tests(self):
         self.assertIn("python -m pytest -ra", (ROOT / ".github/workflows/ci.yml").read_text())
 

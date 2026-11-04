@@ -89,15 +89,58 @@ jobs:
             const {data: rules} = await github.rest.repos.getBranch({
               owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'
             });
-            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
-              ...context.repo,run_id:context.runId,filter:'latest',per_page:100
+            // Source identity must be pinned; never retry or tolerate a changed SHA.
+            if (main.commit.sha !== expected) {
+              core.error('CAPACITY_ADMISSION_CLASS=SOURCE_SHA_CHANGED');
+              throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
+            }
+            if (rules.commit.sha !== rulesExpected) {
+              core.error('CAPACITY_ADMISSION_CLASS=RULES_SHA_CHANGED');
+              throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
+            }
+            // GitHub jobs API can briefly lag behind the running job. Re-read
+            // at most twice; only the exact, in_progress runner is admissible.
+            let admitted = false;
+            for (let attempt = 0; attempt < 3; attempt++) {
+              const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+                ...context.repo,run_id:context.runId,filter:'latest',per_page:100
+              });
+              const matches = jobs.jobs.filter(j=>j.name === 'Collect Desktop capacity through governed Gateway');
+              const permanentFailures = [];
+              const problems = [];
+              if (jobs.total_count !== jobs.jobs.length) problems.push('JOB_LIST_INCOMPLETE');
+              if (matches.length !== 1) problems.push('JOB_IDENTITY_NOT_UNIQUE');
+              if (matches.length === 1) {
+                if (matches[0].runner_id !== 2) {
+                  permanentFailures.push('PHYSICAL_RUNNER_ID_CHANGED');
+                  problems.push('PHYSICAL_RUNNER_ID_CHANGED');
+                }
+                if (matches[0].runner_name !== 'DESKTOP-PDQK954-runtime') {
+                  permanentFailures.push('PHYSICAL_RUNNER_NAME_CHANGED');
+                  problems.push('PHYSICAL_RUNNER_NAME_CHANGED');
+                }
+                if (matches[0].status !== 'in_progress') problems.push('JOB_STATUS_NOT_IN_PROGRESS');
+              }
+              if (problems.length === 0) {
+                admitted = true;
+                break;
+              }
+              if (attempt === 2 || permanentFailures.length) {
+                // Static categories only; do not log API response or secrets.
+                core.error('CAPACITY_ADMISSION_CLASS=' + problems.join(','));
+                throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
+              }
+              await new Promise(resolve => setTimeout(resolve, 750));
+            }
+            if (!admitted) throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
+            // Close the time-of-check/time-of-use window after any bounded API wait.
+            const {data: finalMain} = await github.rest.repos.getBranch({...context.repo,branch:'main'});
+            const {data: finalRules} = await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'
             });
-            const matches = jobs.jobs.filter(j=>j.name === 'Collect Desktop capacity through governed Gateway');
-            if (main.commit.sha !== expected || rules.commit.sha !== rulesExpected ||
-                jobs.total_count !== jobs.jobs.length || matches.length !== 1 ||
-                matches[0].runner_id !== 2 ||
-                matches[0].runner_name !== 'DESKTOP-PDQK954-runtime' ||
-                matches[0].status !== 'in_progress') {
+            if (finalMain.commit.sha !== expected || finalRules.commit.sha !== rulesExpected) {
+              core.error('CAPACITY_ADMISSION_CLASS=' +
+                (finalMain.commit.sha !== expected ? 'SOURCE_SHA_CHANGED_AFTER_STATUS' : 'RULES_SHA_CHANGED_AFTER_STATUS'));
               throw new Error('CAPACITY_SOURCE_RULES_OR_PHYSICAL_RUNNER_CHANGED');
             }
             core.info('CAPACITY_READ_ONLY_ADMISSION_OK');
