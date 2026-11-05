@@ -1,8 +1,8 @@
-name: Ollama CPU Pilot DEV (manual)
+name: Ollama CPU Pilot DEV (manual + gated PR preflight)
 
 on:
   pull_request:
-    types: [ready_for_review]
+    types: [ready_for_review, edited]
     branches: [main]
     paths:
       - .github/workflows/ollama-cpu-pilot-dev.yml
@@ -41,13 +41,22 @@ jobs:
         (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
          github.event.pull_request.head.repo.full_name == github.repository &&
          github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
-         github.event.pull_request.draft == false)
+         github.event.pull_request.draft == false) ||
+        (github.event_name == 'pull_request' && github.event.action == 'edited' &&
+         github.event.pull_request.number == 138 &&
+         github.event.pull_request.draft == true &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.head.ref == 'fix/ollama-current-rules-admission-todo39-20261105' &&
+         github.event.changes.body.from != null &&
+         contains(github.event.pull_request.body, 'TODO39_AUTOPREFLIGHT_ONCE_') &&
+         !contains(github.event.changes.body.from, 'TODO39_AUTOPREFLIGHT_ONCE_'))
       )
     runs-on: ubuntu-latest
     timeout-minutes: 2
     permissions:
       contents: read
       pull-requests: read
+      checks: read
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
@@ -104,11 +113,66 @@ jobs:
               }
               core.info('OLLAMA_DRAFT_INVENTORY_ADMITTED:' + candidate);
             }
+            if (context.eventName === 'pull_request' &&
+                context.payload.action === 'edited') {
+              const candidate = String(context.payload.pull_request?.head?.sha || '').toLowerCase();
+              const marker = 'TODO39_AUTOPREFLIGHT_ONCE_' + candidate;
+              const oldBody = context.payload.changes?.body?.from;
+              if (!/^[0-9a-f]{40}$/.test(candidate) ||
+                  context.payload.pull_request?.number !== 138 ||
+                  typeof oldBody !== 'string' ||
+                  oldBody.includes('TODO39_AUTOPREFLIGHT_ONCE_') ||
+                  !String(context.payload.pull_request?.body || '').includes(marker)) {
+                core.setFailed('OLLAMA_PREFLIGHT_ONE_SHOT_INVALID');
+                return;
+              }
+              const [prResp, mainResp, branchResp, checksResp, repoResp] = await Promise.all([
+                github.rest.pulls.get({
+                  owner: context.repo.owner, repo: context.repo.repo, pull_number: 138,
+                }),
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo, branch: 'main',
+                }),
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  branch: 'fix/ollama-current-rules-admission-todo39-20261105',
+                }),
+                github.rest.checks.listForRef({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  ref: candidate, per_page: 100,
+                }),
+                github.rest.repos.get({ owner: context.repo.owner, repo: context.repo.repo }),
+              ]);
+              const pr = prResp.data;
+              const required = ['Python compile and tests', 'Portable Linux compile and tests'];
+              const passed = name => checksResp.data.check_runs.some(check =>
+                check.name === name && check.head_sha === candidate &&
+                check.status === 'completed' && check.conclusion === 'success' &&
+                check.started_at && check.completed_at);
+              if (pr.state !== 'open' || !pr.draft || pr.number !== 138 ||
+                  pr.user?.login !== 'ericson-j-santos' ||
+                  pr.head?.sha !== candidate ||
+                  pr.head?.ref !== 'fix/ollama-current-rules-admission-todo39-20261105' ||
+                  pr.head?.repo?.full_name !== context.repo.owner + '/' + context.repo.repo ||
+                  pr.base?.ref !== 'main' ||
+                  pr.base?.sha !== mainResp.data.commit.sha ||
+                  branchResp.data.commit.sha !== candidate ||
+                  !String(pr.body || '').includes(marker) ||
+                  repoResp.data.private !== false || !required.every(passed)) {
+                core.setFailed('OLLAMA_PREFLIGHT_PR_CI_OR_COST_UNVERIFIED');
+                return;
+              }
+              core.info('TODO39_HOSTED_PREFLIGHT_ONLY:' + candidate +
+                ':RULES_SHA=' + sha +
+                ':NO_PHYSICAL_DISPATCH:NO_MODEL_INFERENCE');
+            }
             core.setOutput('sha', sha);
 
   pilot:
     needs: resolve_rules
-    if: needs.resolve_rules.result == 'success'
+    if: >-
+      needs.resolve_rules.result == 'success' &&
+      github.event.action != 'edited'
     name: Read-only local Ollama CPU pilot
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 5
@@ -270,7 +334,9 @@ jobs:
 
   physical_runner_watchdog:
     needs: resolve_rules
-    if: needs.resolve_rules.result == 'success'
+    if: >-
+      needs.resolve_rules.result == 'success' &&
+      github.event.action != 'edited'
     name: Physical runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2
