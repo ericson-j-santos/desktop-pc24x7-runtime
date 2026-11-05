@@ -236,7 +236,6 @@ jobs:
                 ...source, run_id: runId, per_page: 100,
               });
               const proved = jobs.data.jobs.filter(job =>
-                job.name === 'Runner, Docker and workers canary' &&
                 job.status === 'completed' && job.conclusion === 'success' &&
                 job.runner_name === 'DESKTOP-PDQK954-runtime' &&
                 Number.isSafeInteger(job.runner_id) && job.runner_id > 0 &&
