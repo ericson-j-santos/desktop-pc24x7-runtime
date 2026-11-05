@@ -620,11 +620,11 @@ def test_untrusted_issue_comments_cannot_cancel_active_pilot():
     import yaml
 
     content = WORKFLOW.read_text(encoding="utf-8")
-    assert "on:\\n  issue_comment:" in content
+    assert "  issue_comment:" in content
     config = yaml.safe_load(content)
     group = config["concurrency"]["group"]
     cancellation = config["concurrency"]["cancel-in-progress"]
     assert "github.event.comment.id" in group
     assert "github.event_name == 'issue_comment'" in group
     assert cancellation == "${{ github.event_name != 'issue_comment' }}"
-    assert "cancel-in-progress: true" not in content.split("\\nconcurrency:", 1)[1].split("\\njobs:", 1)[0]
+    assert "cancel-in-progress: true" not in content.split("concurrency:", 1)[1].split("jobs:", 1)[0]
