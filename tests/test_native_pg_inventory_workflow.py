@@ -117,6 +117,7 @@ NATIVE_MODES = (
     "native-postgres-inventory",
     "native-postgres-readback",
     "native-wsl-postgres-qualification",
+    "native-wsl-postgres-cluster-readonly",
 )
 
 
