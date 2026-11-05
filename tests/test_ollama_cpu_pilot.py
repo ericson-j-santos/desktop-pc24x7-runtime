@@ -217,3 +217,87 @@ def test_physical_workflow_is_explicitly_gated_governed_and_bounded():
     assert "STALL_AFTER_SECONDS: \"60\"" in content
     assert "/api/pull" not in content
     assert "docker " not in content.lower()
+
+
+
+def test_current_rules_are_pinned_once_for_both_physical_jobs():
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    resolver = jobs["resolve_rules"]
+    assert resolver["runs-on"] == "ubuntu-latest"
+    assert resolver["outputs"]["sha"] == "${{ steps.resolve.outputs.sha }}"
+    assert "github.actor == 'ericson-j-santos'" in resolver["if"]
+    assert "github.rest.repos.getBranch" in resolver["steps"][0]["with"]["script"]
+    assert "OLLAMA_RULES_SHA_UNVERIFIED" in resolver["steps"][0]["with"]["script"]
+    for name in ("pilot", "physical_runner_watchdog"):
+        job = jobs[name]
+        assert job["needs"] == "resolve_rules"
+        assert "needs.resolve_rules.result == 'success'" in job["if"]
+        assert "RULES_SHA" not in job.get("env", {})
+        assert any(
+            step.get("with", {}).get("ref") == "${{ needs.resolve_rules.outputs.sha }}"
+            and step.get("with", {}).get("repository") == "ericson-j-santos/chatgpt-operational-rules"
+            for step in job["steps"]
+        )
+    assert "6edb5990c777d487c41fb9ee48ccbf411b11d661" not in WORKFLOW.read_text(encoding="utf-8")
+    assert all(step.get("uses") != "actions/upload-artifact@v4" for step in resolver["steps"])
+
+
+def _exercise_github_script(script: str, observed: str, expected: str = "") -> dict:
+    """Run the actual Actions JS admission logic with deterministic fake GitHub API."""
+    import subprocess
+
+    harness = """
+const Script = Object.getPrototypeOf(async function(){}).constructor;
+const source = process.argv[1], observed = process.argv[2], expected = process.argv[3];
+process.env.EXPECTED_RULES_SHA = expected;
+const outputs = {}, errors = [];
+const github = {rest:{repos:{getBranch: async ({owner, repo, branch}) => {
+  if (owner !== 'ericson-j-santos' || repo !== 'chatgpt-operational-rules' || branch !== 'main')
+    throw new Error('unexpected_source');
+  return {data:{commit:{sha:observed}}};
+}}}};
+const core = {
+  setFailed: reason => errors.push(reason),
+  setOutput: (key, value) => { outputs[key] = value; },
+  info: () => {},
+};
+(async () => {
+  await new Script('github', 'core', source)(github, core);
+  process.stdout.write(JSON.stringify({outputs, errors}));
+})().catch(err => { console.error(err.message); process.exitCode = 9; });
+"""
+    done = subprocess.run(
+        ["node", "-e", harness, script, observed, expected],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_source_gate_rejects_invalid_sha_and_drift_using_real_embedded_js():
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    resolver_js = jobs["resolve_rules"]["steps"][0]["with"]["script"]
+    recheck = next(
+        step for step in jobs["pilot"]["steps"]
+        if step.get("name") == "Recheck rules main has not drifted before bootstrap"
+    )
+    assert recheck["env"]["EXPECTED_RULES_SHA"] == "${{ needs.resolve_rules.outputs.sha }}"
+    recheck_js = recheck["with"]["script"]
+    sha = "a" * 40
+    assert _exercise_github_script(resolver_js, sha) == {
+        "outputs": {"sha": sha}, "errors": [],
+    }
+    assert _exercise_github_script(resolver_js, "short")["errors"] == [
+        "OLLAMA_RULES_SHA_UNVERIFIED"
+    ]
+    assert _exercise_github_script(recheck_js, sha, sha)["errors"] == []
+    assert _exercise_github_script(recheck_js, "b" * 40, sha)["errors"] == [
+        "OLLAMA_RULES_SHA_DRIFT"
+    ]
+    assert _exercise_github_script(recheck_js, sha, "")["errors"] == [
+        "OLLAMA_RULES_SHA_DRIFT"
+    ]
