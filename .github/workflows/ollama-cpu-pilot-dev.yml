@@ -29,8 +29,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ollama-cpu-pilot-dev-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'issue_comment' && format('ollama-comment-{0}', github.event.comment.id) || format('ollama-cpu-pilot-dev-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'issue_comment' }}
 
 jobs:
   resolve_rules:
