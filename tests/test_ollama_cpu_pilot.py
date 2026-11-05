@@ -200,7 +200,7 @@ def test_physical_workflow_is_explicitly_gated_governed_and_bounded():
     assert "  workflow_dispatch:" in trigger
     assert "\n  push:" not in trigger
     assert "\n  pull_request:" in trigger
-    assert "types: [ready_for_review]" in trigger
+    assert "types: [ready_for_review, edited]" in trigger
     assert "types: [opened" not in trigger
     assert "types: [synchronize" not in trigger
     assert "head.ref == 'feat/ollama-cpu-pilot-dev-20261024'" in content
@@ -217,3 +217,277 @@ def test_physical_workflow_is_explicitly_gated_governed_and_bounded():
     assert "STALL_AFTER_SECONDS: \"60\"" in content
     assert "/api/pull" not in content
     assert "docker " not in content.lower()
+
+
+
+def test_current_rules_are_pinned_once_for_both_physical_jobs():
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    resolver = jobs["resolve_rules"]
+    assert resolver["runs-on"] == "ubuntu-latest"
+    assert resolver["outputs"]["sha"] == "${{ steps.resolve.outputs.sha }}"
+    assert "github.actor == 'ericson-j-santos'" in resolver["if"]
+    assert "inputs.mode == 'inventory'" in resolver["if"]
+    assert "inputs.candidate_sha == github.sha" in resolver["if"]
+    assert "github.ref != 'refs/heads/main'" in resolver["if"]
+    assert "OLLAMA_DRAFT_PR_OR_BASE_DRIFT" in resolver["steps"][0]["with"]["script"]
+    assert "github.event.pull_request.number == 138" in resolver["if"]
+    assert "github.event.action == 'edited'" in resolver["if"]
+    assert "github.actor == 'ericson-j-santos'" in resolver["if"]
+    assert resolver["permissions"]["checks"] == "read"
+    assert "github.rest.checks.listForRef" in resolver["steps"][0]["with"]["script"]
+    assert "TODO39_HOSTED_PREFLIGHT_ONLY" in resolver["steps"][0]["with"]["script"]
+    assert "NO_PHYSICAL_DISPATCH:NO_MODEL_INFERENCE" in resolver["steps"][0]["with"]["script"]
+    assert resolver["permissions"]["pull-requests"] == "read"
+    assert "github.rest.repos.getBranch" in resolver["steps"][0]["with"]["script"]
+    assert "OLLAMA_RULES_SHA_UNVERIFIED" in resolver["steps"][0]["with"]["script"]
+    for name in ("pilot", "physical_runner_watchdog"):
+        job = jobs[name]
+        assert job["needs"] == "resolve_rules"
+        assert "github.event.action != 'edited'" in job["if"]
+        assert "needs.resolve_rules.result == 'success'" in job["if"]
+        assert "RULES_SHA" not in job.get("env", {})
+        assert any(
+            step.get("with", {}).get("ref") == "${{ needs.resolve_rules.outputs.sha }}"
+            and step.get("with", {}).get("repository") == "ericson-j-santos/chatgpt-operational-rules"
+            for step in job["steps"]
+        )
+    assert "6edb5990c777d487c41fb9ee48ccbf411b11d661" not in WORKFLOW.read_text(encoding="utf-8")
+    assert all(step.get("uses") != "actions/upload-artifact@v4" for step in resolver["steps"])
+
+
+def _exercise_github_script(script: str, observed: str, expected: str = "", route: dict | None = None) -> dict:
+    """Run the actual Actions JS admission logic with deterministic fake GitHub API."""
+    import subprocess
+
+    harness = """
+const Script = Object.getPrototypeOf(async function(){}).constructor;
+const source = process.argv[1], observed = process.argv[2], expected = process.argv[3];
+process.env.EXPECTED_RULES_SHA = expected;
+const outputs = {}, errors = [];
+const route = JSON.parse(process.argv[4] || '{}');
+globalThis.context = {
+  eventName: route.eventName || 'workflow_dispatch',
+  ref: route.ref || 'refs/heads/main',
+  sha: route.sha || 'a'.repeat(40),
+  repo: {owner:'ericson-j-santos', repo:'desktop-pc24x7-runtime'},
+  payload: {
+    action: route.action || '',
+    inputs: {candidate_sha: route.candidate_sha || ''},
+    pull_request: route.pull_request || {},
+    changes: {body: {from: route.oldBody ?? ''}},
+  },
+};
+const github = {rest:{
+  repos:{getBranch: async ({owner, repo, branch}) => {
+    if (owner !== 'ericson-j-santos') throw new Error('unexpected_owner');
+    if (repo === 'chatgpt-operational-rules' && branch === 'main')
+      return {data:{commit:{sha:observed}}};
+    if (repo === 'desktop-pc24x7-runtime' && branch === 'main')
+      return {data:{commit:{sha:route.base_sha || 'c'.repeat(40)}}};
+    if (repo === 'desktop-pc24x7-runtime' &&
+        (branch === (route.expected_branch || '') || branch === (route.ref || '').slice(11)))
+      return {data:{commit:{sha:route.branch_sha || route.sha}}};
+    throw new Error('unexpected_source');
+  }},
+  pulls:{
+    list: async () => ({data: route.prs || []}),
+    get: async () => ({data: route.pull_request || {}}),
+  },
+  checks:{listForRef: async () => ({data:{check_runs: route.check_runs || []}})},
+}};
+github.rest.repos.get = async () => ({data:{private: route.repo_private ?? false}});
+const core = {
+  setFailed: reason => errors.push(reason),
+  setOutput: (key, value) => { outputs[key] = value; },
+  info: () => {},
+};
+(async () => {
+  await new Script('github', 'core', source)(github, core);
+  process.stdout.write(JSON.stringify({outputs, errors}));
+})().catch(err => { console.error(err.message); process.exitCode = 9; });
+"""
+    done = subprocess.run(
+        ["node", "-e", harness, script, observed, expected, json.dumps(route or {})],
+        capture_output=True, text=True, check=False, timeout=20,
+    )
+    assert done.returncode == 0, done.stderr
+    return json.loads(done.stdout)
+
+
+def test_source_gate_rejects_invalid_sha_and_drift_using_real_embedded_js():
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    resolver_js = jobs["resolve_rules"]["steps"][0]["with"]["script"]
+    recheck = next(
+        step for step in jobs["pilot"]["steps"]
+        if step.get("name") == "Recheck rules main has not drifted before bootstrap"
+    )
+    assert recheck["env"]["EXPECTED_RULES_SHA"] == "${{ needs.resolve_rules.outputs.sha }}"
+    recheck_js = recheck["with"]["script"]
+    sha = "a" * 40
+    assert _exercise_github_script(resolver_js, sha) == {
+        "outputs": {"sha": sha}, "errors": [],
+    }
+    assert _exercise_github_script(resolver_js, "short")["errors"] == [
+        "OLLAMA_RULES_SHA_UNVERIFIED"
+    ]
+    assert _exercise_github_script(recheck_js, sha, sha)["errors"] == []
+    assert _exercise_github_script(recheck_js, "b" * 40, sha)["errors"] == [
+        "OLLAMA_RULES_SHA_DRIFT"
+    ]
+    assert _exercise_github_script(recheck_js, sha, "")["errors"] == [
+        "OLLAMA_RULES_SHA_DRIFT"
+    ]
+
+
+
+def test_draft_pr_inventory_requires_single_current_sha_and_proper_authorization():
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    script = jobs["resolve_rules"]["steps"][0]["with"]["script"]
+    sha = "a" * 40
+    base = "c" * 40
+    branch = "fix/ollama-current-rules-admission-todo39-20261105"
+    pr = {
+        "state": "open", "draft": True,
+        "head": {"ref": branch, "sha": sha, "repo": {
+            "full_name": "ericson-j-santos/desktop-pc24x7-runtime",
+        }},
+        "base": {"ref": "main", "sha": base},
+    }
+    route = {
+        "eventName": "workflow_dispatch",
+        "ref": "refs/heads/" + branch,
+        "sha": sha,
+        "candidate_sha": sha,
+        "branch_sha": sha,
+        "base_sha": base,
+        "prs": [pr],
+    }
+    assert _exercise_github_script(script, "b" * 40, route=route)["errors"] == []
+    assert _exercise_github_script(script, "b" * 40, route={
+        **route, "candidate_sha": "d" * 40,
+    })["errors"] == ["OLLAMA_CANDIDATE_SHA_UNVERIFIED"]
+    assert _exercise_github_script(script, "b" * 40, route={
+        **route, "branch_sha": "d" * 40,
+    })["errors"] == ["OLLAMA_DRAFT_PR_OR_BASE_DRIFT"]
+    assert _exercise_github_script(script, "b" * 40, route={
+        **route, "prs": [{**pr, "draft": False}],
+    })["errors"] == ["OLLAMA_DRAFT_PR_OR_BASE_DRIFT"]
+    assert _exercise_github_script(script, "b" * 40, route={
+        **route, "prs": [pr, pr],
+    })["errors"] == ["OLLAMA_DRAFT_PR_OR_BASE_DRIFT"]
+    assert _exercise_github_script(script, "b" * 40, route={
+        **route, "base_sha": "d" * 40,
+    })["errors"] == ["OLLAMA_DRAFT_PR_OR_BASE_DRIFT"]
+
+
+def test_draft_pr_is_rechecked_on_physical_runner_before_bootstrap():
+    """A delayed pickup cannot reuse an expired hosted admission."""
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    steps = jobs["pilot"]["steps"]
+    gate = next(step for step in steps if step.get("name") ==
+                "Recheck draft candidate PR before bootstrap")
+    assert gate["if"] == (
+        "github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'"
+    )
+    assert steps.index(gate) < next(
+        i for i, step in enumerate(steps)
+        if step.get("name") == "Bootstrap governed session"
+    )
+    script = gate["with"]["script"]
+    sha = "a" * 40
+    base = "c" * 40
+    branch = "fix/ollama-current-rules-admission-todo39-20261105"
+    pr = {
+        "state": "open", "draft": True,
+        "head": {"ref": branch, "sha": sha, "repo": {
+            "full_name": "ericson-j-santos/desktop-pc24x7-runtime",
+        }},
+        "base": {"ref": "main", "sha": base},
+    }
+    route = {
+        "eventName": "workflow_dispatch",
+        "ref": "refs/heads/" + branch,
+        "sha": sha, "candidate_sha": sha, "branch_sha": sha,
+        "base_sha": base, "prs": [pr],
+    }
+    assert _exercise_github_script(script, "b" * 40, route=route) == {
+        "outputs": {}, "errors": [],
+    }
+    for changed, reason in (
+        ({"candidate_sha": "d" * 40}, "OLLAMA_CANDIDATE_SHA_DRIFT_AT_BOOTSTRAP"),
+        ({"branch_sha": "d" * 40}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+        ({"base_sha": "d" * 40}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+        ({"prs": [{**pr, "draft": False}]}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+        ({"prs": [pr, pr]}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+    ):
+        assert _exercise_github_script(
+            script, "b" * 40, route={**route, **changed}
+        )["errors"] == [reason]
+
+
+
+def test_pr_edit_auto_preflight_is_hosted_only_and_one_shot():
+    import yaml
+
+    conf = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))
+    assert "edited" in conf.get("on", conf.get(True))["pull_request"]["types"]
+    jobs = conf["jobs"]
+    resolver = jobs["resolve_rules"]
+    assert resolver["runs-on"] == "ubuntu-latest"
+    for jobname in ("pilot", "physical_runner_watchdog"):
+        assert "github.event.action != 'edited'" in jobs[jobname]["if"]
+    body_sha = "a" * 40
+    base_sha = "c" * 40
+    branch = "fix/ollama-current-rules-admission-todo39-20261105"
+    marker = "TODO39_AUTOPREFLIGHT_ONCE_" + body_sha
+    data = {
+        "number": 138, "state": "open", "draft": True,
+        "user": {"login": "ericson-j-santos"},
+        "head": {"sha": body_sha, "ref": branch, "repo": {
+            "full_name": "ericson-j-santos/desktop-pc24x7-runtime",
+        }},
+        "base": {"ref": "main", "sha": base_sha},
+        "body": "Auto-preflight: " + marker,
+    }
+    checks = [
+        {"name": n, "head_sha": body_sha, "status": "completed",
+         "conclusion": "success", "started_at": "2026-11-05T01:00:00Z",
+         "completed_at": "2026-11-05T01:01:00Z"}
+        for n in ("Python compile and tests", "Portable Linux compile and tests")
+    ]
+    route = {
+        "eventName": "pull_request", "action": "edited",
+        "ref": "refs/pull/138/merge", "sha": "b" * 40,
+        "pull_request": data, "oldBody": "No marker",
+        "branch_sha": body_sha, "base_sha": base_sha,
+        "expected_branch": branch, "check_runs": checks,
+    }
+    source = resolver["steps"][0]["with"]["script"]
+    assert _exercise_github_script(source, "d" * 40, route=route)["errors"] == []
+    rejects = [
+        ({**route, "oldBody": marker}, "OLLAMA_PREFLIGHT_ONE_SHOT_INVALID"),
+        ({**route, "pull_request": {**data, "body": "marker missing"}},
+         "OLLAMA_PREFLIGHT_ONE_SHOT_INVALID"),
+        ({**route, "branch_sha": "e" * 40},
+         "OLLAMA_PREFLIGHT_PR_CI_OR_COST_UNVERIFIED"),
+        ({**route, "check_runs": checks[:1]},
+         "OLLAMA_PREFLIGHT_PR_CI_OR_COST_UNVERIFIED"),
+        ({**route, "repo_private": True},
+         "OLLAMA_PREFLIGHT_PR_CI_OR_COST_UNVERIFIED"),
+        ({**route, "pull_request": {**data, "draft": False}},
+         "OLLAMA_PREFLIGHT_PR_CI_OR_COST_UNVERIFIED"),
+        ({**route, "base_sha": "f" * 40},
+         "OLLAMA_PREFLIGHT_PR_CI_OR_COST_UNVERIFIED"),
+    ]
+    for modified, code in rejects:
+        assert _exercise_github_script(source, "d" * 40, route=modified)[
+            "errors"
+        ] == [code]

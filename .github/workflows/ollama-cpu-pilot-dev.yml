@@ -1,8 +1,8 @@
-name: Ollama CPU Pilot DEV (manual)
+name: Ollama CPU Pilot DEV (manual + gated PR preflight)
 
 on:
   pull_request:
-    types: [ready_for_review]
+    types: [ready_for_review, edited]
     branches: [main]
     paths:
       - .github/workflows/ollama-cpu-pilot-dev.yml
@@ -18,6 +18,10 @@ on:
         options:
           - inventory
           - smoke
+      candidate_sha:
+        description: "Required for DEV draft-PR inventory: exact reviewed full SHA"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -27,18 +31,152 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  pilot:
+  resolve_rules:
+    name: Resolve canonical rules once (read-only)
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
-       github.event.pull_request.draft == false)
+      github.actor == 'ericson-j-santos' && (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' &&
+         inputs.mode == 'inventory' && inputs.candidate_sha == github.sha) ||
+        (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
+         github.event.pull_request.draft == false) ||
+        (github.event_name == 'pull_request' && github.event.action == 'edited' &&
+         github.event.pull_request.number == 138 &&
+         github.event.pull_request.draft == true &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.head.ref == 'fix/ollama-current-rules-admission-todo39-20261105' &&
+         github.event.changes.body.from != null &&
+         contains(github.event.pull_request.body, 'TODO39_AUTOPREFLIGHT_ONCE_') &&
+         !contains(github.event.changes.body.from, 'TODO39_AUTOPREFLIGHT_ONCE_'))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Read current canonical rules SHA
+        id: resolve
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const result = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              branch: 'main',
+            });
+            const sha = String(result.data.commit.sha || '').toLowerCase();
+            if (!/^[0-9a-f]{40}$/.test(sha)) {
+              core.setFailed('OLLAMA_RULES_SHA_UNVERIFIED');
+              return;
+            }
+            if (context.eventName === 'workflow_dispatch' &&
+                context.ref !== 'refs/heads/main') {
+              const ref = String(context.ref || '');
+              const expected = String(context.payload.inputs?.candidate_sha || '').toLowerCase();
+              const candidate = String(context.sha || '').toLowerCase();
+              if (!ref.startsWith('refs/heads/') ||
+                  !/^[0-9a-f]{40}$/.test(expected) ||
+                  candidate !== expected ||
+                  context.repo.owner !== 'ericson-j-santos' ||
+                  context.repo.repo !== 'desktop-pc24x7-runtime') {
+                core.setFailed('OLLAMA_CANDIDATE_SHA_UNVERIFIED');
+                return;
+              }
+              const branch = ref.slice('refs/heads/'.length);
+              const [active, main, prs] = await Promise.all([
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo, branch,
+                }),
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo, branch: 'main',
+                }),
+                github.rest.pulls.list({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  state: 'open', head: context.repo.owner + ':' + branch, per_page: 100,
+                }),
+              ]);
+              const matches = prs.data.filter(pr =>
+                pr.state === 'open' && pr.draft === true &&
+                pr.head?.repo?.full_name === context.repo.owner + '/' + context.repo.repo &&
+                pr.head?.ref === branch && pr.head?.sha === candidate &&
+                pr.base?.ref === 'main' && pr.base?.sha === main.data.commit.sha);
+              if (active.data.commit.sha !== candidate || matches.length !== 1 ||
+                  prs.data.length !== 1) {
+                core.setFailed('OLLAMA_DRAFT_PR_OR_BASE_DRIFT');
+                return;
+              }
+              core.info('OLLAMA_DRAFT_INVENTORY_ADMITTED:' + candidate);
+            }
+            if (context.eventName === 'pull_request' &&
+                context.payload.action === 'edited') {
+              const candidate = String(context.payload.pull_request?.head?.sha || '').toLowerCase();
+              const marker = 'TODO39_AUTOPREFLIGHT_ONCE_' + candidate;
+              const oldBody = context.payload.changes?.body?.from;
+              if (!/^[0-9a-f]{40}$/.test(candidate) ||
+                  context.payload.pull_request?.number !== 138 ||
+                  typeof oldBody !== 'string' ||
+                  oldBody.includes('TODO39_AUTOPREFLIGHT_ONCE_') ||
+                  !String(context.payload.pull_request?.body || '').includes(marker)) {
+                core.setFailed('OLLAMA_PREFLIGHT_ONE_SHOT_INVALID');
+                return;
+              }
+              const [prResp, mainResp, branchResp, checksResp, repoResp] = await Promise.all([
+                github.rest.pulls.get({
+                  owner: context.repo.owner, repo: context.repo.repo, pull_number: 138,
+                }),
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo, branch: 'main',
+                }),
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  branch: 'fix/ollama-current-rules-admission-todo39-20261105',
+                }),
+                github.rest.checks.listForRef({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  ref: candidate, per_page: 100,
+                }),
+                github.rest.repos.get({ owner: context.repo.owner, repo: context.repo.repo }),
+              ]);
+              const pr = prResp.data;
+              const required = ['Python compile and tests', 'Portable Linux compile and tests'];
+              const passed = name => checksResp.data.check_runs.some(check =>
+                check.name === name && check.head_sha === candidate &&
+                check.status === 'completed' && check.conclusion === 'success' &&
+                check.started_at && check.completed_at);
+              if (pr.state !== 'open' || !pr.draft || pr.number !== 138 ||
+                  pr.user?.login !== 'ericson-j-santos' ||
+                  pr.head?.sha !== candidate ||
+                  pr.head?.ref !== 'fix/ollama-current-rules-admission-todo39-20261105' ||
+                  pr.head?.repo?.full_name !== context.repo.owner + '/' + context.repo.repo ||
+                  pr.base?.ref !== 'main' ||
+                  pr.base?.sha !== mainResp.data.commit.sha ||
+                  branchResp.data.commit.sha !== candidate ||
+                  !String(pr.body || '').includes(marker) ||
+                  repoResp.data.private !== false || !required.every(passed)) {
+                core.setFailed('OLLAMA_PREFLIGHT_PR_CI_OR_COST_UNVERIFIED');
+                return;
+              }
+              core.info('TODO39_HOSTED_PREFLIGHT_ONLY:' + candidate +
+                ':RULES_SHA=' + sha +
+                ':NO_PHYSICAL_DISPATCH:NO_MODEL_INFERENCE');
+            }
+            core.setOutput('sha', sha);
+
+  pilot:
+    needs: resolve_rules
+    if: >-
+      needs.resolve_rules.result == 'success' &&
+      github.event.action != 'edited'
     name: Read-only local Ollama CPU pilot
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 5
     env:
-      RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661
       TARGET_REPO: C:\\dev\\reqsys-v2-enterprise-real
       CORRELATION_ID: ollama-cpu-pilot-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -61,10 +199,70 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: ${{ env.RULES_SHA }}
+          ref: ${{ needs.resolve_rules.outputs.sha }}
           path: _rules
           fetch-depth: 1
           persist-credentials: false
+
+      - name: Recheck rules main has not drifted before bootstrap
+        uses: actions/github-script@v7
+        env:
+          EXPECTED_RULES_SHA: ${{ needs.resolve_rules.outputs.sha }}
+        with:
+          script: |
+            const expected = String(process.env.EXPECTED_RULES_SHA || '').toLowerCase();
+            const response = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos',
+              repo: 'chatgpt-operational-rules',
+              branch: 'main',
+            });
+            const observed = String(response.data.commit.sha || '').toLowerCase();
+            if (!/^[0-9a-f]{40}$/.test(expected) ||
+                !/^[0-9a-f]{40}$/.test(observed) || expected !== observed) {
+              core.setFailed('OLLAMA_RULES_SHA_DRIFT');
+              return;
+            }
+            core.info('OLLAMA_CANONICAL_RULES_VERIFIED:' + expected);
+
+      - name: Recheck draft candidate PR before bootstrap
+        if: github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const candidate = String(context.sha || '').toLowerCase();
+            const expected = String(context.payload.inputs?.candidate_sha || '').toLowerCase();
+            const ref = String(context.ref || '');
+            if (!/^[0-9a-f]{40}$/.test(candidate) || candidate !== expected ||
+                !ref.startsWith('refs/heads/') ||
+                context.repo.owner !== 'ericson-j-santos' ||
+                context.repo.repo !== 'desktop-pc24x7-runtime') {
+              core.setFailed('OLLAMA_CANDIDATE_SHA_DRIFT_AT_BOOTSTRAP');
+              return;
+            }
+            const branch = ref.slice('refs/heads/'.length);
+            const [active, main, prs] = await Promise.all([
+              github.rest.repos.getBranch({
+                owner: context.repo.owner, repo: context.repo.repo, branch,
+              }),
+              github.rest.repos.getBranch({
+                owner: context.repo.owner, repo: context.repo.repo, branch: 'main',
+              }),
+              github.rest.pulls.list({
+                owner: context.repo.owner, repo: context.repo.repo,
+                state: 'open', head: context.repo.owner + ':' + branch, per_page: 100,
+              }),
+            ]);
+            const approved = prs.data.filter(pr =>
+              pr.state === 'open' && pr.draft === true &&
+              pr.head?.repo?.full_name === context.repo.owner + '/' + context.repo.repo &&
+              pr.head?.ref === branch && pr.head?.sha === candidate &&
+              pr.base?.ref === 'main' && pr.base?.sha === main.data.commit.sha);
+            if (active.data.commit.sha !== candidate || prs.data.length !== 1 ||
+                approved.length !== 1) {
+              core.setFailed('OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP');
+              return;
+            }
+            core.info('OLLAMA_DRAFT_PR_BOOTSTRAP_SHA_VERIFIED:' + candidate);
 
       - name: Resolve ReqSys main SHA for governed read-only session
         id: anchor
@@ -135,12 +333,10 @@ jobs:
           exit $LASTEXITCODE
 
   physical_runner_watchdog:
+    needs: resolve_rules
     if: >-
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
-       github.event.pull_request.draft == false)
+      needs.resolve_rules.result == 'success' &&
+      github.event.action != 'edited'
     name: Physical runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2
@@ -148,7 +344,6 @@ jobs:
       actions: write
       contents: read
     env:
-      RULES_SHA: 6edb5990c777d487c41fb9ee48ccbf411b11d661
       TARGET_RUN_ID: ${{ github.run_id }}
       TARGET_JOB_NAME: Read-only local Ollama CPU pilot
       STALL_AFTER_SECONDS: "60"
@@ -159,7 +354,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: ${{ env.RULES_SHA }}
+          ref: ${{ needs.resolve_rules.outputs.sha }}
           path: _rules
           fetch-depth: 1
           persist-credentials: false
