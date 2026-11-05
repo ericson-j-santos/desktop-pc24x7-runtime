@@ -198,6 +198,8 @@ def test_physical_workflow_is_explicitly_gated_governed_and_bounded():
     content = WORKFLOW.read_text(encoding="utf-8")
     trigger = content.split("\npermissions:", 1)[0]
     assert "  workflow_dispatch:" in trigger
+    assert "  issue_comment:" in trigger
+    assert "types: [created]" in trigger
     assert "\n  push:" not in trigger
     assert "\n  pull_request:" in trigger
     assert "types: [ready_for_review, edited]" in trigger
@@ -236,6 +238,8 @@ def test_current_rules_are_pinned_once_for_both_physical_jobs():
     assert "github.event.action == 'edited'" in resolver["if"]
     assert "github.actor == 'ericson-j-santos'" in resolver["if"]
     assert resolver["permissions"]["checks"] == "read"
+    assert resolver["permissions"]["issues"] == "read"
+    assert resolver["permissions"]["actions"] == "read"
     assert "github.rest.checks.listForRef" in resolver["steps"][0]["with"]["script"]
     assert "TODO39_HOSTED_PREFLIGHT_ONLY" in resolver["steps"][0]["with"]["script"]
     assert "NO_PHYSICAL_DISPATCH:NO_MODEL_INFERENCE" in resolver["steps"][0]["with"]["script"]
@@ -265,17 +269,21 @@ def _exercise_github_script(script: str, observed: str, expected: str = "", rout
 const Script = Object.getPrototypeOf(async function(){}).constructor;
 const source = process.argv[1], observed = process.argv[2], expected = process.argv[3];
 process.env.EXPECTED_RULES_SHA = expected;
+process.env.GITHUB_RUN_ATTEMPT = '1';
 const outputs = {}, errors = [];
 const route = JSON.parse(process.argv[4] || '{}');
 globalThis.context = {
   eventName: route.eventName || 'workflow_dispatch',
   ref: route.ref || 'refs/heads/main',
+  actor: route.actor || 'ericson-j-santos',
   sha: route.sha || 'a'.repeat(40),
   repo: {owner:'ericson-j-santos', repo:'desktop-pc24x7-runtime'},
   payload: {
     action: route.action || '',
     inputs: {candidate_sha: route.candidate_sha || ''},
     pull_request: route.pull_request || {},
+    comment: route.comment || {},
+    issue: route.issue || {},
     changes: {body: {from: route.oldBody ?? ''}},
   },
 };
@@ -296,7 +304,18 @@ const github = {rest:{
     get: async () => ({data: route.pull_request || {}}),
   },
   checks:{listForRef: async () => ({data:{check_runs: route.check_runs || []}})},
+  issues:{
+    listComments: async () => ({data: route.issue_comments || []}),
+    getComment: async () => ({data: route.current_comment || route.comment || {}}),
+  },
+  actions:{
+    getWorkflowRun: async () => ({data: {...(route.canary || {}),
+      updated_at: route.canaryUpdatedAt || new Date().toISOString()}}),
+    listWorkflowRuns: async () => ({data: {workflow_runs: route.ci_runs || []}}),
+    listJobsForWorkflowRun: async () => ({data:{jobs: route.canary_jobs || []}}),
+  },
 }};
+github.paginate = async (fn, args) => (await fn(args)).data;
 github.rest.repos.get = async () => ({data:{private: route.repo_private ?? false}});
 const core = {
   setFailed: reason => errors.push(reason),
@@ -491,3 +510,106 @@ def test_pr_edit_auto_preflight_is_hosted_only_and_one_shot():
         assert _exercise_github_script(source, "d" * 40, route=modified)[
             "errors"
         ] == [code]
+
+
+def test_owner_issue_comment_inventory_admission_and_negative_controls():
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    gate = jobs["resolve_rules"]
+    assert gate["runs-on"] == "ubuntu-latest"
+    assert "github.event_name == 'issue_comment'" in gate["if"]
+    assert "github.event.issue.number == 31" in gate["if"]
+    assert gate["permissions"]["issues"] == "read"
+    assert gate["permissions"]["actions"] == "read"
+    assert jobs["pilot"]["permissions"]["issues"] == "read"
+    assert "github.event_name == 'issue_comment' && 'inventory'" in (
+        next(x for x in jobs["pilot"]["steps"] if
+             x.get("name") == "Execute bounded local CPU pilot through Command Gateway")
+        ["env"]["PILOT_MODE"]
+    )
+    pickup = next(x for x in jobs["pilot"]["steps"] if
+                  x.get("name") == "Recheck owner issue comment at physical pickup")
+    assert pickup["if"] == "github.event_name == 'issue_comment'"
+    assert jobs["pilot"]["steps"].index(pickup) < next(
+        i for i, step in enumerate(jobs["pilot"]["steps"])
+        if step.get("name") == "Bootstrap governed session"
+    )
+    sha, canary_id, comment_id = "a" * 40, 42055278298, 1234
+    body = f"TODO39_INVENTORY_ONCE_{sha}_{canary_id}"
+    comment = {"id": comment_id, "body": body,
+               "user": {"login": "ericson-j-santos"}}
+    checks = [
+        {"name": name, "head_sha": sha, "status": "completed",
+         "conclusion": "success", "started_at": "2026-11-05T01:00:00Z",
+         "completed_at": "2026-11-05T01:01:00Z"}
+        for name in ("Python compile and tests", "Portable Linux compile and tests")
+    ]
+    route = {
+        "eventName": "issue_comment", "action": "created",
+        "ref": "refs/heads/main", "sha": sha, "base_sha": sha,
+        "issue": {"number": 31}, "comment": comment,
+        "current_comment": comment, "issue_comments": [comment],
+        "check_runs": checks,
+        "ci_runs": [{
+            "id": 99, "name": "CI", "event": "push", "head_sha": sha,
+            "head_branch": "main", "status": "completed",
+            "conclusion": "success", "created_at": "2026-11-05T01:00:00Z"
+        }],
+        "canary": {
+            "id": canary_id, "name": "PC24x7 Runtime Canary",
+            "event": "schedule", "head_sha": sha,
+            "status": "completed", "conclusion": "success",
+        },
+        "canary_jobs": [{
+            "name": "Runner, Docker and workers canary",
+            "status": "completed", "conclusion": "success",
+            "runner_name": "DESKTOP-PDQK954-runtime", "runner_id": 2,
+            "started_at": "2026-11-05T01:00:00Z",
+            "completed_at": "2026-11-05T01:01:00Z"
+        }],
+    }
+    script = gate["steps"][0]["with"]["script"]
+    assert _exercise_github_script(script, "b" * 40, route=route)["errors"] == []
+    bad = [
+        ({**route, "actor": "other"}, "TODO39_COMMENT_SCOPE_INVALID"),
+        ({**route, "issue": {"number": 13}}, "TODO39_COMMENT_SCOPE_INVALID"),
+        ({**route, "comment": {**comment, "body": body + " more"}},
+         "TODO39_COMMENT_SCOPE_INVALID"),
+        ({**route, "issue_comments": [comment, comment]},
+         "TODO39_CI_COST_OR_CANARY_UNVERIFIED"),
+        ({**route, "repo_private": True}, "TODO39_CI_COST_OR_CANARY_UNVERIFIED"),
+        ({**route, "check_runs": checks[:1]}, "TODO39_CI_COST_OR_CANARY_UNVERIFIED"),
+        ({**route, "ci_runs": []}, "TODO39_CI_COST_OR_CANARY_UNVERIFIED"),
+        ({**route, "ci_runs": [{**route["ci_runs"][0], "conclusion": "failure"}]},
+         "TODO39_CI_COST_OR_CANARY_UNVERIFIED"),
+        ({**route, "canaryUpdatedAt": "2020-01-01T00:00:00Z"},
+         "TODO39_CI_COST_OR_CANARY_UNVERIFIED"),
+        ({**route, "canary": {**route["canary"], "head_sha": "f" * 40}},
+         "TODO39_CI_COST_OR_CANARY_UNVERIFIED"),
+        ({**route, "canary_jobs": []}, "TODO39_RUNNER_PICKUP_UNVERIFIED"),
+    ]
+    for data, code in bad:
+        assert _exercise_github_script(script, "b" * 40, route=data)["errors"] == [code]
+
+
+def test_issue_comment_pickup_rechecks_main_and_comment_before_bootstrap():
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    step = next(x for x in jobs["pilot"]["steps"] if
+                x.get("name") == "Recheck owner issue comment at physical pickup")
+    sha = "a" * 40
+    comment = {"id": 1234,
+               "body": f"TODO39_INVENTORY_ONCE_{sha}_42055278298",
+               "user": {"login": "ericson-j-santos"}}
+    route = {"eventName": "issue_comment", "sha": sha, "base_sha": sha,
+             "comment": comment, "current_comment": comment}
+    script = step["with"]["script"]
+    assert _exercise_github_script(script, "b" * 40, route=route)["errors"] == []
+    assert _exercise_github_script(script, "b" * 40, route={
+        **route, "base_sha": "f" * 40,
+    })["errors"] == ["TODO39_PICKUP_SHA_OR_COMMENT_DRIFT"]
+    assert _exercise_github_script(script, "b" * 40, route={
+        **route, "current_comment": {**comment, "body": "edited"},
+    })["errors"] == ["TODO39_PICKUP_SHA_OR_COMMENT_DRIFT"]
