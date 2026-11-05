@@ -39,6 +39,14 @@ def _require(condition: bool) -> None:
         raise ReadbackRejected("CLAIM_READBACK_REJECTED")
 
 
+def _no_duplicate_keys(pairs: list[tuple[str, object]]) -> dict:
+    fields = {}
+    for key, value in pairs:
+        _require(key not in fields)
+        fields[key] = value
+    return fields
+
+
 def _receipt(status: str, present: bool) -> dict:
     _require(status in {"CLAIM_PRESENT_UNCERTAIN", "CLAIM_ABSENT_AT_READ_TIME"})
     return {
@@ -86,7 +94,7 @@ def inspect(
             and before.st_size == opened.st_size == opened_after.st_size == after.st_size == len(raw)
         )
         try:
-            data = json.loads(raw.decode("ascii"))
+            data = json.loads(raw.decode("ascii"), object_pairs_hook=_no_duplicate_keys)
         except (UnicodeDecodeError, ValueError) as exc:
             raise ReadbackRejected("CLAIM_READBACK_REJECTED") from exc
         _require(type(data) is dict and set(data) == RECEIPT_KEYS)
@@ -97,7 +105,8 @@ def inspect(
         except (ValueError, TypeError, KeyError) as exc:
             raise ReadbackRejected("CLAIM_READBACK_REJECTED") from exc
         _require(
-            data["schema"] == 1
+            type(data["schema"]) is int
+            and data["schema"] == 1
             and data["request_id"] == ORIGINAL_REQUEST_ID
             and data["source_sha"] == ORIGINAL_SOURCE_SHA
             and data["rules_sha"] == ORIGINAL_RULES_SHA
