@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,6 +14,10 @@ import pytest
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/dedicated-runtime-runner-e2e.yml"
 START_MS = 1792072800000
 JOB_NAME = "Pickup on dedicated Desktop runtime runner"
+
+# The 300-second queue budget is virtual; this is only a bounded Node process
+# startup/execution budget for noisy hosted Windows CI (not a runtime watchdog).
+NODE_HARNESS_WALL_TIMEOUT_SECONDS = 30 if sys.platform == 'win32' else 10
 
 NODE_HARNESS = r"""
 'use strict';
@@ -108,10 +113,14 @@ def observe(
     with tempfile.TemporaryDirectory(prefix="dedicated-watchdog-test-") as directory:
         harness = Path(directory) / "observer-harness.cjs"
         harness.write_text(NODE_HARNESS, encoding="utf-8")
-        result = subprocess.run(
-            [node, str(harness)], input=json.dumps(payload),
-            text=True, capture_output=True, timeout=10, check=False,
-        )
+        try:
+            result = subprocess.run(
+                [node, str(harness)], input=json.dumps(payload),
+                text=True, capture_output=True,
+                timeout=NODE_HARNESS_WALL_TIMEOUT_SECONDS, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("NODE_OBSERVER_HARNESS_WALL_TIMEOUT", pytrace=False)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
@@ -181,3 +190,22 @@ def test_replay_has_the_same_decision_and_one_receipt_per_observation() -> None:
     assert first == second
     assert len(first["writes"]) == 1
     assert first["cancellations"] == []
+
+
+def test_node_harness_wall_timeout_still_fails_closed(monkeypatch) -> None:
+    """A hung Node process cannot report a successful watchdog decision."""
+    def hung_process(*args, **kwargs):
+        assert kwargs["timeout"] == NODE_HARNESS_WALL_TIMEOUT_SECONDS
+        raise subprocess.TimeoutExpired(args[0], kwargs["timeout"])
+
+    monkeypatch.setattr(subprocess, "run", hung_process)
+    with pytest.raises(pytest.fail.Exception, match="NODE_OBSERVER_HARNESS_WALL_TIMEOUT"):
+        observe(job())
+
+
+def test_virtual_300s_budget_is_not_extended_by_harness_wall_timeout() -> None:
+    """The timeout change does not relax the canonical watchdog policy."""
+    assert NODE_HARNESS_WALL_TIMEOUT_SECONDS == (30 if sys.platform == 'win32' else 10)
+    assert 0 < NODE_HARNESS_WALL_TIMEOUT_SECONDS <= 30
+    text = WORKFLOW.read_text(encoding="utf-8")
+    assert 'STALL_AFTER_SECONDS: "300"' in text
