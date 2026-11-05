@@ -18,6 +18,10 @@ on:
         options:
           - inventory
           - smoke
+      candidate_sha:
+        description: "Required for DEV draft-PR inventory: exact reviewed full SHA"
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -30,14 +34,20 @@ jobs:
   resolve_rules:
     name: Resolve canonical rules once (read-only)
     if: >-
-      github.actor == 'ericson-j-santos' &&
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
-       github.event.pull_request.draft == false)
+      github.actor == 'ericson-j-santos' && (
+        (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
+        (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main' &&
+         inputs.mode == 'inventory' && inputs.candidate_sha == github.sha) ||
+        (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
+         github.event.pull_request.head.repo.full_name == github.repository &&
+         github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
+         github.event.pull_request.draft == false)
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 2
+    permissions:
+      contents: read
+      pull-requests: read
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
@@ -56,17 +66,49 @@ jobs:
               core.setFailed('OLLAMA_RULES_SHA_UNVERIFIED');
               return;
             }
+            if (context.eventName === 'workflow_dispatch' &&
+                context.ref !== 'refs/heads/main') {
+              const ref = String(context.ref || '');
+              const expected = String(context.payload.inputs?.candidate_sha || '').toLowerCase();
+              const candidate = String(context.sha || '').toLowerCase();
+              if (!ref.startsWith('refs/heads/') ||
+                  !/^[0-9a-f]{40}$/.test(expected) ||
+                  candidate !== expected ||
+                  context.repo.owner !== 'ericson-j-santos' ||
+                  context.repo.repo !== 'desktop-pc24x7-runtime') {
+                core.setFailed('OLLAMA_CANDIDATE_SHA_UNVERIFIED');
+                return;
+              }
+              const branch = ref.slice('refs/heads/'.length);
+              const [active, main, prs] = await Promise.all([
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo, branch,
+                }),
+                github.rest.repos.getBranch({
+                  owner: context.repo.owner, repo: context.repo.repo, branch: 'main',
+                }),
+                github.rest.pulls.list({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  state: 'open', head: context.repo.owner + ':' + branch, per_page: 100,
+                }),
+              ]);
+              const matches = prs.data.filter(pr =>
+                pr.state === 'open' && pr.draft === true &&
+                pr.head?.repo?.full_name === context.repo.owner + '/' + context.repo.repo &&
+                pr.head?.ref === branch && pr.head?.sha === candidate &&
+                pr.base?.ref === 'main' && pr.base?.sha === main.data.commit.sha);
+              if (active.data.commit.sha !== candidate || matches.length !== 1 ||
+                  prs.data.length !== 1) {
+                core.setFailed('OLLAMA_DRAFT_PR_OR_BASE_DRIFT');
+                return;
+              }
+              core.info('OLLAMA_DRAFT_INVENTORY_ADMITTED:' + candidate);
+            }
             core.setOutput('sha', sha);
 
   pilot:
     needs: resolve_rules
-    if: >-
-      needs.resolve_rules.result == 'success' &&
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
-       github.event.pull_request.draft == false)
+    if: needs.resolve_rules.result == 'success'
     name: Read-only local Ollama CPU pilot
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 5
@@ -188,13 +230,7 @@ jobs:
 
   physical_runner_watchdog:
     needs: resolve_rules
-    if: >-
-      needs.resolve_rules.result == 'success' &&
-      (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') ||
-      (github.event_name == 'pull_request' && github.event.action == 'ready_for_review' &&
-       github.event.pull_request.head.repo.full_name == github.repository &&
-       github.event.pull_request.head.ref == 'feat/ollama-cpu-pilot-dev-20261024' &&
-       github.event.pull_request.draft == false)
+    if: needs.resolve_rules.result == 'success'
     name: Physical runner queue watchdog
     runs-on: windows-latest
     timeout-minutes: 2
