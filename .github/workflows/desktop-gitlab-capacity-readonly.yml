@@ -191,6 +191,57 @@ jobs:
           "session_id=$($receipt.session_id)" | Add-Content $env:GITHUB_OUTPUT
           Write-Output 'CAPACITY_SESSION_LAUNCH_OK'
 
+      - name: Inspect original capacity claim without consuming
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: powershell -NoProfile -ExecutionPolicy Bypass -File {0}
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not $env:TARGET_PATH -or -not $env:SESSION_ID) { throw 'SESSION_OUTPUT_MISSING' }
+          $candidates = @(
+            (Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'),
+            'C:\Users\User\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe',
+            'C:\Users\Windows\.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          )
+          $python = $candidates | Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+          if (-not $python) { throw 'PINNED_PYTHON_NOT_FOUND' }
+          $rulesRoot = Join-Path $env:GITHUB_WORKSPACE '_rules'
+          $policy = Join-Path $rulesRoot 'config\command-gateway.policy.json'
+          $gateway = Join-Path $rulesRoot 'scripts\command_gateway.py'
+          $raw = @(& $python -B $gateway --policy $policy --correlation-id $env:CORRELATION_ID `
+            run --cwd $env:TARGET_PATH --session-id $env:SESSION_ID --risk 1 --timeout 35 `
+            --expected-head $env:EXPECTED_HEAD -- python -B scripts/desktop_gitlab_capacity_claim_status.py)
+          $exitCode = $LASTEXITCODE
+          if ($exitCode -ne 0 -or -not $raw) {
+            Write-Output 'CLAIM_READBACK_BLOCKED'
+            throw 'CAPACITY_ORIGINAL_CLAIM_INSPECTION_FAILED'
+          }
+          try {
+            $event = @($raw)[-1] | ConvertFrom-Json -ErrorAction Stop
+            if ($event.result -ne 'ok' -or $event.command_exit_code -ne 0 -or
+                $event.state_changed -ne $false) { throw 'GATEWAY_RECEIPT_REJECTED' }
+            $receipt = $event.stdout | ConvertFrom-Json -ErrorAction Stop
+            if ($receipt.schema_version -ne 1 -or
+                $receipt.status -notin @('CLAIM_PRESENT_UNCERTAIN', 'CLAIM_ABSENT_AT_READ_TIME') -or
+                $receipt.host -ne 'DESKTOP-PDQK954' -or
+                $receipt.request_id -ne 'd8b7342a-fc1e-445e-82af-2f6ae2319728' -or
+                $receipt.replay_authorized -ne $false -or
+                $receipt.configuration_changed -ne $false -or
+                $receipt.audit_state_changed -ne $false -or
+                $receipt.secrets_accessed -ne $false -or
+                $receipt.claim_present -ne ($receipt.status -eq 'CLAIM_PRESENT_UNCERTAIN')) {
+              throw 'CLAIM_RECEIPT_REJECTED'
+            }
+          } catch {
+            # Never emit raw claim, Gateway payload or exception from local filesystem.
+            Write-Output 'CLAIM_READBACK_BLOCKED'
+            throw 'CAPACITY_ORIGINAL_CLAIM_INSPECTION_FAILED'
+          }
+          Write-Output ('CAPACITY_ORIGINAL_CLAIM_STATUS=' + $receipt.status)
+          Write-Output 'CAPACITY_ORIGINAL_CLAIM_REPLAY_NOT_AUTHORIZED'
+
       - name: Consume issue request once in protected audit state through Gateway risk 2
         id: claim
         if: ${{ github.event_name == 'issues' }}
