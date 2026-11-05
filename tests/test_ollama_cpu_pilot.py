@@ -365,3 +365,50 @@ def test_draft_pr_inventory_requires_single_current_sha_and_proper_authorization
     assert _exercise_github_script(script, "b" * 40, route={
         **route, "base_sha": "d" * 40,
     })["errors"] == ["OLLAMA_DRAFT_PR_OR_BASE_DRIFT"]
+
+
+def test_draft_pr_is_rechecked_on_physical_runner_before_bootstrap():
+    """A delayed pickup cannot reuse an expired hosted admission."""
+    import yaml
+
+    jobs = yaml.safe_load(WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+    steps = jobs["pilot"]["steps"]
+    gate = next(step for step in steps if step.get("name") ==
+                "Recheck draft candidate PR before bootstrap")
+    assert gate["if"] == (
+        "github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main'"
+    )
+    assert steps.index(gate) < next(
+        i for i, step in enumerate(steps)
+        if step.get("name") == "Bootstrap governed session"
+    )
+    script = gate["with"]["script"]
+    sha = "a" * 40
+    base = "c" * 40
+    branch = "fix/ollama-current-rules-admission-todo39-20261105"
+    pr = {
+        "state": "open", "draft": True,
+        "head": {"ref": branch, "sha": sha, "repo": {
+            "full_name": "ericson-j-santos/desktop-pc24x7-runtime",
+        }},
+        "base": {"ref": "main", "sha": base},
+    }
+    route = {
+        "eventName": "workflow_dispatch",
+        "ref": "refs/heads/" + branch,
+        "sha": sha, "candidate_sha": sha, "branch_sha": sha,
+        "base_sha": base, "prs": [pr],
+    }
+    assert _exercise_github_script(script, "b" * 40, route=route) == {
+        "outputs": {}, "errors": [],
+    }
+    for changed, reason in (
+        ({"candidate_sha": "d" * 40}, "OLLAMA_CANDIDATE_SHA_DRIFT_AT_BOOTSTRAP"),
+        ({"branch_sha": "d" * 40}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+        ({"base_sha": "d" * 40}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+        ({"prs": [{**pr, "draft": False}]}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+        ({"prs": [pr, pr]}, "OLLAMA_DRAFT_PR_DRIFT_AT_BOOTSTRAP"),
+    ):
+        assert _exercise_github_script(
+            script, "b" * 40, route={**route, **changed}
+        )["errors"] == [reason]
