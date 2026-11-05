@@ -70,7 +70,7 @@ class ClaimStatusTests(unittest.TestCase):
             {"issue_number": "129"}, {"run_attempt": "2"},
             {"host": "other"}, {"state": "CLAIMED"},
             {"audit_state_changed": False}, {"configuration_changed": True},
-            {"schema": 2}, {"secret": "PRIVATE_SENTINEL"},
+            {"schema": 2}, {"schema": True}, {"secret": "PRIVATE_SENTINEL"},
         ):
             with self.subTest(changes=changes):
                 raw = self.write({**self.data, **changes})
@@ -85,6 +85,13 @@ class ClaimStatusTests(unittest.TestCase):
                 with self.assertRaises(m.ReadbackRejected):
                     self.read()
                 self.assertEqual(raw, self.target.read_bytes())
+
+    def test_duplicate_json_fields_are_rejected(self):
+        raw = json.dumps(self.data).removesuffix("}") + ',"schema":1}'
+        self.target.write_text(raw, encoding="ascii")
+        with self.assertRaises(m.ReadbackRejected):
+            self.read()
+        self.assertEqual(self.target.read_text(encoding="ascii"), raw)
 
     def test_symlink_is_not_followed(self):
         outside = self.root / "outside"
