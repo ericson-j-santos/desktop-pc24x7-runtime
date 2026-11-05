@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -13,6 +14,8 @@ import pytest
 WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/dedicated-runtime-runner-e2e.yml"
 START_MS = 1792072800000
 JOB_NAME = "Pickup on dedicated Desktop runtime runner"
+# Wall-time budget for spawning the Node test harness, never the virtual 300s watchdog.
+NODE_HARNESS_TIMEOUT_SECONDS = 30 if sys.platform == "win32" else 10
 
 NODE_HARNESS = r"""
 'use strict';
@@ -108,10 +111,14 @@ def observe(
     with tempfile.TemporaryDirectory(prefix="dedicated-watchdog-test-") as directory:
         harness = Path(directory) / "observer-harness.cjs"
         harness.write_text(NODE_HARNESS, encoding="utf-8")
-        result = subprocess.run(
-            [node, str(harness)], input=json.dumps(payload),
-            text=True, capture_output=True, timeout=10, check=False,
-        )
+        try:
+            result = subprocess.run(
+                [node, str(harness)], input=json.dumps(payload),
+                text=True, capture_output=True,
+                timeout=NODE_HARNESS_TIMEOUT_SECONDS, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            pytest.fail("NODE_OBSERVER_HARNESS_WALL_TIMEOUT", pytrace=False)
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
 
