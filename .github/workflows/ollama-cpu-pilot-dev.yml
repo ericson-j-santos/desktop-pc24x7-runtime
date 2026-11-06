@@ -1,6 +1,8 @@
-name: Ollama CPU Pilot DEV (manual + gated PR preflight)
+name: Ollama CPU Pilot DEV (manual + gated PR preflight + owner issue inventory)
 
 on:
+  issue_comment:
+    types: [created]
   pull_request:
     types: [ready_for_review, edited]
     branches: [main]
@@ -27,8 +29,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ollama-cpu-pilot-dev-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'issue_comment' && format('ollama-comment-{0}', github.event.comment.id) || format('ollama-cpu-pilot-dev-{0}', github.ref) }}
+  cancel-in-progress: ${{ github.event_name != 'issue_comment' }}
 
 jobs:
   resolve_rules:
@@ -49,7 +51,11 @@ jobs:
          github.event.pull_request.head.ref == 'fix/ollama-current-rules-admission-todo39-20261105' &&
          github.event.changes.body.from != null &&
          contains(github.event.pull_request.body, 'TODO39_AUTOPREFLIGHT_ONCE_') &&
-         !contains(github.event.changes.body.from, 'TODO39_AUTOPREFLIGHT_ONCE_'))
+         !contains(github.event.changes.body.from, 'TODO39_AUTOPREFLIGHT_ONCE_')) ||
+        (github.event_name == 'issue_comment' && github.event.action == 'created' &&
+         github.event.issue.number == 31 && !github.event.issue.pull_request &&
+         github.event.comment.user.login == 'ericson-j-santos' &&
+         startsWith(github.event.comment.body, 'TODO39_INVENTORY_ONCE_'))
       )
     runs-on: ubuntu-latest
     timeout-minutes: 2
@@ -57,6 +63,8 @@ jobs:
       contents: read
       pull-requests: read
       checks: read
+      issues: read
+      actions: read
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
@@ -166,6 +174,80 @@ jobs:
                 ':RULES_SHA=' + sha +
                 ':NO_PHYSICAL_DISPATCH:NO_MODEL_INFERENCE');
             }
+            if (context.eventName === 'issue_comment') {
+              const comment = context.payload.comment || {};
+              const issue = context.payload.issue || {};
+              const body = String(comment.body || '');
+              const match = /^TODO39_INVENTORY_ONCE_([0-9a-f]{40})_([1-9][0-9]*)$/.exec(body);
+              const sha = String(context.sha || '').toLowerCase();
+              const runId = match ? Number(match[2]) : NaN;
+              if (context.actor !== 'ericson-j-santos' ||
+                  context.ref !== 'refs/heads/main' || context.payload.action !== 'created' ||
+                  issue.number !== 31 || issue.pull_request ||
+                  comment.user?.login !== context.actor ||
+                  process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                  !Number.isSafeInteger(comment.id) || comment.id <= 0 ||
+                  !match || match[1] !== sha || !Number.isSafeInteger(runId) || runId <= 0) {
+                core.setFailed('TODO39_COMMENT_SCOPE_INVALID');
+                return;
+              }
+              const source = {owner: context.repo.owner, repo: context.repo.repo};
+              const [main, repo, comments, checks, canary, ciHistory] = await Promise.all([
+                github.rest.repos.getBranch({...source, branch: 'main'}),
+                github.rest.repos.get(source),
+                github.paginate(github.rest.issues.listComments, {
+                  ...source, issue_number: 31, per_page: 100,
+                }),
+                github.rest.checks.listForRef({...source, ref: sha, per_page: 100}),
+                github.rest.actions.getWorkflowRun({...source, run_id: runId}),
+                github.rest.actions.listWorkflowRuns({
+                  ...source, workflow_id: 'ci.yml', branch: 'main',
+                  head_sha: sha, event: 'push', per_page: 100,
+                }),
+              ]);
+              const matches = comments.filter(item => item.body === body);
+              const required = ['Python compile and tests', 'Portable Linux compile and tests'];
+              const passed = name => checks.data.check_runs.some(check =>
+                check.name === name && check.head_sha === sha &&
+                check.status === 'completed' && check.conclusion === 'success' &&
+                check.started_at && check.completed_at);
+              const runs = ciHistory.data.workflow_runs.filter(item =>
+                item.name === 'CI' && item.event === 'push' &&
+                item.head_sha === sha && item.head_branch === 'main');
+              runs.sort((a,b) =>
+                Date.parse(b.created_at) - Date.parse(a.created_at) || b.id - a.id);
+              const latestCi = runs[0];
+              const run = canary.data;
+              const age = Date.now() - Date.parse(run.updated_at);
+              const fresh = Number.isFinite(age) && age >= -60000 &&
+                age <= 4 * 60 * 60 * 1000;
+              if (main.data.commit.sha !== sha || repo.data.private !== false ||
+                  matches.length !== 1 || matches[0].id !== comment.id ||
+                  !required.every(passed) || !latestCi ||
+                  latestCi.status !== 'completed' ||
+                  latestCi.conclusion !== 'success' || run.id !== runId ||
+                  run.name !== 'PC24x7 Runtime Canary' || run.event !== 'schedule' ||
+                  run.head_sha !== sha || run.status !== 'completed' ||
+                  run.conclusion !== 'success' || !fresh) {
+                core.setFailed('TODO39_CI_COST_OR_CANARY_UNVERIFIED');
+                return;
+              }
+              const jobs = await github.rest.actions.listJobsForWorkflowRun({
+                ...source, run_id: runId, per_page: 100,
+              });
+              const proved = jobs.data.jobs.filter(job =>
+                job.status === 'completed' && job.conclusion === 'success' &&
+                job.runner_name === 'DESKTOP-PDQK954-runtime' &&
+                Number.isSafeInteger(job.runner_id) && job.runner_id > 0 &&
+                job.started_at && job.completed_at);
+              if (proved.length !== 1) {
+                core.setFailed('TODO39_RUNNER_PICKUP_UNVERIFIED');
+                return;
+              }
+              core.info('TODO39_INVENTORY_ADMITTED:' + sha +
+                ':CANARY=' + runId + ':COMMENT=' + comment.id +
+                ':NO_INFERENCE:NO_DOCKER:NO_INSTALL');
+            }
             core.setOutput('sha', sha);
 
   pilot:
@@ -174,6 +256,9 @@ jobs:
       needs.resolve_rules.result == 'success' &&
       github.event.action != 'edited'
     name: Read-only local Ollama CPU pilot
+    permissions:
+      contents: read
+      issues: read
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 5
     env:
@@ -264,6 +349,34 @@ jobs:
             }
             core.info('OLLAMA_DRAFT_PR_BOOTSTRAP_SHA_VERIFIED:' + candidate);
 
+      - name: Recheck owner issue comment at physical pickup
+        if: github.event_name == 'issue_comment'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const expected = String(context.sha || '').toLowerCase();
+            const eventComment = context.payload.comment || {};
+            const commentId = Number(eventComment.id || 0);
+            if (process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                !Number.isSafeInteger(commentId) || commentId <= 0 ||
+                !String(eventComment.body || '').startsWith('TODO39_INVENTORY_ONCE_')) {
+              core.setFailed('TODO39_PICKUP_COMMENT_INVALID');
+              return;
+            }
+            const source = {owner: context.repo.owner, repo: context.repo.repo};
+            const [main, comment] = await Promise.all([
+              github.rest.repos.getBranch({...source, branch: 'main'}),
+              github.rest.issues.getComment({...source, comment_id: commentId}),
+            ]);
+            if (main.data.commit.sha !== expected ||
+                comment.data.id !== commentId ||
+                comment.data.body !== eventComment.body ||
+                comment.data.user?.login !== 'ericson-j-santos') {
+              core.setFailed('TODO39_PICKUP_SHA_OR_COMMENT_DRIFT');
+              return;
+            }
+            core.info('TODO39_CURRENT_MAIN_VERIFIED:' + expected);
+
       - name: Resolve ReqSys main SHA for governed read-only session
         id: anchor
         uses: actions/github-script@v7
@@ -308,7 +421,7 @@ jobs:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
           SESSION_ID: ${{ steps.session.outputs.session_id }}
           ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
-          PILOT_MODE: ${{ github.event_name == 'pull_request' && 'smoke' || inputs.mode }}
+          PILOT_MODE: ${{ github.event_name == 'issue_comment' && 'inventory' || github.event_name == 'pull_request' && 'smoke' || inputs.mode }}
         run: |
           $ErrorActionPreference = "Stop"
           if ($env:PILOT_MODE -notin @("inventory", "smoke")) { throw "INVALID_PILOT_MODE" }
