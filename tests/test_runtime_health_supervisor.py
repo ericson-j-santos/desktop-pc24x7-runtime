@@ -87,7 +87,7 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "steps.session.outputs.target_path" in workflow
     assert "scripts\\command_gateway.py" in workflow
     assert "schedule:" in workflow
-    assert "pull_request:" in workflow
+    assert "pull_request:" not in workflow.split("permissions:", 1)[0]
     assert "github.event.pull_request.head.sha || github.sha" in workflow
     assert workflow.count("shell: powershell") == 2
     assert "shell: pwsh" not in workflow
@@ -104,17 +104,14 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
     assert "task_readback_failed" in installer
 
 
-def test_canary_draft_gate_and_queue_watchdog_are_fail_closed() -> None:
+def test_canary_event_gate_and_queue_watchdog_are_fail_closed() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
         encoding="utf-8"
     )
-    assert "types: [opened, synchronize, reopened, ready_for_review]" in workflow
-    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
-    gate = (
-        "github.event_name != 'pull_request' || "
-        "(!github.event.pull_request.draft && "
-        "github.event.pull_request.head.repo.full_name == github.repository)"
-    )
+    assert "pull_request:" not in workflow.split("permissions:", 1)[0]
+    assert "workflow_dispatch:" in workflow.split("permissions:", 1)[0]
+    assert "group: pc24x7-runtime-canary" in workflow
+    gate = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
     assert workflow.count(gate) == 2
     assert "name: Runtime canary queue watchdog" in workflow
     assert 'STALL_AFTER_SECONDS: "300"' in workflow
@@ -141,9 +138,9 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
 
 
 
-def test_canary_queue_is_isolated_per_pr_without_cancelling_active_runs() -> None:
+def test_canary_queue_does_not_cancel_active_runs() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(encoding="utf-8")
-    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
+    assert "group: pc24x7-runtime-canary" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow
 
@@ -168,3 +165,103 @@ def test_canary_pins_immutable_rules_from_canonical_main() -> None:
     assert "Join-Path $rulesRoot 'scripts\\command_gateway.py'" in canary
     assert "Join-Path $rulesRoot 'config\\command-gateway.policy.json'" in canary
     assert '--require-runner-version-preflight' in canary
+
+def test_http_probe_classifies_refused_without_leaking_details(monkeypatch) -> None:
+    import errno
+    import urllib.error
+
+    def refused(*_args, **_kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "private details"))
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", refused)
+    result = m.probe_http("http://127.0.0.1:8787/readyz")
+    assert result == {
+        "healthy": False, "reason": "URLError", "failure_class": "connection_refused"
+    }
+    assert "private details" not in str(result)
+
+
+def test_http_probe_classifies_timeout_and_5xx(monkeypatch) -> None:
+    import errno
+    import urllib.error
+
+    def timeout(*_args, **_kwargs):
+        raise urllib.error.URLError(TimeoutError(errno.ETIMEDOUT, "private timeout"))
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", timeout)
+    assert m.probe_http("http://127.0.0.1:8787/readyz")["failure_class"] == "timeout"
+
+    def bad_status(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:8787/readyz", 503, "private response", None, None
+        )
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", bad_status)
+    result = m.probe_http("http://127.0.0.1:8787/readyz")
+    assert result["status_code"] == 503
+    assert result["failure_class"] == "http_non_2xx"
+    assert "private response" not in str(result)
+
+
+def test_readonly_supervisor_never_writes_operational_state(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "state.json"
+    state_path.write_text('{"existing":true}', encoding="utf-8")
+    state = {"targets": {"runner": {"attempts": 99}}}
+
+    def forbidden_write(*_args, **_kwargs):
+        pytest.fail("read-only probe must not write operational state")
+
+    monkeypatch.setattr(m, "atomic_json", forbidden_write)
+    assert m.persist_supervisor_state(state_path, state, apply=False) is False
+    assert state_path.read_text(encoding="utf-8") == '{"existing":true}'
+
+
+def test_recovery_mode_state_persistence_remains_enabled(tmp_path, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(m, "atomic_json", lambda *args: calls.append(args))
+    state_path = tmp_path / "state.json"
+    state = {"targets": {}}
+    assert m.persist_supervisor_state(state_path, state, apply=True) is True
+    assert calls == [(state_path, state)]
+
+
+def test_readonly_workflow_is_manual_owner_only_and_pins_current_rules() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "pc24x7-orchestrator-supervisor-readonly.yml").read_text(encoding="utf-8")
+    trigger = workflow.split("permissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger
+    assert "schedule:" not in trigger and "push:" not in trigger
+    assert "context.actor !== context.repo.owner" in workflow
+    assert "main.commit.sha !== context.sha" in workflow
+    assert "READONLY_MANUAL_SCOPE_DENIED" in workflow
+    assert "canonical_rules_sha" in workflow
+    assert "ref: ${{ needs.contract.outputs.canonical_rules_sha }}" in workflow
+    assert "READONLY_RULES_SHA_MISMATCH" in workflow
+    assert "actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea" in workflow
+    assert "actions/github-script@v7" not in workflow
+    assert "f6ccb143a581e28650e9b640226f9ef671d469f2" not in workflow
+    assert "'origin/main'" in workflow
+
+
+def test_runtime_canary_isolated_from_all_pr_events() -> None:
+    """PR ready/synchronize/reopened must never queue a self-hosted canary."""
+    workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
+        encoding="utf-8"
+    )
+    trigger = workflow.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert "pull_request:" not in trigger
+    assert "pull_request_target:" not in trigger
+    assert "push:" not in trigger
+    assert "workflow_dispatch:" in trigger
+    assert "schedule:" in trigger
+    assert 'cron: "17 * * * *"' in trigger
+    assert "ready_for_review" not in trigger
+
+    gate = "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    assert workflow.count(gate) == 2  # physical job + its queue watchdog
+    assert "if: github.event_name != 'pull_request'" not in workflow
+    assert "name: Runner, Docker and workers canary" in workflow
+    assert "name: Runtime canary queue watchdog" in workflow
+    assert "SESSION_LAUNCH_OK" in workflow
+    assert "--require-runner-version-preflight" in workflow
+    assert "scripts\\command_gateway.py" in workflow
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow

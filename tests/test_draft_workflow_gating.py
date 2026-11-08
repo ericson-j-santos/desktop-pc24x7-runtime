@@ -17,7 +17,6 @@ PHYSICAL_GATE = (
 PR_TYPES = "types: [opened, synchronize, reopened, ready_for_review]"
 
 PHYSICAL_WORKFLOWS = {
-    "runtime-canary.yml": 2,
     "engineering-worker-pool-smoke-dev.yml": 3,
     "ollama-local-benchmark-dev.yml": 2,
     "portfolio-bridge-preflight-dev.yml": 4,
@@ -109,23 +108,26 @@ def test_hosted_matrix_rejects_affinity_missing_os_and_suppression(old, new) -> 
 # Keep the existing host lock, but acquire it only for admitted physical jobs.
 CANARY_JOB_LOCK = (
     "    concurrency:\n"
-    "      group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}\n"
+    "      group: pc24x7-runtime-canary\n"
     "      cancel-in-progress: false\n"
 )
+CANARY_EVENT_GATE = "    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
 
 
 def assert_canary_lock_scope(content: str) -> None:
     header, jobs = content.split("\njobs:\n", 1)
     assert "\nconcurrency:" not in header, "drafts must not enter the host queue"
     assert jobs.startswith("  canary:\n")
-    assert PHYSICAL_GATE in jobs, "physical admission must remain fail-closed"
-    assert CANARY_JOB_LOCK in jobs, "admitted jobs must keep the existing host lock"
-    assert jobs.index(PHYSICAL_GATE) < jobs.index(CANARY_JOB_LOCK)
-    assert content.count("format('pc24x7-runtime-canary-pr-{0}'") == 1
-    assert "|| 'pc24x7-runtime-canary'" in content
+    assert "pull_request:" not in header, "PR events must not queue physical jobs"
+    assert "push:" not in header, "push must not queue physical jobs"
+    assert "  workflow_dispatch:" in header
+    assert "  schedule:" in header
+    assert jobs.count(CANARY_EVENT_GATE) == 2, "physical and watchdog admission must be fail-closed"
+    assert CANARY_JOB_LOCK in jobs, "admitted jobs must retain the host lock"
+    assert jobs.index(CANARY_EVENT_GATE) < jobs.index(CANARY_JOB_LOCK)
 
 
-def test_canary_skips_drafts_before_acquiring_host_lock() -> None:
+def test_canary_rejects_pr_events_before_acquiring_host_lock() -> None:
     assert_canary_lock_scope(workflow_text("runtime-canary.yml"))
 
 
@@ -143,7 +145,7 @@ def test_canary_preserves_serialization_without_cancelling_active_jobs() -> None
     assert "  workflow_dispatch:" in content
 
 
-@pytest.mark.parametrize("fault", ["global-lock", "no-lock", "renamed-lock", "no-gate"])
+@pytest.mark.parametrize("fault", ["global-lock", "no-lock", "renamed-lock", "no-gate", "pr-trigger", "push-trigger"])
 def test_canary_lock_guard_rejects_regressions(fault: str) -> None:
     content = workflow_text("runtime-canary.yml")
     if fault == "global-lock":
@@ -155,8 +157,12 @@ def test_canary_lock_guard_rejects_regressions(fault: str) -> None:
     elif fault == "no-lock":
         content = content.replace(CANARY_JOB_LOCK, "", 1)
     elif fault == "renamed-lock":
-        content = content.replace("pc24x7-runtime-canary-pr-{0}", "unshared-pr-{0}", 1)
+        content = content.replace("group: pc24x7-runtime-canary", "group: unrelated-canary", 1)
+    elif fault == "no-gate":
+        content = content.replace(CANARY_EVENT_GATE, "    if: true", 1)
+    elif fault == "pr-trigger":
+        content = content.replace("  schedule:", "  pull_request:\n    types: [ready_for_review]\n  schedule:", 1)
     else:
-        content = content.replace(PHYSICAL_GATE, "    if: true", 1)
+        content = content.replace("  schedule:", "  push:\n    branches: [main]\n  schedule:", 1)
     with pytest.raises(AssertionError):
         assert_canary_lock_scope(content)

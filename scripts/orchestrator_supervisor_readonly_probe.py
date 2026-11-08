@@ -6,6 +6,7 @@ GitHub Actions artifacts are not cryptographic attestation of the physical host.
 from __future__ import annotations
 
 import argparse
+import errno
 from http.client import HTTPConnection, HTTPException
 import hashlib
 import json
@@ -95,6 +96,48 @@ def _candidates(control: Path) -> list[Path]:
                 if len(paths) > 66:
                     raise ProbeError("CONTROL_SCAN_LIMIT")
     return sorted(paths)
+
+
+def observe_local_readiness(
+    *, connection_factory: Callable[..., Any] = HTTPConnection,
+) -> dict[str, Any]:
+    """GET a fixed loopback endpoint, even if installation metadata is missing.
+
+    No redirects, proxies, external hosts, raw exceptions or state writes.
+    """
+    connection = None
+    try:
+        connection = connection_factory("127.0.0.1", 8787, timeout=4)
+        connection.request("GET", "/readyz", headers={"Cache-Control": "no-store"})
+        response = connection.getresponse()
+        status = int(response.status)
+        if status != 200:
+            return {"healthy": False, "failure_class": "http_non_200", "http_status": status}
+        raw = response.read(8193)
+        if len(raw) > 8192:
+            return {"healthy": False, "failure_class": "response_too_large", "http_status": 200}
+        try:
+            payload = json.loads(raw.decode("utf-8"))
+        except (UnicodeError, ValueError):
+            return {"healthy": False, "failure_class": "response_invalid", "http_status": 200}
+        if not isinstance(payload, dict) or payload.get("ready") is not True:
+            return {"healthy": False, "failure_class": "readiness_false", "http_status": 200}
+        return {"healthy": True, "failure_class": "none", "http_status": 200}
+    except (OSError, HTTPException, ValueError) as exc:
+        code = getattr(exc, "errno", None)
+        win_code = getattr(exc, "winerror", None)
+        if isinstance(exc, ConnectionRefusedError) or code in (errno.ECONNREFUSED, 10061) or win_code == 10061:
+            category = "connection_refused"
+        elif isinstance(exc, TimeoutError) or code in (errno.ETIMEDOUT, 10060) or win_code == 10060:
+            category = "timeout"
+        elif code in (errno.ENETUNREACH, errno.EHOSTUNREACH, 10051, 10065) or win_code in (10051, 10065):
+            category = "network_unreachable"
+        else:
+            category = "transport_unavailable"
+        return {"healthy": False, "failure_class": category}
+    finally:
+        if connection is not None:
+            connection.close()
 
 
 def live_worker() -> dict[str, Any]:
@@ -200,6 +243,7 @@ def main(argv: list[str] | None = None) -> int:
             raise ProbeError("RUNNER_OR_HOST_INVALID")
         if not CID_RE.fullmatch(args.correlation_id):
             raise ProbeError("CORRELATION_INVALID")
+        result["loopback_readiness"] = observe_local_readiness()
         facts = collect()
         result.update(facts)
         if not facts["live_state_consistent"]:
