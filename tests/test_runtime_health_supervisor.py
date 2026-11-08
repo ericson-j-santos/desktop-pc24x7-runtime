@@ -239,5 +239,7 @@ def test_readonly_workflow_is_manual_owner_only_and_pins_current_rules() -> None
     assert "canonical_rules_sha" in workflow
     assert "ref: ${{ needs.contract.outputs.canonical_rules_sha }}" in workflow
     assert "READONLY_RULES_SHA_MISMATCH" in workflow
+    assert "actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea" in workflow
+    assert "actions/github-script@v7" not in workflow
     assert "f6ccb143a581e28650e9b640226f9ef671d469f2" not in workflow
     assert "'origin/main'" in workflow
