@@ -87,7 +87,7 @@ def test_canary_uses_materialized_worktree_and_gateway() -> None:
     assert "steps.session.outputs.target_path" in workflow
     assert "scripts\\command_gateway.py" in workflow
     assert "schedule:" in workflow
-    assert "pull_request:" in workflow
+    assert "pull_request:" not in workflow.split("permissions:", 1)[0]
     assert "github.event.pull_request.head.sha || github.sha" in workflow
     assert workflow.count("shell: powershell") == 2
     assert "shell: pwsh" not in workflow
@@ -104,17 +104,14 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
     assert "task_readback_failed" in installer
 
 
-def test_canary_draft_gate_and_queue_watchdog_are_fail_closed() -> None:
+def test_canary_event_gate_and_queue_watchdog_are_fail_closed() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
         encoding="utf-8"
     )
-    assert "types: [opened, synchronize, reopened, ready_for_review]" in workflow
-    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
-    gate = (
-        "github.event_name != 'pull_request' || "
-        "(!github.event.pull_request.draft && "
-        "github.event.pull_request.head.repo.full_name == github.repository)"
-    )
+    assert "pull_request:" not in workflow.split("permissions:", 1)[0]
+    assert "workflow_dispatch:" in workflow.split("permissions:", 1)[0]
+    assert "group: pc24x7-runtime-canary" in workflow
+    gate = "github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
     assert workflow.count(gate) == 2
     assert "name: Runtime canary queue watchdog" in workflow
     assert 'STALL_AFTER_SECONDS: "300"' in workflow
@@ -141,9 +138,9 @@ def test_installer_contract_is_s4u_boot_and_minute_interval() -> None:
 
 
 
-def test_canary_queue_is_isolated_per_pr_without_cancelling_active_runs() -> None:
+def test_canary_queue_does_not_cancel_active_runs() -> None:
     workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(encoding="utf-8")
-    assert "group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}" in workflow
+    assert "group: pc24x7-runtime-canary" in workflow
     assert "cancel-in-progress: false" in workflow
     assert "runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]" in workflow
 
@@ -243,3 +240,28 @@ def test_readonly_workflow_is_manual_owner_only_and_pins_current_rules() -> None
     assert "actions/github-script@v7" not in workflow
     assert "f6ccb143a581e28650e9b640226f9ef671d469f2" not in workflow
     assert "'origin/main'" in workflow
+
+
+def test_runtime_canary_isolated_from_all_pr_events() -> None:
+    """PR ready/synchronize/reopened must never queue a self-hosted canary."""
+    workflow = (ROOT / ".github" / "workflows" / "runtime-canary.yml").read_text(
+        encoding="utf-8"
+    )
+    trigger = workflow.split("on:\n", 1)[1].split("\npermissions:", 1)[0]
+    assert "pull_request:" not in trigger
+    assert "pull_request_target:" not in trigger
+    assert "push:" not in trigger
+    assert "workflow_dispatch:" in trigger
+    assert "schedule:" in trigger
+    assert 'cron: "17 * * * *"' in trigger
+    assert "ready_for_review" not in trigger
+
+    gate = "if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'"
+    assert workflow.count(gate) == 2  # physical job + its queue watchdog
+    assert "if: github.event_name != 'pull_request'" not in workflow
+    assert "name: Runner, Docker and workers canary" in workflow
+    assert "name: Runtime canary queue watchdog" in workflow
+    assert "SESSION_LAUNCH_OK" in workflow
+    assert "--require-runner-version-preflight" in workflow
+    assert "scripts\\command_gateway.py" in workflow
+    assert "SELF_HOSTED_RUNNER_UNAVAILABLE" in workflow

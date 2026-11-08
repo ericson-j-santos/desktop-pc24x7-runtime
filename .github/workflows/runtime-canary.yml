@@ -1,14 +1,8 @@
 name: PC24x7 Runtime Canary
 
 on:
-  pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
-    paths:
-      - .github/workflows/runtime-canary.yml
-      - config/runtime-supervisor.example.json
-      - scripts/runtime_health_supervisor.py
-      - tests/test_runtime_health_supervisor.py
-      - tests/test_runtime_canary_queue_watchdog.py
+  # PR transitions must not enqueue physical jobs; hosted CI validates proposed code.
+  # Keep scheduled/manual canaries subject to normal session and Gateway gates.
   schedule:
     # Hourly half-open pickup probe: avoid repeating the same 300s no-pickup outage every five minutes.
     # Owner manual dispatch remains available after a verified change in host preconditions.
@@ -20,10 +14,10 @@ permissions:
 
 jobs:
   canary:
-    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
-    # Do not queue draft/fork workflows before their physical admission gate.
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    # Physical queue admission is schedule/manual only; Session Launcher and Gateway still fail closed.
     concurrency:
-      group: ${{ github.event_name == 'pull_request' && format('pc24x7-runtime-canary-pr-{0}', github.event.number) || 'pc24x7-runtime-canary' }}
+      group: pc24x7-runtime-canary
       cancel-in-progress: false
     name: Runner, Docker and workers canary
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
@@ -182,7 +176,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
   queue_watchdog:
-    if: github.event_name != 'pull_request' || (!github.event.pull_request.draft && github.event.pull_request.head.repo.full_name == github.repository)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     name: Runtime canary queue watchdog
     runs-on: ubuntu-latest
     timeout-minutes: 7
