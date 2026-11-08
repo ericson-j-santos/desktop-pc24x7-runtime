@@ -7,6 +7,7 @@ o circuit breaker quando tentativas repetidas não alteram a precondição.
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import socket
@@ -100,7 +101,27 @@ def probe_http(url: str, timeout: float = 5) -> dict[str, Any]:
             healthy = 200 <= response.status < 300
             return {"healthy": healthy, "status_code": response.status, "bytes": len(body)}
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        return {"healthy": False, "reason": type(exc).__name__}
+        # Do not expose raw exception messages, URLs or host environment details.
+        if isinstance(exc, urllib.error.HTTPError):
+            return {
+                "healthy": False, "reason": "HTTPError",
+                "failure_class": "http_non_2xx", "status_code": exc.code,
+            }
+        cause = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+        code = getattr(cause, "errno", None)
+        win_code = getattr(cause, "winerror", None)
+        if isinstance(cause, ConnectionRefusedError) or code in (errno.ECONNREFUSED, 10061) or win_code == 10061:
+            failure_class = "connection_refused"
+        elif isinstance(cause, TimeoutError) or code in (errno.ETIMEDOUT, 10060) or win_code == 10060:
+            failure_class = "timeout"
+        elif code in (errno.ENETUNREACH, errno.EHOSTUNREACH, 10051, 10065) or win_code in (10051, 10065):
+            failure_class = "network_unreachable"
+        else:
+            failure_class = "transport_unavailable"
+        return {
+            "healthy": False, "reason": type(exc).__name__,
+            "failure_class": failure_class,
+        }
 
 
 def probe_docker(container: str, runner: Callable[..., subprocess.CompletedProcess[str]]) -> dict[str, Any]:
@@ -210,6 +231,14 @@ def run_cycle(
     return evidence, state
 
 
+def persist_supervisor_state(path: Path, state: dict[str, Any], *, apply: bool) -> bool:
+    """Only recovery mode may change the operational breaker state on disk."""
+    if not apply:
+        return False
+    atomic_json(path, state)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Supervisor de saude do Desktop PC24x7")
     parser.add_argument("--config", type=Path, required=True)
@@ -223,7 +252,7 @@ def main() -> int:
     config = load_json(args.config)
     state = load_json(args.state)
     evidence, state = run_cycle(config, state, apply=args.apply)
-    atomic_json(args.state, state)
+    persist_supervisor_state(args.state, state, apply=args.apply)
     atomic_json(args.evidence, evidence)
     print(json.dumps(evidence, sort_keys=True, ensure_ascii=True))
     return 0 if evidence["status"] == STATUS_OK else 2

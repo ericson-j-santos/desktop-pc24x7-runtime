@@ -168,3 +168,76 @@ def test_canary_pins_immutable_rules_from_canonical_main() -> None:
     assert "Join-Path $rulesRoot 'scripts\\command_gateway.py'" in canary
     assert "Join-Path $rulesRoot 'config\\command-gateway.policy.json'" in canary
     assert '--require-runner-version-preflight' in canary
+
+def test_http_probe_classifies_refused_without_leaking_details(monkeypatch) -> None:
+    import errno
+    import urllib.error
+
+    def refused(*_args, **_kwargs):
+        raise urllib.error.URLError(ConnectionRefusedError(errno.ECONNREFUSED, "private details"))
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", refused)
+    result = m.probe_http("http://127.0.0.1:8787/readyz")
+    assert result == {
+        "healthy": False, "reason": "URLError", "failure_class": "connection_refused"
+    }
+    assert "private details" not in str(result)
+
+
+def test_http_probe_classifies_timeout_and_5xx(monkeypatch) -> None:
+    import errno
+    import urllib.error
+
+    def timeout(*_args, **_kwargs):
+        raise urllib.error.URLError(TimeoutError(errno.ETIMEDOUT, "private timeout"))
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", timeout)
+    assert m.probe_http("http://127.0.0.1:8787/readyz")["failure_class"] == "timeout"
+
+    def bad_status(*_args, **_kwargs):
+        raise urllib.error.HTTPError(
+            "http://127.0.0.1:8787/readyz", 503, "private response", None, None
+        )
+
+    monkeypatch.setattr(m.urllib.request, "urlopen", bad_status)
+    result = m.probe_http("http://127.0.0.1:8787/readyz")
+    assert result["status_code"] == 503
+    assert result["failure_class"] == "http_non_2xx"
+    assert "private response" not in str(result)
+
+
+def test_readonly_supervisor_never_writes_operational_state(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "state.json"
+    state_path.write_text('{"existing":true}', encoding="utf-8")
+    state = {"targets": {"runner": {"attempts": 99}}}
+
+    def forbidden_write(*_args, **_kwargs):
+        pytest.fail("read-only probe must not write operational state")
+
+    monkeypatch.setattr(m, "atomic_json", forbidden_write)
+    assert m.persist_supervisor_state(state_path, state, apply=False) is False
+    assert state_path.read_text(encoding="utf-8") == '{"existing":true}'
+
+
+def test_recovery_mode_state_persistence_remains_enabled(tmp_path, monkeypatch) -> None:
+    calls = []
+    monkeypatch.setattr(m, "atomic_json", lambda *args: calls.append(args))
+    state_path = tmp_path / "state.json"
+    state = {"targets": {}}
+    assert m.persist_supervisor_state(state_path, state, apply=True) is True
+    assert calls == [(state_path, state)]
+
+
+def test_readonly_workflow_is_manual_owner_only_and_pins_current_rules() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "pc24x7-orchestrator-supervisor-readonly.yml").read_text(encoding="utf-8")
+    trigger = workflow.split("permissions:", 1)[0]
+    assert "workflow_dispatch:" in trigger
+    assert "schedule:" not in trigger and "push:" not in trigger
+    assert "context.actor !== context.repo.owner" in workflow
+    assert "main.commit.sha !== context.sha" in workflow
+    assert "READONLY_MANUAL_SCOPE_DENIED" in workflow
+    assert "canonical_rules_sha" in workflow
+    assert "ref: ${{ needs.contract.outputs.canonical_rules_sha }}" in workflow
+    assert "READONLY_RULES_SHA_MISMATCH" in workflow
+    assert "f6ccb143a581e28650e9b640226f9ef671d469f2" not in workflow
+    assert "'origin/main'" in workflow
