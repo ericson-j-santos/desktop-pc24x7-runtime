@@ -187,22 +187,7 @@ jobs:
               throw 'ISOLATED_RESTORE_NOT_VERIFIED'
             }
             if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
-              if ([string]$observed.backup_sha256 -notmatch '^[0-9a-f]{64}
-          } catch {
-            Write-Host 'ISOLATED_RESTORE_BLOCKED'
-          } finally {
-            $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $file -Encoding UTF8
-          }
-          if ($result.result -ne 'ISOLATED_ROLLBACK_VERIFIED') { throw 'ISOLATED_RESTORE_BLOCKED' }
-      - name: Publish sanitized backup validation only
-        if: always() && github.event_name != 'workflow_dispatch' && steps.session.outputs.target_path != ''
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        with:
-          name: desktop-orchestrator-isolated-rollback-evidence
-          path: ${{ steps.session.outputs.target_path }}/artifacts/isolated-rollback/evidence.json
-          if-no-files-found: warn
-          retention-days: 7
-) { throw 'MANIFEST_DIGEST_INVALID' }
+              if ([string]$observed.backup_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'MANIFEST_DIGEST_INVALID' }
               "code_snapshot_sha256=$($observed.backup_sha256)" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
             }
             Write-Host 'ISOLATED_RESTORE_VERIFIED'
