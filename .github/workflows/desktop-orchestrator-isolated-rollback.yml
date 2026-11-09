@@ -192,6 +192,7 @@ jobs:
             }
             Write-Host 'ISOLATED_RESTORE_VERIFIED'
           } catch {
+            $result.result = 'ISOLATED_ROLLBACK_BLOCKED'
             Write-Host 'ISOLATED_RESTORE_BLOCKED'
           } finally {
             $result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $file -Encoding UTF8
