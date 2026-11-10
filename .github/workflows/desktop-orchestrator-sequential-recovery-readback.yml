@@ -44,6 +44,8 @@ jobs:
     timeout-minutes: 4
     outputs:
       rules_sha: ${{ steps.admit.outputs.rules_sha }}
+      owner_comment_id: ${{ steps.admit.outputs.owner_comment_id }}
+      idempotency_key: ${{ steps.admit.outputs.idempotency_key }}
     steps:
       - name: Admit only owner and current public main without charging compute
         id: admit
@@ -264,6 +266,8 @@ jobs:
             "source_sha=$env:GITHUB_SHA",
             "rules_sha=${{ needs.admission.outputs.rules_sha }}",
             "correlation_id=$correlation",
+            "owner_comment_id=${{ needs.admission.outputs.owner_comment_id }}",
+            "idempotency_key=${{ needs.admission.outputs.idempotency_key }}",
             'isolated_code_backup=true',
             'protected_state_backup=true',
             'replay_idempotent=true',
