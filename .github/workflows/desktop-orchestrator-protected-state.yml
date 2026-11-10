@@ -1,6 +1,22 @@
 name: Desktop Protected Orchestrator State Recovery Gate
 
 on:
+  workflow_dispatch:
+    inputs:
+      expected_head_sha:
+        description: 'Current complete SHA of Desktop main'
+        required: true
+        type: string
+      expected_rules_sha:
+        description: 'Current complete SHA of canonical operational rules'
+        required: true
+        type: string
+      action:
+        description: 'Fixed DEV readback; no runtime install, update or restart'
+        required: true
+        type: choice
+        options:
+          - VERIFY-DESKTOP-ORCHESTRATOR-PROTECTED-STATE-DEV
   push:
     branches:
       - fix/desktop-orchestrator-protected-state-20261012
@@ -24,6 +40,44 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 7
     steps:
+      - name: Admit owner, current main, rules and free public compute
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            if (context.eventName !== 'workflow_dispatch') {
+              if (context.eventName !== 'push' || context.ref !== 'refs/heads/fix/desktop-orchestrator-protected-state-20261012') {
+                throw new Error('RECOVERY_EVENT_NOT_ADMITTED');
+              }
+              return;
+            }
+            const inp = context.payload.inputs || {};
+            const isSha = x => typeof x === 'string' && /^[0-9a-f]{40}$/.test(x);
+            if (context.repo.owner !== 'ericson-j-santos' ||
+                context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                context.actor !== context.repo.owner ||
+                context.ref !== 'refs/heads/main' ||
+                inp.action !== 'VERIFY-DESKTOP-ORCHESTRATOR-PROTECTED-STATE-DEV') {
+              throw new Error('RECOVERY_OWNER_MAIN_SCOPE_DENIED');
+            }
+            if (!isSha(inp.expected_head_sha) || !isSha(inp.expected_rules_sha) ||
+                context.sha !== inp.expected_head_sha) {
+              throw new Error('RECOVERY_EXPECTED_SHA_INVALID');
+            }
+            const { data: repository } = await github.rest.repos.get({
+              owner: context.repo.owner, repo: context.repo.repo,
+            });
+            if (repository.private !== false) throw new Error('RECOVERY_COST_PUBLIC_REQUIRED');
+            const { data: currentMain } = await github.rest.repos.getBranch({
+              owner: context.repo.owner, repo: context.repo.repo, branch: 'main',
+            });
+            if (currentMain.commit.sha !== context.sha) throw new Error('RECOVERY_MAIN_MOVED');
+            const { data: currentRules } = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos', repo: 'chatgpt-operational-rules', branch: 'main',
+            });
+            if (currentRules.commit.sha !== '86abe65b22781c2f608a7d7286ce3a28cd48aaaf' ||
+                inp.expected_rules_sha !== currentRules.commit.sha) {
+              throw new Error('RECOVERY_RULES_SHA_MOVED');
+            }
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
@@ -54,7 +108,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: f6ccb143a581e28650e9b640226f9ef671d469f2
+          ref: 86abe65b22781c2f608a7d7286ce3a28cd48aaaf
           path: _rules
           persist-credentials: false
       - name: Bootstrap exclusive validated session and runner version
@@ -67,11 +121,12 @@ jobs:
           if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
           $launcher = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\session_launcher.py'
           $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $syncRef = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { 'origin/main' } else { 'origin/fix/desktop-orchestrator-protected-state-20261012' }
           $args = @('--policy', $policy, '--repo', $env:GITHUB_WORKSPACE,
             '--session-prefix', 'protected-orchestrator-state',
             '--correlation-id', "protected-state-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT",
             '--expected-head', $env:GITHUB_SHA,
-            '--sync-ref', 'origin/fix/desktop-orchestrator-protected-state-20261012',
+            '--sync-ref', $syncRef,
             '--require-runner-version-preflight')
           $raw = @(& $python $launcher @args)
           if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'SESSION_LAUNCH_BLOCKED' }
@@ -153,6 +208,10 @@ jobs:
             }
             $evidence.result = 'PROTECTED_STATE_RESTORE_VERIFIED'
             $evidence.snapshot_manifest_sha256 = $manifests[0]
+            if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') {
+              if ([string]$evidence.snapshot_manifest_sha256 -notmatch '^[0-9a-f]{64}$') { throw 'MANIFEST_DIGEST_INVALID' }
+              "protected_state_manifest_sha256=$($evidence.snapshot_manifest_sha256)" | Add-Content -Path $env:GITHUB_STEP_SUMMARY
+            }
             Write-Host 'PROTECTED_STATE_RESTORE_VERIFIED'
           } catch {
             Write-Host 'PROTECTED_STATE_RESTORE_BLOCKED'
@@ -232,7 +291,7 @@ jobs:
             throw 'SHADOW_ORCHESTRATOR_BLOCKED'
           }
       - name: Upload only sanitized result without database or configs
-        if: always() && steps.session.outputs.target_path != ''
+        if: always() && github.event_name != 'workflow_dispatch' && steps.session.outputs.target_path != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-protected-orchestrator-state-evidence
