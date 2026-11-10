@@ -14,12 +14,18 @@ import yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/desktop-orchestrator-sequential-recovery-readback.yml"
 MAIN = "a" * 40
-RULES = "86abe65b22781c2f608a7d7286ce3a28cd48aaaf"
+RULES = "58dcd4200f412a866278027ba9e433439a03f3b3"
 
 NODE = r"""
 const fs = require('node:fs');
 const p = JSON.parse(fs.readFileSync(0, 'utf8'));
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+const isComment = p.event === 'issue_comment';
+const commentId = p.comment_id ?? 6759990011;
+const commentAuthor = p.comment_author ?? 'ericson-j-santos';
+const body = p.body ?? ('/todo24 verify-backups main=' + p.main +
+  ' rules=' + p.rules + ' request=' + (p.request_id ?? 'TODO24-20261110-01'));
+process.env.GITHUB_RUN_ATTEMPT = String(p.attempt ?? 1);
 const context = {
   eventName: p.event ?? 'workflow_dispatch',
   actor: p.actor ?? 'ericson-j-santos',
@@ -27,21 +33,45 @@ const context = {
           repo: p.repo ?? 'desktop-pc24x7-runtime' },
   ref: p.ref ?? 'refs/heads/main',
   sha: p.sha ?? p.main,
-  payload: {inputs: {
+  payload: isComment ? {
+    action: p.activity ?? 'created',
+    issue: { number: p.issue_number ?? 31,
+             pull_request: p.is_pr ? {url: 'https://example.invalid/pull/1'} : null },
+    comment: {id: commentId, body, user: {login: commentAuthor}}
+  } : {inputs: {
     expected_head_sha: p.expected_head_sha ?? p.main,
     expected_rules_sha: p.expected_rules_sha ?? p.rules,
     action: p.action ?? 'VERIFY-DESKTOP-RECOVERY-SEQUENTIAL-DEV'
   }}
 };
-const github = { rest: { repos: {
-  get: async () => ({data: {private: p.private ?? false}}),
-  getBranch: async ({repo}) => ({data: {commit: {sha:
-    repo === 'chatgpt-operational-rules' ? (p.rules_head ?? p.rules)
-      : (p.main_head ?? p.main)
-  }}})
-} }};
+const comments = p.comments ?? [{
+  id: commentId, body, user: {login: commentAuthor}
+}];
+const github = {rest: {
+  repos: {
+    get: async () => ({data: {private: p.private ?? false}}),
+    getBranch: async ({repo}) => ({data: {commit: {sha:
+      repo === 'chatgpt-operational-rules' ? (p.rules_head ?? p.rules)
+        : (p.main_head ?? p.main)
+    }}})
+  },
+  issues: {
+    getComment: async () => ({data: {
+      id: p.saved_id ?? commentId,
+      body: p.saved_body ?? body,
+      user: {login: p.saved_author ?? commentAuthor},
+      created_at: '2026-11-10T20:00:00Z',
+      updated_at: p.edited ? '2026-11-10T20:01:00Z' : '2026-11-10T20:00:00Z'
+    }}),
+    listComments: async () => comments
+  }
+}, paginate: async () => comments};
 const core = {setOutput: (key, value) => {
-  if (key !== 'rules_sha' || value !== p.rules) throw new Error('BAD_OUTPUT');
+  if (key === 'rules_sha' && value === p.rules) return;
+  if (key === 'owner_comment_id' && value === String(commentId)) return;
+  if (key === 'idempotency_key' &&
+      value === (p.request_id ?? 'TODO24-20261110-01')) return;
+  throw new Error('BAD_OUTPUT:' + key);
 }};
 (async () => {
   try {
@@ -76,7 +106,7 @@ def test_acao_proprietario_main_publica_passou():
 
 @pytest.mark.parametrize("alteracao,erro", [
     ({"event": "push"}, "SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED"),
-    ({"event": "issue_comment"}, "SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED"),
+    ({"event": "issues"}, "SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED"),
     ({"actor": "outro"}, "SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED"),
     ({"owner": "outro"}, "SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED"),
     ({"repo": "outro"}, "SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED"),
@@ -99,8 +129,9 @@ def test_porteiro_rejeita_entradas_indevidas(alteracao, erro):
 def test_esquema_controles_positivos_e_custo_zero():
     doc = ler()
     events = doc.get("on", doc.get(True))  # YAML 1.1 transforma "on" em True.
-    assert set(events) == {"workflow_dispatch"}
-    assert doc["permissions"] == {"contents": "read"}
+    assert set(events) == {"workflow_dispatch", "issue_comment"}
+    assert events["issue_comment"]["types"] == ["created"]
+    assert doc["permissions"] == {"contents": "read", "issues": "read"}
     assert doc["concurrency"]["cancel-in-progress"] is False
     entrada = events["workflow_dispatch"]["inputs"]
     assert set(entrada["action"]["options"]) == {
@@ -147,3 +178,60 @@ def test_probes_em_ordem_sem_bypass_e_sem_recuperar_servico_vivo():
     assert "live_service_restarted -ne $false" in runner
     assert "worker_started -ne $false" in runner
     assert "snapshot_manifest_sha256 -ne $second.snapshot_manifest_sha256" in runner
+
+
+def test_owner_issue_comment_triggers_validated_automatic_sequence():
+    assert executar_porteiro(event="issue_comment") == (0, "ADMITTED")
+
+
+@pytest.mark.parametrize("alteracao,erro", [
+    ({"event": "issue_comment", "actor": "invasor"}, "SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED"),
+    ({"event": "issue_comment", "issue_number": 5}, "SEQUENTIAL_ISSUE_COMMENT_DENIED"),
+    ({"event": "issue_comment", "is_pr": True}, "SEQUENTIAL_ISSUE_COMMENT_DENIED"),
+    ({"event": "issue_comment", "activity": "edited"}, "SEQUENTIAL_ISSUE_COMMENT_DENIED"),
+    ({"event": "issue_comment", "comment_author": "outro"}, "SEQUENTIAL_ISSUE_COMMENT_DENIED"),
+    ({"event": "issue_comment", "attempt": 2}, "SEQUENTIAL_ISSUE_COMMENT_DENIED"),
+    ({"event": "issue_comment", "body": "install now"}, "SEQUENTIAL_COMMAND_INVALID"),
+    ({"event": "issue_comment", "body": "/todo24 verify-backups"}, "SEQUENTIAL_COMMAND_INVALID"),
+    ({"event": "issue_comment", "saved_body": "alterado"}, "SEQUENTIAL_COMMENT_CHANGED"),
+    ({"event": "issue_comment", "saved_author": "outro"}, "SEQUENTIAL_COMMENT_CHANGED"),
+    ({"event": "issue_comment", "saved_id": 1}, "SEQUENTIAL_COMMENT_CHANGED"),
+    ({"event": "issue_comment", "edited": True}, "SEQUENTIAL_COMMENT_CHANGED"),
+    ({"event": "issue_comment", "comments": None, "main_head": "b" * 40}, "SEQUENTIAL_MAIN_MOVED"),
+    ({"event": "issue_comment", "rules_head": "b" * 40}, "SEQUENTIAL_RULES_SHA_MOVED"),
+    ({"event": "issue_comment", "private": True}, "SEQUENTIAL_COST_PUBLIC_REQUIRED"),
+    ({"event": "issue_comment", "comments": [
+        {"id": 6759990000, "body": (
+          "/todo24 verify-backups main=" + MAIN +
+          " rules=" + RULES + " request=TODO24-20261110-01"),
+          "user": {"login": "ericson-j-santos"}},
+        {"id": 6759990011, "body": (
+          "/todo24 verify-backups main=" + MAIN +
+          " rules=" + RULES + " request=TODO24-20261110-01"),
+          "user": {"login": "ericson-j-santos"}},
+    ]}, "SEQUENTIAL_DUPLICATE_REQUEST_DENIED"),
+])
+def test_issue_comment_negative_controls(alteracao, erro):
+    rc, output = executar_porteiro(**alteracao)
+    assert rc == 7, output
+    assert output == erro
+
+
+def test_unrelated_issue_comments_never_allocate_hosted_job():
+    doc = ler()
+    admission = doc["jobs"]["admission"]
+    guard = admission["if"]
+    for phrase in (
+        "github.event.issue.number == 31",
+        "github.actor == 'ericson-j-santos'",
+        "github.event.action == 'created'",
+        "!github.event.issue.pull_request",
+        "startsWith(github.event.comment.body, '/todo24 verify-backups ')",
+    ):
+        assert phrase in guard
+    source = WORKFLOW.read_text(encoding="utf-8")
+    assert "SEQUENTIAL_DUPLICATE_REQUEST_DENIED" in source
+    assert "SEQUENTIAL_COMMENT_CHANGED" in source
+    assert "GITHUB_RUN_ATTEMPT" in source
+    assert "listComments" in source
+    assert "getComment" in source
