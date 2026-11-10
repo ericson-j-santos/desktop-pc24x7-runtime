@@ -1,6 +1,10 @@
 name: Desktop Orchestrator Sequential Recovery Readback DEV
 
 on:
+  # A request signed by the owner via an exact issue comment is the primary API path.
+  issue_comment:
+    types: [created]
+  # Retain the previously validated owner-only manual path as a fallback.
   workflow_dispatch:
     inputs:
       expected_head_sha:
@@ -20,6 +24,7 @@ on:
 
 permissions:
   contents: read
+  issues: read
 
 concurrency:
   group: desktop-orchestrator-sequential-recovery-dev
@@ -27,6 +32,14 @@ concurrency:
 
 jobs:
   admission:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issue_comment' &&
+       github.event.action == 'created' &&
+       github.event.issue.number == 31 &&
+       !github.event.issue.pull_request &&
+       github.actor == 'ericson-j-santos' &&
+       startsWith(github.event.comment.body, '/todo24 verify-backups '))
     runs-on: ubuntu-latest
     timeout-minutes: 4
     outputs:
@@ -37,34 +50,89 @@ jobs:
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
-            const inp = context.payload.inputs || {};
             const sha = s => typeof s === 'string' && /^[a-f0-9]{40}$/.test(s);
-            if (context.eventName !== 'workflow_dispatch' ||
-                context.actor !== 'ericson-j-santos' ||
-                context.repo.owner !== 'ericson-j-santos' ||
-                context.repo.repo !== 'desktop-pc24x7-runtime' ||
-                context.ref !== 'refs/heads/main' ||
-                inp.action !== 'VERIFY-DESKTOP-RECOVERY-SEQUENTIAL-DEV') {
+            const OWNER = 'ericson-j-santos';
+            const REPO = 'desktop-pc24x7-runtime';
+            const ACTION = 'VERIFY-DESKTOP-RECOVERY-SEQUENTIAL-DEV';
+            let expectedHead;
+            let expectedRules;
+            if (context.repo.owner !== OWNER ||
+                context.repo.repo !== REPO ||
+                context.actor !== OWNER ||
+                context.ref !== 'refs/heads/main') {
               throw new Error('SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED');
             }
-            if (!sha(inp.expected_head_sha) || !sha(inp.expected_rules_sha) ||
-                inp.expected_head_sha !== context.sha) {
+            if (context.eventName === 'workflow_dispatch') {
+              const inp = context.payload.inputs || {};
+              if (inp.action !== ACTION) {
+                throw new Error('SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED');
+              }
+              expectedHead = inp.expected_head_sha;
+              expectedRules = inp.expected_rules_sha;
+            } else if (context.eventName === 'issue_comment') {
+              const issue = context.payload.issue || {};
+              const comment = context.payload.comment || {};
+              if (context.payload.action !== 'created' ||
+                  issue.number !== 31 || issue.pull_request ||
+                  comment.user?.login !== OWNER ||
+                  !Number.isSafeInteger(comment.id) || comment.id < 1 ||
+                  Number(process.env.GITHUB_RUN_ATTEMPT || '1') !== 1) {
+                throw new Error('SEQUENTIAL_ISSUE_COMMENT_DENIED');
+              }
+              // No free-form commands, URLs, paths, flags or host selection.
+              const body = comment.body;
+              const command = typeof body === 'string'
+                ? /^\/todo24 verify-backups main=([a-f0-9]{40}) rules=([a-f0-9]{40}) request=([A-Z0-9-]{8,48})$/.exec(body)
+                : null;
+              if (!command) throw new Error('SEQUENTIAL_COMMAND_INVALID');
+              expectedHead = command[1];
+              expectedRules = command[2];
+              const requestId = command[3];
+              // Independently ensure the accepted comment has not been edited.
+              const { data: currentComment } = await github.rest.issues.getComment({
+                owner: OWNER, repo: REPO, comment_id: comment.id
+              });
+              if (currentComment.id !== comment.id ||
+                  currentComment.user?.login !== OWNER ||
+                  currentComment.body !== body ||
+                  currentComment.updated_at !== currentComment.created_at) {
+                throw new Error('SEQUENTIAL_COMMENT_CHANGED');
+              }
+              // A repeated logical request must not enqueue another physical job.
+              const comments = await github.paginate(github.rest.issues.listComments, {
+                owner: OWNER, repo: REPO, issue_number: 31, per_page: 100
+              });
+              if (!Array.isArray(comments) || comments.length > 1000) {
+                throw new Error('SEQUENTIAL_DEDUP_READ_UNAVAILABLE');
+              }
+              if (comments.some(c =>
+                  c.id < comment.id && c.user?.login === OWNER &&
+                  typeof c.body === 'string' &&
+                  c.body.startsWith('/todo24 verify-backups ') &&
+                  c.body.endsWith(' request=' + requestId))) {
+                throw new Error('SEQUENTIAL_DUPLICATE_REQUEST_DENIED');
+              }
+              core.setOutput('owner_comment_id', String(comment.id));
+              core.setOutput('idempotency_key', requestId);
+            } else {
+              throw new Error('SEQUENTIAL_OWNER_MAIN_SCOPE_DENIED');
+            }
+            if (!sha(expectedHead) || !sha(expectedRules) ||
+                expectedHead !== context.sha) {
               throw new Error('SEQUENTIAL_EXPECTED_SHA_INVALID');
             }
             const { data: repo } = await github.rest.repos.get({
-              owner: context.repo.owner, repo: context.repo.repo
+              owner: OWNER, repo: REPO
             });
             if (repo.private !== false) throw new Error('SEQUENTIAL_COST_PUBLIC_REQUIRED');
             const { data: main } = await github.rest.repos.getBranch({
-              owner: context.repo.owner, repo: context.repo.repo, branch: 'main'
+              owner: OWNER, repo: REPO, branch: 'main'
             });
             if (main.commit.sha !== context.sha) throw new Error('SEQUENTIAL_MAIN_MOVED');
             const { data: rules } = await github.rest.repos.getBranch({
-              owner: 'ericson-j-santos', repo: 'chatgpt-operational-rules',
-              branch: 'main'
+              owner: OWNER, repo: 'chatgpt-operational-rules', branch: 'main'
             });
-            if (rules.commit.sha !== '86abe65b22781c2f608a7d7286ce3a28cd48aaaf' ||
-                inp.expected_rules_sha !== rules.commit.sha) {
+            if (!sha(rules.commit.sha) || expectedRules !== rules.commit.sha) {
               throw new Error('SEQUENTIAL_RULES_SHA_MOVED');
             }
             core.setOutput('rules_sha', rules.commit.sha);
