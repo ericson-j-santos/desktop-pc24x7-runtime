@@ -70,7 +70,7 @@ jobs:
             core.setOutput('rules_sha', rules.commit.sha);
 
   physical:
-    name: Dedicated Desktop: backup, replay, shadow, fail-closed
+    name: 'Dedicated Desktop: backup, replay, shadow, fail-closed'
     needs: admission
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
     timeout-minutes: 17
