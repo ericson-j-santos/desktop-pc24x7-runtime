@@ -235,3 +235,56 @@ def test_unrelated_issue_comments_never_allocate_hosted_job():
     assert "GITHUB_RUN_ATTEMPT" in source
     assert "listComments" in source
     assert "getComment" in source
+
+
+def test_sanitized_gateway_diagnostics_use_only_a_fixed_allowlist():
+    """Untrusted error strings must never be echoed as GitHub Actions logs."""
+    import re
+
+    source = WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r"\$approvedBlockers = @\((.*?)\)\s+if \(\$proofFailed\.blocker_code",
+        source, flags=re.DOTALL,
+    )
+    assert match is not None, "Missing fail-closed diagnostic allowlist"
+    codes = re.findall(r"'([A-Z][A-Z0-9_]+)'", match.group(1))
+    assert codes and len(codes) == len(set(codes))
+    assert "CODE_BACKUP_MISMATCH" in codes
+    assert "SQLITE_SNAPSHOT_FAILED" in codes
+    assert "SHADOW_READINESS_TIMEOUT" in codes
+    assert "GATEWAY_OR_PROBE_BLOCKED" not in codes
+    assert "$approvedBlockers -ccontains $proofFailed.blocker_code" in source
+    assert "$proofFailed.blocker_code -is [string]" in source
+    assert "$proofFailed.blocker_code -cmatch" not in source
+    for prohibited in ("PRIVATE_FIELD", "PASSWORD", "TOKEN", "SECRET", "API_KEY"):
+        assert prohibited not in codes
+
+
+@pytest.mark.skipif(__import__("os").name != "nt", reason="Native PowerShell is Windows-only")
+def test_native_powershell_allowlist_rejects_secret_shaped_and_case_variant_strings():
+    """Execute the exact literal allowlist parsed from the workflow in PowerShell."""
+    import re
+    import subprocess
+
+    source = WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r"(\$approvedBlockers = @\(.*?\))\s+if \(\$proofFailed\.blocker_code",
+        source, flags=re.DOTALL,
+    )
+    assert match is not None
+    script = (
+        "$ErrorActionPreference = 'Stop';\n" + match.group(1) + "\n"
+        "foreach ($value in @('CODE_BACKUP_MISMATCH','SQLITE_SNAPSHOT_FAILED',"
+        "'TOKEN_ABC123XYZ','SECRET_12345','code_backup_mismatch','')) {\n"
+        "  if ($approvedBlockers -ccontains $value) { Write-Output 'ACCEPT' }"
+        "  else { Write-Output 'REJECT' }\n"
+        "}\n"
+    )
+    run = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+        text=True, capture_output=True, timeout=15, check=False,
+    )
+    assert run.returncode == 0, run.stderr[:300]
+    assert run.stdout.strip().splitlines() == [
+        "ACCEPT", "ACCEPT", "REJECT", "REJECT", "REJECT", "REJECT",
+    ]
