@@ -218,7 +218,38 @@ jobs:
                   $eventFailed = @($raw)[-1] | ConvertFrom-Json
                   if ($eventFailed.stdout) {
                     $proofFailed = ([string]$eventFailed.stdout) | ConvertFrom-Json
-                    if ([string]$proofFailed.blocker_code -cmatch '^[A-Z][A-Z0-9_]{2,79}$') {
+                    # Fixed diagnostic codes only: regex-only filtering may
+                    # echo secret-shaped values that happen to match the format.
+                    $approvedBlockers = @(
+                      'CODE_BACKUP_MISMATCH',
+                      'CODE_SNAPSHOT_NAME_INVALID',
+                      'CODE_SNAPSHOT_WORKFLOW_NOT_ADMITTED',
+                      'CODE_SNAPSHOT_EXECUTION_ID_INVALID',
+                      'LIVE_PRECONDITION_CHANGED',
+                      'LIVE_POSTCONDITION_CHANGED',
+                      'HOST_OR_RUNNER_NOT_AUTHORIZED',
+                      'APPDATA_MISSING',
+                      'APPDATA_INVALID',
+                      'CONFIG_JSON_INVALID',
+                      'WORKER_OR_VERSION_MISMATCH',
+                      'SUPERVISOR_CONFIG_MISMATCH',
+                      'STARTUP_WRAPPER_INVALID',
+                      'STARTUP_WRAPPER_MISMATCH',
+                      'SQLITE_SNAPSHOT_FAILED',
+                      'SQLITE_RESTORE_FAILED',
+                      'SQLITE_RESTORE_INTEGRITY_FAILED',
+                      'DPAPI_WINDOWS_REQUIRED',
+                      'SNAPSHOT_CIPHER_MISMATCH',
+                      'SNAPSHOT_UNPROTECT_FAILED',
+                      'SNAPSHOT_CONFIG_CHANGED',
+                      'SNAPSHOT_MANIFEST_INVALID',
+                      'SHADOW_CODE_SNAPSHOT_MISMATCH',
+                      'SHADOW_CODE_RESTORE_INVALID',
+                      'SHADOW_READINESS_TIMEOUT',
+                      'SHADOW_PROCESS_NOT_STOPPED'
+                    )
+                    if ($proofFailed.blocker_code -is [string] -and
+                        $approvedBlockers -ccontains $proofFailed.blocker_code) {
                       $blocker = [string]$proofFailed.blocker_code
                     }
                   }
