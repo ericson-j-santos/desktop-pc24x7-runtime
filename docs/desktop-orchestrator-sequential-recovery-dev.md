@@ -47,3 +47,14 @@ O fluxo alternativo `workflow_dispatch` admite somente o proprietário, `main`, 
 - A validação independente deste workflow não certifica automaticamente `ready_for_work`, Worker Pool nativo nem E2E entre dois hosts.
 
 **Rastreamento:** Desktop Issue #31 / TODO-24; Power BI Issue #27 permanece bloqueada para E2E físico até gates de admissão, SQL e do incremento.
+
+## Controles de linhagem do snapshot pós-E2E #42927770513
+
+**Falha física observada em 10/11:** a [execução #42927770513](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/actions/runs/42927770513) foi acionada automaticamente por comentário na issue #31, completou o gate de owner/custo/main/rules, fez pickup no DESKTOP-PDQK954 e passou no `SESSION_LAUNCH_OK`. A etapa de código/restore isolado permitiu avançar; o comando `state-1` falhou com `SEQUENTIAL_GATEWAY_BLOCKED_state-1`. Sem prova de DPAPI/SQLite, replay, shadow ou rollback vivo. Não reexecutar esse request.
+
+**Defeito de contrato observado no código:** o snapshot isolado é nomeado por `GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT`, mas os consumidores de estado e shadow apontavam para `verified-code-33f312d0ac4c-38297556070-1` e o digest histórico. A correção adiciona seleção explícita por `GITHUB_WORKFLOW` (o gateway preserva o ambiente da execução, sem `shell=True`). No workflow sequencial, a única fonte admitida é `verified-code-<SHA12-INSTALADO>-<RUN_ID>-<ATTEMPT>` da mesma execução. Nos workflows legados, a referência histórica continua fixa e com digest fixado. **Não há fallback entre esses modos**.
+
+Os manifestos de código são comparados com os arquivos ativos e a cópia, a origem `runtime_sha` é validada, e a cadeia exige igualdade dos digests SHA-256 de snapshot isolado, DPAPI/SQLite e shadow. Uma divergência interrompe o processo, não cria outra versão do runtime e não reclassifica o rollback do serviço como verificado.
+
+Para nova falha, o workflow registra **apenas** um `blocker_code` de padrão `[A-Z0-9_]` e flags/digests sanitizados no log/resumo do Actions, sem conteúdo de configuração, banco ou segredo. Esse código é *diagnóstico*, não permissão de reexecução ou instalação. A próxima tentativa só pode ser feita depois de CI e revisão da nova PR, integração autorizada, revalidação dos SHAs/custo, e um novo identificador de solicitação associado à mudança real.
+

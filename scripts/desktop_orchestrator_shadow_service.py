@@ -23,8 +23,9 @@ from desktop_orchestrator_isolated_rollback import (
     _guard, _copy_code, _same_manifest, code_manifest,
 )
 from desktop_orchestrator_protected_state import (
-    CONFIRM as PROTECTED_CONFIRM, SOURCE_CODE_BACKUP, StateError,
-    _read_snapshot, dpapi, RUN_RE, ATTEMPT_RE,
+    CONFIRM as PROTECTED_CONFIRM, StateError,
+    _read_snapshot, dpapi, RUN_RE, ATTEMPT_RE, code_snapshot_name,
+    _code_snapshot_ok, LEGACY_WORKFLOW,
 )
 
 CONFIRM = "VERIFY-DESKTOP-ORCHESTRATOR-SHADOW-SERVICE-DEV"
@@ -134,14 +135,17 @@ def run_shadow(*, root: Path, run_id: str, attempt: str,
                before_fn: Callable[[], dict[str, Any]], python_executable: str,
                unprotect_fn: Callable[[bytes], bytes],
                request_fn: Callable[[int, str], dict[str, Any] | None] = _request,
-               port_fn: Callable[[], int] = _port) -> dict[str, Any]:
+               port_fn: Callable[[], int] = _port,
+               workflow: str = LEGACY_WORKFLOW) -> dict[str, Any]:
     if not RUN_RE.fullmatch(run_id) or not ATTEMPT_RE.fullmatch(attempt):
         raise StateError("SHADOW_EXECUTION_ID_INVALID")
     if not _state_ok(before_fn()):
         raise StateError("SHADOW_LIVE_PRECONDITION_INVALID")
     backups = root / "data/runtime-backups"
     _guard(backups, directory=True)
-    previous_code = backups / SOURCE_CODE_BACKUP
+    code_name = code_snapshot_name(run_id, attempt, workflow=workflow)
+    code_sha256 = _code_snapshot_ok(root, backups, snapshot_name=code_name)
+    previous_code = backups / code_name
     current_manifest = code_manifest(root)
     if not _same_manifest(current_manifest, code_manifest(previous_code)):
         raise StateError("SHADOW_CODE_SNAPSHOT_MISMATCH")
@@ -169,6 +173,7 @@ def run_shadow(*, root: Path, run_id: str, attempt: str,
         "restored_sqlite_tables": tables,
         "temporary_database_removed": not stage.exists(),
         "runtime_sha": EXPECTED_INSTALLED_SHA,
+        "code_snapshot_sha256": code_sha256,
         "raw_content_uploaded": False,
         "production_touched": False,
     }
@@ -197,6 +202,7 @@ def main() -> int:
             attempt=os.environ.get("GITHUB_RUN_ATTEMPT", ""), before_fn=collect,
             python_executable=sys.executable,
             unprotect_fn=lambda data: dpapi(data, encrypt=False),
+            workflow=os.environ.get("GITHUB_WORKFLOW", ""),
         )
         evidence.update(result)
         exit_code = 0

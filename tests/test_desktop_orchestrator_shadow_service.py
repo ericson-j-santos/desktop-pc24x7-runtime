@@ -106,5 +106,34 @@ class ShadowLifecycleTests(unittest.TestCase):
         self.assertNotIn("never-expose",json.dumps(sanitized))
 
 
+class ShadowCodeLineageTests(unittest.TestCase):
+    def test_sequential_shadow_requires_same_run_manifest_before_launch(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "live"
+            (root / "data/runtime-backups").mkdir(parents=True)
+            accepted = []
+            def reject_snapshot(_root, _backups, *, snapshot_name):
+                accepted.append(snapshot_name)
+                raise shadow.StateError("CODE_BACKUP_MISMATCH")
+            before = lambda: {
+                "installed_source_sha": shadow.EXPECTED_INSTALLED_SHA,
+                "live_state_consistent": True,
+                "pending_refresh_present": False,
+            }
+            with patch.object(shadow, "_code_snapshot_ok", side_effect=reject_snapshot):
+                with patch.object(shadow, "start_shadow") as start:
+                    with self.assertRaisesRegex(shadow.StateError, "CODE_BACKUP_MISMATCH"):
+                        shadow.run_shadow(
+                            root=root, run_id="42927770513", attempt="1",
+                            workflow="Desktop Orchestrator Sequential Recovery Readback DEV",
+                            before_fn=before, python_executable=sys.executable,
+                            unprotect_fn=lambda data: data,
+                        )
+                    start.assert_not_called()
+            self.assertEqual(
+                accepted, ["verified-code-33f312d0ac4c-42927770513-1"],
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

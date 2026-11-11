@@ -210,7 +210,23 @@ jobs:
               '--', 'python', $File, '--confirm', $Confirm)
             $raw = @(& $python $gateway @args)
             $exit = $LASTEXITCODE
-            if ($exit -ne 0 -or -not $raw) { throw "SEQUENTIAL_GATEWAY_BLOCKED_$Suffix" }
+            if ($exit -ne 0 -or -not $raw) {
+              # Report only a finite, sanitized blocker code, never stdout/DPAPI/SQLite.
+              $blocker = 'GATEWAY_OR_PROBE_BLOCKED'
+              if ($raw) {
+                try {
+                  $eventFailed = @($raw)[-1] | ConvertFrom-Json
+                  if ($eventFailed.stdout) {
+                    $proofFailed = ([string]$eventFailed.stdout) | ConvertFrom-Json
+                    if ([string]$proofFailed.blocker_code -cmatch '^[A-Z][A-Z0-9_]{2,79}$') {
+                      $blocker = [string]$proofFailed.blocker_code
+                    }
+                  }
+                } catch { $blocker = 'GATEWAY_OR_PROBE_BLOCKED' }
+              }
+              Write-Host "SEQUENTIAL_SANITIZED_BLOCKER_$Suffix=$blocker"
+              throw "SEQUENTIAL_GATEWAY_BLOCKED_$Suffix"
+            }
             $event = @($raw)[-1] | ConvertFrom-Json
             if ($event.result -ne 'ok' -or $event.gateway_exit_code -ne 0 -or
                 -not $event.stdout) { throw "SEQUENTIAL_GATEWAY_INVALID_$Suffix" }
@@ -228,9 +244,13 @@ jobs:
           $isolated = Invoke-ApprovedProbe 'scripts/desktop_orchestrator_isolated_rollback.py' 'VERIFY-DESKTOP-ORCHESTRATOR-ISOLATED-ROLLBACK-DEV' 'ISOLATED_ROLLBACK_VERIFIED' 'isolated'
           if ($isolated.isolated_restore_verified -ne $true -or
               $isolated.current_service_rollback_verified -ne $false -or
-              $isolated.secrets_read -ne $false) {
+              $isolated.secrets_read -ne $false -or
+              [string]$isolated.backup_sha256 -cnotmatch '^[a-f0-9]{64}$') {
             throw 'SEQUENTIAL_ISOLATED_RESTORE_REJECTED'
           }
+          @('isolated_code_restore_verified=true',
+            "isolated_manifest_sha256=$($isolated.backup_sha256)") |
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
           $first = Invoke-ApprovedProbe 'scripts/desktop_orchestrator_protected_state.py' 'VERIFY-DESKTOP-ORCHESTRATOR-PROTECTED-STATE-DEV' 'PROTECTED_STATE_RESTORE_VERIFIED' 'state-1'
           $second = Invoke-ApprovedProbe 'scripts/desktop_orchestrator_protected_state.py' 'VERIFY-DESKTOP-ORCHESTRATOR-PROTECTED-STATE-DEV' 'PROTECTED_STATE_RESTORE_VERIFIED' 'state-2'
@@ -239,15 +259,20 @@ jobs:
                 $state.sqlite_restore_in_memory -ne $true -or
                 $state.config_items_verified -ne 4 -or
                 $state.raw_content_uploaded -ne $false -or
-                $state.service_rollback_verified -ne $false) {
+                $state.service_rollback_verified -ne $false -or
+                $state.code_snapshot_sha256 -cne $isolated.backup_sha256) {
               throw 'SEQUENTIAL_PROTECTED_STATE_REJECTED'
             }
           }
           if ($first.replayed -ne $false -or $second.replayed -ne $true -or
-              [string]::IsNullOrEmpty($first.snapshot_manifest_sha256) -or
+              [string]$first.snapshot_manifest_sha256 -cnotmatch '^[a-f0-9]{64}$' -or
               $first.snapshot_manifest_sha256 -ne $second.snapshot_manifest_sha256) {
             throw 'SEQUENTIAL_REPLAY_REJECTED'
           }
+
+          @('protected_state_replay_verified=true',
+            "protected_manifest_sha256=$($first.snapshot_manifest_sha256)") |
+            Add-Content -Path $env:GITHUB_STEP_SUMMARY
 
           $shadow = Invoke-ApprovedProbe 'scripts/desktop_orchestrator_shadow_service.py' 'VERIFY-DESKTOP-ORCHESTRATOR-SHADOW-SERVICE-DEV' 'SHADOW_ORCHESTRATOR_READY_VERIFIED' 'shadow'
           if ($shadow.shadow_ready -ne $true -or $shadow.shadow_health -ne $true -or
@@ -256,6 +281,7 @@ jobs:
               $shadow.temporary_database_removed -ne $true -or
               $shadow.worker_started -ne $false -or
               $shadow.live_service_restarted -ne $false -or
+              $shadow.code_snapshot_sha256 -cne $isolated.backup_sha256 -or
               $shadow.service_rollback_verified -ne $false -or
               $shadow.raw_content_uploaded -ne $false) {
             throw 'SEQUENTIAL_SHADOW_REJECTED'

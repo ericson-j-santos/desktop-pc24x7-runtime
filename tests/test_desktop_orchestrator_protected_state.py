@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 import sqlite3
 import sys
@@ -179,6 +180,73 @@ class ProtectedStateTest(unittest.TestCase):
         changed[-1] ^= 0x01
         with self.assertRaises(m.StateError):
             m.dpapi(bytes(changed), encrypt=False)
+
+
+class CurrentRunCodeSnapshotBindingTests(unittest.TestCase):
+    """Never accept a historical snapshot in the new sequential recovery path."""
+
+    def test_source_selected_by_trusted_workflow_and_run_identity(self):
+        current = m.code_snapshot_name(
+            "42927770513", "1", workflow=m.SEQUENTIAL_WORKFLOW,
+        )
+        self.assertEqual(current, "verified-code-33f312d0ac4c-42927770513-1")
+        self.assertEqual(
+            m.code_snapshot_name("42927770513", "1", workflow=m.LEGACY_WORKFLOW),
+            m.SOURCE_CODE_BACKUP,
+        )
+        for bad in ("", "other", "Desktop Orchestrator Readback"):
+            with self.subTest(workflow=bad), self.assertRaisesRegex(
+                m.StateError, "CODE_SNAPSHOT_WORKFLOW_NOT_ADMITTED"
+            ):
+                m.code_snapshot_name("42927770513", "1", workflow=bad)
+        for bad in ("", "../bad", "1", "0", "42;echo"):
+            with self.subTest(run_id=bad), self.assertRaisesRegex(
+                m.StateError, "CODE_SNAPSHOT_EXECUTION_ID_INVALID"
+            ):
+                m.code_snapshot_name(bad, "1", workflow=m.SEQUENTIAL_WORKFLOW)
+
+    def test_same_run_manifest_origin_digest_and_tamper_guards(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp) / "live"
+            backups = root / "data/runtime-backups"
+            backups.mkdir(parents=True)
+            (root / "orchestrator").mkdir()
+            (root / "scripts").mkdir()
+            (root / "orchestrator/__init__.py").write_text("VERSION = 1\\n")
+            (root / "scripts/service_supervisor.py").write_text("def main(): return 0\\n")
+            current = m.code_manifest(root)
+            from desktop_orchestrator_isolated_rollback import _manifest_digest
+            name = m.code_snapshot_name("42927770513", "1", workflow=m.SEQUENTIAL_WORKFLOW)
+            snapshot = backups / name
+            snapshot.mkdir()
+            shutil.copytree(root / "orchestrator", snapshot / "orchestrator")
+            shutil.copytree(root / "scripts", snapshot / "scripts")
+            manifest = {**current, "runtime_sha": m.EXPECTED_INSTALLED_SHA,
+                        "kind": "isolated_code_backup"}
+            stored = snapshot / "code-snapshot-manifest.json"
+            stored.write_text(json.dumps(manifest), encoding="utf-8")
+            self.assertEqual(
+                m._code_snapshot_ok(root, backups, snapshot_name=name),
+                _manifest_digest(current),
+            )
+            # The old literal snapshot is not a fallback in sequential mode.
+            with self.assertRaises((m.StateError, ValueError, OSError)):
+                m._code_snapshot_ok(root, backups, snapshot_name=m.SOURCE_CODE_BACKUP)
+            stored.write_text(json.dumps({**manifest, "runtime_sha": "a" * 40}))
+            with self.assertRaisesRegex(m.StateError, "CODE_BACKUP_MISMATCH"):
+                m._code_snapshot_ok(root, backups, snapshot_name=name)
+            stored.write_text(json.dumps(manifest))
+            (snapshot / "scripts/service_supervisor.py").write_text("def main(): return 8\\n")
+            with self.assertRaisesRegex(m.StateError, "CODE_BACKUP_MISMATCH"):
+                m._code_snapshot_ok(root, backups, snapshot_name=name)
+
+    def test_reject_noncanonical_snapshot_name_without_reading_contents(self):
+        with tempfile.TemporaryDirectory() as temp:
+            for bad in ("../older", "verified-code-latest", "not-a-snapshot"):
+                with self.subTest(bad=bad), self.assertRaisesRegex(
+                    m.StateError, "CODE_SNAPSHOT_NAME_INVALID"
+                ):
+                    m._code_snapshot_ok(Path(temp), Path(temp), snapshot_name=bad)
 
 
 if __name__ == "__main__":

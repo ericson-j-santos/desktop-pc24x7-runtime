@@ -32,6 +32,9 @@ CONFIRM = "VERIFY-DESKTOP-ORCHESTRATOR-PROTECTED-STATE-DEV"
 SOURCE_CODE_BACKUP = (
     "verified-code-33f312d0ac4c-38297556070-1"
 )
+# The historical scope is retained for the two legacy owner-only workflows.
+LEGACY_WORKFLOW = "Desktop Protected Orchestrator State Recovery Gate"
+SEQUENTIAL_WORKFLOW = "Desktop Orchestrator Sequential Recovery Readback DEV"
 CIPHER_FILES = {
     "service": "service-config.json",
     "worker": "worker-config.json",
@@ -236,23 +239,46 @@ def _read_snapshot(snapshot: Path, *, decrypt_fn: Callable[[bytes], bytes]) -> t
     return restored, _verify_db(restored["sqlite"]), manifest
 
 
-def _code_snapshot_ok(root: Path, backup_root: Path) -> bool:
-    existing = backup_root / SOURCE_CODE_BACKUP
+def code_snapshot_name(run_id: str, attempt: str, *, workflow: str) -> str:
+    """Resolve only a fixed historical or the exact current-run code snapshot.
+
+    Never choose a snapshot by mtime/glob or fall back to old data in the
+    sequential workflow: both would permit accidentally restoring stale code.
+    """
+    if not RUN_RE.fullmatch(run_id) or not ATTEMPT_RE.fullmatch(attempt):
+        raise StateError("CODE_SNAPSHOT_EXECUTION_ID_INVALID")
+    if workflow == SEQUENTIAL_WORKFLOW:
+        return f"verified-code-{EXPECTED_INSTALLED_SHA[:12]}-{run_id}-{attempt}"
+    if workflow == LEGACY_WORKFLOW:
+        return SOURCE_CODE_BACKUP
+    raise StateError("CODE_SNAPSHOT_WORKFLOW_NOT_ADMITTED")
+
+
+def _code_snapshot_ok(root: Path, backup_root: Path, *, snapshot_name: str = SOURCE_CODE_BACKUP) -> str:
+    """Validate snapshot origin and content; return canonical digest, no secrets."""
+    if not re.fullmatch(r"verified-code-[0-9a-f]{12}-[1-9][0-9]{1,17}-[1-9][0-9]{0,3}", snapshot_name):
+        raise StateError("CODE_SNAPSHOT_NAME_INVALID")
+    existing = backup_root / snapshot_name
     _guard(existing, directory=True)
     manifest = _json(_bytes(existing / "code-snapshot-manifest.json", maximum=MAX_CONFIG_BYTES))
     from desktop_orchestrator_isolated_rollback import _same_manifest, _manifest_digest as code_digest
+    source = code_manifest(root)
+    digest = code_digest(source)
     if (manifest.get("runtime_sha") != EXPECTED_INSTALLED_SHA or
-        not _same_manifest(manifest, code_manifest(root)) or
+        manifest.get("kind") != "isolated_code_backup" or
+        not _same_manifest(manifest, source) or
         not _same_manifest(manifest, code_manifest(existing)) or
-        code_digest(code_manifest(root)) != "b6ac3457718c1d6ed1ff4b09967b527254105ab75be5dd23031ca5fa5377f62f"):
+        (snapshot_name == SOURCE_CODE_BACKUP and
+         digest != "b6ac3457718c1d6ed1ff4b09967b527254105ab75be5dd23031ca5fa5377f62f")):
         raise StateError("CODE_BACKUP_MISMATCH")
-    return True
+    return digest
 
 
 def snapshot(*, root: Path, appdata: Path, run_id: str, attempt: str,
              before_fn: Callable[[], dict[str, Any]],
              protect_fn: Callable[[bytes], bytes],
-             unprotect_fn: Callable[[bytes], bytes]) -> dict[str, Any]:
+             unprotect_fn: Callable[[bytes], bytes],
+             workflow: str = LEGACY_WORKFLOW) -> dict[str, Any]:
     if not RUN_RE.fullmatch(run_id) or not ATTEMPT_RE.fullmatch(attempt):
         raise StateError("EXECUTION_ID_INVALID")
     def state_ok(value: dict[str, Any]) -> bool:
@@ -264,7 +290,8 @@ def snapshot(*, root: Path, appdata: Path, run_id: str, attempt: str,
     config = _fixed_inputs(root, appdata=appdata)
     backup_root = root / "data/runtime-backups"
     _guard(backup_root, directory=True)
-    _code_snapshot_ok(root, backup_root)
+    code_name = code_snapshot_name(run_id, attempt, workflow=workflow)
+    code_sha256 = _code_snapshot_ok(root, backup_root, snapshot_name=code_name)
     selected = backup_root / f"protected-state-{EXPECTED_INSTALLED_SHA[:12]}-{run_id}-{attempt}"
     replayed = selected.exists() or selected.is_symlink()
     if not replayed:
@@ -307,6 +334,7 @@ def snapshot(*, root: Path, appdata: Path, run_id: str, attempt: str,
         "sqlite_restore_in_memory": True,
         "sqlite_table_count": tables,
         "snapshot_manifest_sha256": _manifest_digest(manifest),
+        "code_snapshot_sha256": code_sha256,
         "user_scoped_dpapi": True,
         "raw_content_uploaded": False,
         "service_rollback_verified": False,
@@ -343,6 +371,7 @@ def main() -> int:
             before_fn=collect,
             protect_fn=lambda x: dpapi(x, encrypt=True),
             unprotect_fn=lambda x: dpapi(x, encrypt=False),
+            workflow=os.environ.get("GITHUB_WORKFLOW", ""),
         )
         outcome.update(result)
         code = 0
