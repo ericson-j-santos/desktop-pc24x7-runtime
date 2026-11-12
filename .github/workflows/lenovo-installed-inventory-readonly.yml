@@ -28,7 +28,6 @@ jobs:
     timeout-minutes: 6
     env:
       DEPLOYMENT_ENV: DEV
-      RULES_SHA: ${{ steps.admit.outputs.rules_sha }}
       CORRELATION_ID: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Admit owner, exact current main and CI
