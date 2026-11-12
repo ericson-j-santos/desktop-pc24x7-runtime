@@ -22,7 +22,8 @@ INSTALLED = "7" * 40
 @pytest.fixture
 def admitted(monkeypatch, tmp_path):
     workspace = tmp_path / "workspace"
-    target = Path(r"C:\dev\chatgpt-workers") / "wt-chat-upgrade-test"
+    worktree_root = tmp_path / "worktree-root"
+    target = worktree_root / "wt-chat-upgrade-test"
     for path in (
         workspace / "_rules/scripts/command_gateway.py",
         workspace / "_rules/config/command-gateway.policy.json",
@@ -47,6 +48,7 @@ def admitted(monkeypatch, tmp_path):
     }
     for key, value in env.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.setattr(m, "WORKTREE_ROOT", worktree_root.resolve())
     monkeypatch.setattr(m.socket, "gethostname", lambda: m.EXPECTED_HOST)
     return env, output
 
