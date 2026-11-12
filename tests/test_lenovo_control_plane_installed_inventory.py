@@ -77,6 +77,44 @@ class InventoryTests(unittest.TestCase):
         current = {p: (p.stat().st_mtime_ns, p.read_bytes()) for p in previous}
         self.assertEqual(current, previous)
 
+    def test_registered_launcher_locates_root_without_localappdata(self):
+        with patch.dict(os.environ, {"LOCALAPPDATA": "/some/other/service/profile"}):
+            located = module.runtime_root_from_task({
+                "launcher": str(self.launcher_file),
+                "working_directory": str(self.root),
+            })
+        self.assertEqual(located, self.root)
+        self.assertEqual(module.collect(located, host=module.HOST, runner=module.RUNNER), self.collect())
+
+    def test_registered_launcher_must_have_exact_directory(self):
+        other = Path(self.temp.name) / "foreign" / "run.py"
+        other.parent.mkdir()
+        other.write_text("ignored", encoding="utf-8")
+        with self.assertRaisesRegex(module.InventoryBlocked, "task_launcher_path_invalid"):
+            module.runtime_root_from_task({
+                "launcher": str(other),
+                "working_directory": str(other.parent),
+            })
+
+    def test_registered_launcher_workdir_mismatch_blocks(self):
+        with self.assertRaisesRegex(module.InventoryBlocked, "task_launcher_path_invalid"):
+            module.runtime_root_from_task({
+                "launcher": str(self.launcher_file),
+                "working_directory": str(self.scripts),
+            })
+
+    def test_registered_launcher_symlink_blocks(self):
+        alias = self.root / "alias"
+        try:
+            alias.symlink_to(self.launcher_file)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink unavailable")
+        with self.assertRaisesRegex(module.InventoryBlocked, "task_launcher_path_invalid"):
+            module.runtime_root_from_task({
+                "launcher": str(alias),
+                "working_directory": str(self.root),
+            })
+
     def test_missing_metadata_blocks(self):
         self.metadata_path.unlink()
         self.reject("file_read_unavailable")
