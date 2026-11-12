@@ -104,14 +104,18 @@ class InventoryTests(unittest.TestCase):
             })
 
     def test_registered_launcher_symlink_blocks(self):
-        alias = self.root / "alias"
+        # Preserve the *correct* fixed name and directory. This must fail
+        # because of the symlink, not accidentally because it was named alias.
+        destination = self.root / "real-launcher.py"
+        destination.write_bytes(self.launcher_file.read_bytes())
+        self.launcher_file.unlink()
         try:
-            alias.symlink_to(self.launcher_file)
+            self.launcher_file.symlink_to(destination)
         except (OSError, NotImplementedError):
             self.skipTest("symlink unavailable")
-        with self.assertRaisesRegex(module.InventoryBlocked, "task_launcher_path_invalid"):
+        with self.assertRaisesRegex(module.InventoryBlocked, "reparse_path_blocked"):
             module.runtime_root_from_task({
-                "launcher": str(alias),
+                "launcher": str(self.launcher_file),
                 "working_directory": str(self.root),
             })
 
