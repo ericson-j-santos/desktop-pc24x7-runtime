@@ -1,0 +1,189 @@
+name: Lenovo Control Plane Governed Upgrade DEV
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_source_sha:
+        description: Exact current main SHA to install
+        type: string
+        required: true
+      expected_installed_sha:
+        description: Exact currently installed source SHA
+        type: string
+        required: true
+      expected_watchdog_sha256:
+        description: SHA-256 of the installed watchdog
+        type: string
+        required: true
+      expected_uac_sha256:
+        description: SHA-256 of the installed UAC launcher
+        type: string
+        required: true
+      expected_launcher_sha256:
+        description: SHA-256 of the installed run.py launcher
+        type: string
+        required: true
+      confirmation:
+        description: Explicit fixed confirmation
+        type: choice
+        required: true
+        options: [UPGRADE-DESKTOP-FREE-CONTROL-PLANE]
+
+permissions:
+  contents: read
+  actions: read
+  issues: read
+
+concurrency:
+  group: lenovo-control-plane-upgrade-dev
+  cancel-in-progress: false
+
+jobs:
+  admit:
+    name: Admit exact main SHA and owner-only DEV request
+    runs-on: windows-latest
+    timeout-minutes: 3
+    outputs:
+      rules_sha: ${{ steps.admit.outputs.rules_sha }}
+    steps:
+      - name: Validate immutable request, issue and successful CI
+        id: admit
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          TARGET_SOURCE_SHA: ${{ inputs.target_source_sha }}
+          EXPECTED_INSTALLED_SHA: ${{ inputs.expected_installed_sha }}
+          EXPECTED_WATCHDOG_SHA256: ${{ inputs.expected_watchdog_sha256 }}
+          EXPECTED_UAC_SHA256: ${{ inputs.expected_uac_sha256 }}
+          EXPECTED_LAUNCHER_SHA256: ${{ inputs.expected_launcher_sha256 }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        with:
+          script: |
+            const repository = 'ericson-j-santos/desktop-pc24x7-runtime';
+            const sha40 = /^[0-9a-f]{40}$/;
+            const sha64 = /^[0-9a-f]{64}$/;
+            if (context.eventName !== 'workflow_dispatch' || context.actor !== 'ericson-j-santos' ||
+                context.repo.owner + '/' + context.repo.repo !== repository ||
+                context.ref !== 'refs/heads/main' || process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                process.env.CONFIRMATION !== 'UPGRADE-DESKTOP-FREE-CONTROL-PLANE' ||
+                !sha40.test(process.env.TARGET_SOURCE_SHA || '') ||
+                !sha40.test(process.env.EXPECTED_INSTALLED_SHA || '') ||
+                !sha64.test(process.env.EXPECTED_WATCHDOG_SHA256 || '') ||
+                !sha64.test(process.env.EXPECTED_UAC_SHA256 || '') ||
+                !sha64.test(process.env.EXPECTED_LAUNCHER_SHA256 || '') ||
+                process.env.TARGET_SOURCE_SHA !== context.sha) {
+              throw new Error('CONTROL_PLANE_UPGRADE_SCOPE_REJECTED');
+            }
+            const {data: main} = await github.rest.repos.getBranch({...context.repo, branch: 'main'});
+            if (main.commit.sha !== context.sha) throw new Error('CONTROL_PLANE_UPGRADE_MAIN_MOVED');
+            const {data: issue} = await github.rest.issues.get({...context.repo, issue_number: 147});
+            if (issue.state !== 'open' || !issue.body?.includes('rp23ogs-control-plane-upgrade-workflow-20261112')) {
+              throw new Error('CONTROL_PLANE_UPGRADE_OPEN_ISSUE_REQUIRED');
+            }
+            const {data: runs} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id: 'ci.yml', head_sha: context.sha,
+              branch: 'main', event: 'push', status: 'completed', per_page: 100,
+            });
+            const eligible = runs.workflow_runs.filter(run => run.head_sha === context.sha &&
+              run.head_branch === 'main' && run.event === 'push' && run.conclusion === 'success' &&
+              run.repository?.full_name === repository);
+            if (eligible.length !== 1) throw new Error('CONTROL_PLANE_UPGRADE_EXACT_CI_REQUIRED');
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo, run_id: eligible[0].id, filter: 'latest', per_page: 100,
+            });
+            if (jobs.total_count !== jobs.jobs.length) throw new Error('CONTROL_PLANE_UPGRADE_CI_INCOMPLETE');
+            for (const [name, label] of [['Python compile and tests', 'windows-latest'], ['Portable Linux compile and tests', 'ubuntu-latest']]) {
+              const matches = jobs.jobs.filter(job => job.name === name);
+              if (matches.length !== 1 || matches[0].status !== 'completed' ||
+                  matches[0].conclusion !== 'success' || !matches[0].labels?.includes(label) ||
+                  !matches[0].steps?.some(step => step.name === 'Unit and negative-control tests' &&
+                    step.status === 'completed' && step.conclusion === 'success')) {
+                throw new Error('CONTROL_PLANE_UPGRADE_REAL_CI_REQUIRED');
+              }
+            }
+            const rules = await github.rest.repos.getBranch({
+              owner: 'ericson-j-santos', repo: 'chatgpt-operational-rules', branch: 'main',
+            });
+            core.setOutput('rules_sha', rules.data.commit.sha);
+
+  upgrade:
+    needs: admit
+    name: Governed upgrade on DESKTOP-RP23OGS
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
+    timeout-minutes: 8
+    environment: DEV
+    env:
+      DEPLOYMENT_ENV: DEV
+      ISSUE_NUMBER: '147'
+      TARGET_SOURCE_SHA: ${{ inputs.target_source_sha }}
+      EXPECTED_INSTALLED_SHA: ${{ inputs.expected_installed_sha }}
+      EXPECTED_WATCHDOG_SHA256: ${{ inputs.expected_watchdog_sha256 }}
+      EXPECTED_UAC_SHA256: ${{ inputs.expected_uac_sha256 }}
+      EXPECTED_LAUNCHER_SHA256: ${{ inputs.expected_launcher_sha256 }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      RULES_SHA: ${{ needs.admit.outputs.rules_sha }}
+      CORRELATION_ID: rp23ogs-control-plane-upgrade-${{ github.run_id }}-${{ github.run_attempt }}
+      EVIDENCE_REL: artifacts\lenovo-control-plane-pickup\evidence.json
+    steps:
+      - name: Checkout exact runtime SHA without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.target_source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Checkout exact canonical rules without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ needs.admit.outputs.rules_sha }}
+          path: _rules
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Bootstrap governed physical session
+        id: session
+        shell: python
+        run: |
+          import os, runpy
+          module = runpy.run_path(os.path.join(os.environ['GITHUB_WORKSPACE'], 'scripts', 'lenovo_control_plane_workflow.py'))
+          module['bootstrap']()
+      - name: Prove read-only upgrade preflight
+        shell: python
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          import os, runpy
+          module = runpy.run_path(os.path.join(os.environ['GITHUB_WORKSPACE'], 'scripts', 'lenovo_control_plane_upgrade_workflow.py'))
+          module['preflight']()
+      - name: Apply transaction or prove replay no-op
+        id: apply
+        shell: python
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          import os, runpy
+          module = runpy.run_path(os.path.join(os.environ['GITHUB_WORKSPACE'], 'scripts', 'lenovo_control_plane_upgrade_workflow.py'))
+          module['apply']()
+      - name: Prove post-upgrade pickup and emit sanitized receipt
+        id: pickup
+        shell: python
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          import os, runpy
+          module = runpy.run_path(os.path.join(os.environ['GITHUB_WORKSPACE'], 'scripts', 'lenovo_control_plane_workflow.py'))
+          module['prove']()
+          module['emit_receipt']()
+      - name: Publish nonsecret receipt hashes
+        shell: python
+        env:
+          UPGRADE_RESULT: ${{ steps.apply.outputs.upgrade_result }}
+          UPGRADE_RECEIPT_SHA256: ${{ steps.apply.outputs.upgrade_receipt_sha256 }}
+          PICKUP_RECEIPT_SHA256: ${{ steps.pickup.outputs.receipt_sha256 }}
+        run: |
+          import json, os
+          print(json.dumps({'result': os.environ['UPGRADE_RESULT'], 'upgrade_receipt_sha256': os.environ['UPGRADE_RECEIPT_SHA256'], 'pickup_receipt_sha256': os.environ['PICKUP_RECEIPT_SHA256'], 'credentials_created': False, 'production_touched': False, 'reboot_performed': False}, sort_keys=True))
