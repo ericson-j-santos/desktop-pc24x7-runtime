@@ -127,10 +127,14 @@ jobs:
               if envelope.get('result')!='ok' or envelope.get('command_exit_code')!=0 or envelope.get('state_changed') is not False:
                   raise ValueError('gateway')
               payload=json.loads(str(envelope['stdout']).splitlines()[-1])
-              if (payload.get('result')!='INSTALLED_INVENTORY_READ_ONLY' or
+              if (payload.get('contract')!='lenovo-installed-inventory-readonly-v1' or
+                  payload.get('result')!='INSTALLED_INVENTORY_READ_ONLY' or
                   payload.get('host')!='DESKTOP-RP23OGS' or
                   payload.get('runner_name')!='DESKTOP-RP23OGS-runtime' or
                   payload.get('double_read_verified') is not True or
+                  type(payload.get('upgrade_profile_root_aligned')) is not bool or
+                  payload.get('runner_health_proven') is not False or
+                  payload.get('github_pickup_proven') is not False or
                   payload.get('mutation_performed') is not False or
                   payload.get('upgrade_authorized') is not False):
                   raise ValueError('receipt')
@@ -143,5 +147,6 @@ jobs:
               raise RuntimeError('LENOVO_INVENTORY_RECEIPT_REJECTED') from None
           keys=('result','host','runner_name','expected_installed_sha','metadata_sha256',
                 'expected_watchdog_sha256','expected_uac_sha256','expected_launcher_sha256',
-                'double_read_verified','mutation_performed','upgrade_authorized')
+                'upgrade_profile_root_aligned','double_read_verified',
+                'mutation_performed','upgrade_authorized')
           print(json.dumps({key:payload[key] for key in keys},sort_keys=True))
