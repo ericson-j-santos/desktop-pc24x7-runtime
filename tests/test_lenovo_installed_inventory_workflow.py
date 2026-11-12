@@ -69,7 +69,18 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
             self.assertIn(key, final)
         self.assertIn("payload.get('upgrade_authorized') is not False", final)
         self.assertIn("payload.get('double_read_verified') is not True", final)
+        self.assertIn("type(payload.get('upgrade_profile_root_aligned')) is not bool", final)
+        self.assertIn("payload.get('runner_health_proven') is not False", final)
+        self.assertIn("payload.get('github_pickup_proven') is not False", final)
+        self.assertIn("'upgrade_profile_root_aligned','double_read_verified'", final)
         self.assertIn("if process.returncode!=0:", final)
+
+    def test_upgrade_profile_mismatch_is_visible_not_a_claim_of_readiness(self):
+        script = self.job["steps"][-1]["run"]
+        self.assertIn("upgrade_profile_root_aligned", script)
+        self.assertIn("payload.get('upgrade_authorized') is not False", script)
+        self.assertIn("payload.get('runner_health_proven') is not False", script)
+        self.assertNotIn("upgrade_desktop_free_control_plane.py", script)
 
     def test_no_executable_dispatch_on_main_from_branch(self):
         self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
