@@ -115,6 +115,23 @@ class InventoryTests(unittest.TestCase):
                 "working_directory": str(self.root),
             })
 
+    def test_aligned_upgrade_profile_is_reported_without_mutation(self):
+        self.assertTrue(module.upgrade_profile_root_aligned(
+            self.root, str(self.root.parent.parent)))
+
+    def test_local_system_profile_mismatch_is_not_upgrade_ready(self):
+        unrelated = Path(self.temp.name) / "LocalSystem" / "AppData" / "Local"
+        unrelated.mkdir(parents=True)
+        self.assertFalse(module.upgrade_profile_root_aligned(self.root, str(unrelated)))
+
+    def test_missing_runner_localappdata_never_claims_alignment(self):
+        self.assertFalse(module.upgrade_profile_root_aligned(self.root, None))
+        self.assertFalse(module.upgrade_profile_root_aligned(self.root, "relative/path"))
+
+    def test_nonexistent_profile_cannot_claim_alignment(self):
+        self.assertFalse(module.upgrade_profile_root_aligned(
+            self.root, str(Path(self.temp.name) / "unknown")))
+
     def test_missing_metadata_blocks(self):
         self.metadata_path.unlink()
         self.reject("file_read_unavailable")
