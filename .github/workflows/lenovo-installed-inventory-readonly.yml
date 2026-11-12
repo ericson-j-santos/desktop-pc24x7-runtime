@@ -22,7 +22,7 @@ concurrency:
 
 jobs:
   inventory:
-    if: github.actor == 'ericson-j-santos' && github.triggering_actor == 'ericson-j-santos' && github.ref == 'refs/heads/main'
+    if: github.actor == 'ericson-j-santos' && github.triggering_actor == 'ericson-j-santos' && github.ref == 'refs/heads/main' && vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
     environment: DEV
     timeout-minutes: 6
