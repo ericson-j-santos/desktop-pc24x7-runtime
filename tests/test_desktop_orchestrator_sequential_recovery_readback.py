@@ -4,6 +4,7 @@ These tests never dispatch a workflow, touch the Desktop or upload evidence.
 """
 from __future__ import annotations
 
+import ast
 import json
 from pathlib import Path
 import subprocess
@@ -258,6 +259,35 @@ def test_sanitized_gateway_diagnostics_use_only_a_fixed_allowlist():
     assert "$proofFailed.blocker_code -cmatch" not in source
     for prohibited in ("PRIVATE_FIELD", "PASSWORD", "TOKEN", "SECRET", "API_KEY"):
         assert prohibited not in codes
+
+
+def test_protected_state_fixed_blockers_are_all_safely_publishable():
+    """Keep physical state failures diagnosable without echoing arbitrary text."""
+    import re
+
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r"\$approvedBlockers = @\((.*?)\)\s+if \(\$proofFailed\.blocker_code",
+        workflow, flags=re.DOTALL,
+    )
+    assert match is not None
+    approved = set(re.findall(r"'([A-Z][A-Z0-9_]+)'", match.group(1)))
+
+    protected = ROOT / "scripts/desktop_orchestrator_protected_state.py"
+    tree = ast.parse(protected.read_text(encoding="utf-8"))
+    emitted = {"UNEXPECTED_FILE_ERROR"}
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "StateError" or not node.args:
+            continue
+        for literal in ast.walk(node.args[0]):
+            if (isinstance(literal, ast.Constant) and
+                    isinstance(literal.value, str) and
+                    re.fullmatch(r"[A-Z][A-Z0-9_]+", literal.value)):
+                emitted.add(literal.value)
+
+    assert emitted <= approved, sorted(emitted - approved)
 
 
 @pytest.mark.skipif(__import__("os").name != "nt", reason="Native PowerShell is Windows-only")
