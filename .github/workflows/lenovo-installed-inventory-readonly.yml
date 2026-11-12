@@ -1,0 +1,148 @@
+name: Lenovo Installed Inventory DEV (read-only)
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact current main SHA; read-only, no upgrade
+        required: true
+        type: string
+      confirmation:
+        description: Fixed read-only confirmation
+        required: true
+        type: choice
+        options: [READ_ONLY_LENOVO_INVENTORY]
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: lenovo-installed-inventory-readonly-dev
+  cancel-in-progress: false
+
+jobs:
+  inventory:
+    if: github.actor == 'ericson-j-santos' && github.triggering_actor == 'ericson-j-santos' && github.ref == 'refs/heads/main'
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
+    environment: DEV
+    timeout-minutes: 6
+    env:
+      DEPLOYMENT_ENV: DEV
+      RULES_SHA: ${{ steps.admit.outputs.rules_sha }}
+      CORRELATION_ID: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Admit owner, exact current main and CI
+        id: admit
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        with:
+          script: |
+            const repository = 'ericson-j-santos/desktop-pc24x7-runtime';
+            const sha = process.env.EXPECTED_SOURCE_SHA || '';
+            if (context.eventName !== 'workflow_dispatch' ||
+                context.actor !== 'ericson-j-santos' ||
+                context.repo.owner + '/' + context.repo.repo !== repository ||
+                context.ref !== 'refs/heads/main' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                process.env.CONFIRMATION !== 'READ_ONLY_LENOVO_INVENTORY' ||
+                !/^[0-9a-f]{40}$/.test(sha) || sha !== context.sha) {
+              throw new Error('LENOVO_INVENTORY_ADMISSION_REJECTED');
+            }
+            const {data: main} = await github.rest.repos.getBranch({...context.repo, branch:'main'});
+            if (main.commit.sha !== sha) throw new Error('LENOVO_INVENTORY_MAIN_MOVED');
+            const {data: runs} = await github.rest.actions.listWorkflowRuns({
+              ...context.repo, workflow_id:'ci.yml', head_sha:sha,
+              branch:'main', event:'push', status:'completed', per_page:100
+            });
+            const passed = runs.workflow_runs.filter(x =>
+              x.repository?.full_name === repository && x.head_sha === sha &&
+              x.head_branch === 'main' && x.event === 'push' && x.conclusion === 'success');
+            if (passed.length !== 1) throw new Error('LENOVO_INVENTORY_EXACT_CI_REQUIRED');
+            const {data: jobs} = await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo, run_id:passed[0].id, filter:'latest', per_page:100
+            });
+            if (jobs.total_count !== jobs.jobs.length) throw new Error('LENOVO_INVENTORY_CI_INCOMPLETE');
+            for (const [name,label] of [['Python compile and tests','windows-latest'],
+              ['Portable Linux compile and tests','ubuntu-latest']]) {
+              const matches = jobs.jobs.filter(x => x.name === name);
+              if (matches.length !== 1 || matches[0].status !== 'completed' ||
+                  matches[0].conclusion !== 'success' || !matches[0].labels?.includes(label) ||
+                  !matches[0].steps?.some(s => s.name === 'Unit and negative-control tests' &&
+                      s.status === 'completed' && s.conclusion === 'success')) {
+                throw new Error('LENOVO_INVENTORY_CI_GATES_REQUIRED');
+              }
+            }
+            const rules = await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'
+            });
+            core.setOutput('rules_sha', rules.data.commit.sha);
+      - name: Checkout exact source without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          persist-credentials: false
+      - name: Checkout canonical rules without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ steps.admit.outputs.rules_sha }}
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap governed physical session
+        id: session
+        shell: python
+        run: |
+          import os,runpy
+          m=runpy.run_path(os.path.join(os.environ['GITHUB_WORKSPACE'],'scripts','lenovo_control_plane_workflow.py'))
+          m['bootstrap']()
+      - name: Read installed SHA and digests through Command Gateway Risk 1
+        shell: python
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          import json,os,re,subprocess,sys
+          from pathlib import Path
+          workspace=Path(os.environ['GITHUB_WORKSPACE'])
+          rules=workspace/'_rules'
+          target=Path(os.environ['TARGET_PATH'])
+          sha=os.environ['ANCHOR_SHA']
+          if sha!=os.environ['GITHUB_SHA'] or not re.fullmatch('[0-9a-f]{40}',sha):
+              raise RuntimeError('LENOVO_INVENTORY_SHA_REJECTED')
+          command=[
+              sys.executable,str(rules/'scripts'/'command_gateway.py'),
+              '--policy',str(rules/'config'/'command-gateway.policy.json'),
+              '--correlation-id',os.environ['CORRELATION_ID'],
+              'run','--cwd',str(target),'--session-id',os.environ['SESSION_ID'],
+              '--risk','1','--timeout','60','--expected-head',sha,
+              '--',sys.executable,'-B',str(target/'scripts'/'lenovo_control_plane_installed_inventory.py')
+          ]
+          process=subprocess.run(command,check=False,shell=False,capture_output=True,text=True,timeout=90)
+          if process.returncode!=0:
+              raise RuntimeError('LENOVO_INVENTORY_GATEWAY_BLOCKED')
+          try:
+              envelope=json.loads(process.stdout.splitlines()[-1])
+              if envelope.get('result')!='ok' or envelope.get('command_exit_code')!=0 or envelope.get('state_changed') is not False:
+                  raise ValueError('gateway')
+              payload=json.loads(str(envelope['stdout']).splitlines()[-1])
+              if (payload.get('result')!='INSTALLED_INVENTORY_READ_ONLY' or
+                  payload.get('host')!='DESKTOP-RP23OGS' or
+                  payload.get('runner_name')!='DESKTOP-RP23OGS-runtime' or
+                  payload.get('double_read_verified') is not True or
+                  payload.get('mutation_performed') is not False or
+                  payload.get('upgrade_authorized') is not False):
+                  raise ValueError('receipt')
+              if not re.fullmatch('[0-9a-f]{40}',str(payload.get('expected_installed_sha'))):
+                  raise ValueError('sha')
+              for key in ('metadata_sha256','expected_watchdog_sha256','expected_uac_sha256','expected_launcher_sha256'):
+                  if not re.fullmatch('[0-9a-f]{64}',str(payload.get(key))):
+                      raise ValueError('digest')
+          except (ValueError,KeyError,IndexError,TypeError):
+              raise RuntimeError('LENOVO_INVENTORY_RECEIPT_REJECTED') from None
+          keys=('result','host','runner_name','expected_installed_sha','metadata_sha256',
+                'expected_watchdog_sha256','expected_uac_sha256','expected_launcher_sha256',
+                'double_read_verified','mutation_performed','upgrade_authorized')
+          print(json.dumps({key:payload[key] for key in keys},sort_keys=True))
