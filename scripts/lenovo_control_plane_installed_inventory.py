@@ -143,6 +143,29 @@ def runtime_root_from_task(task: dict[str, Any]) -> Path:
     return root
 
 
+
+def upgrade_profile_root_aligned(task_root: Path, runner_localappdata: str | None) -> bool:
+    """Report whether the existing upgrader would open the same installation.
+
+    The existing upgrader derives default_runtime_root() from LOCALAPPDATA.
+    Never treat the inventory hashes as an upgrade preflight when a service
+    runner (e.g. LocalSystem) points to a different profile than task S4U.
+    This is a read-only observation, never an upgrade authorization.
+    """
+    if not isinstance(runner_localappdata, str) or not runner_localappdata.strip():
+        return False
+    profile = Path(runner_localappdata)
+    if not profile.is_absolute():
+        return False
+    expected_root = profile / "DesktopPC24x7" / "ControlPlaneWatchdog"
+    try:
+        _no_links(task_root)
+        _no_links(expected_root)
+        return expected_root.resolve(strict=True) == task_root.resolve(strict=True)
+    except (InventoryBlocked, OSError, ValueError):
+        return False
+
+
 def main() -> int:
     try:
         expected = {
@@ -169,6 +192,8 @@ def main() -> int:
             raise InventoryBlocked("task_readback_unavailable") from exc
         root = runtime_root_from_task(task)
         result = collect(root, host=socket.gethostname().upper(), runner=os.environ["RUNNER_NAME"])
+        result["upgrade_profile_root_aligned"] = upgrade_profile_root_aligned(
+            root, os.environ.get("LOCALAPPDATA"))
     except (InventoryBlocked, OSError, ValueError, TypeError) as exc:
         print(json.dumps({"result": "BLOCKED", "reason": _safe_reason(exc),
                           "mutation_performed": False, "upgrade_authorized": False},
