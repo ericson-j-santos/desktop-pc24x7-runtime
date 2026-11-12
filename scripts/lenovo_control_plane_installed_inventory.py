@@ -116,6 +116,33 @@ def collect(root: Path, *, host: str, runner: str) -> dict[str, Any]:
     }
 
 
+
+def runtime_root_from_task(task: dict[str, Any]) -> Path:
+    """Resolve the *registered* watchdog launcher, never runner LOCALAPPDATA.
+
+    The GitHub runner may execute as LocalSystem while the watchdog runs in
+    a different Windows user profile. Its task action is the authoritative
+    local read-only locator, and must still match the fixed runtime suffix.
+    """
+    if not isinstance(task, dict):
+        raise InventoryBlocked("task_readback_invalid")
+    launcher_value = task.get("launcher")
+    workdir_value = task.get("working_directory")
+    if not isinstance(launcher_value, str) or not isinstance(workdir_value, str):
+        raise InventoryBlocked("task_readback_invalid")
+    launcher = Path(launcher_value)
+    root = launcher.parent
+    if (launcher.name.casefold() != "run.py"
+            or root.name.casefold() != "controlplanewatchdog"
+            or root.parent.name.casefold() != "desktoppc24x7"
+            or str(root).casefold() != str(Path(workdir_value)).casefold()):
+        raise InventoryBlocked("task_launcher_path_invalid")
+    _no_links(launcher)
+    if not launcher.is_file() or not root.is_dir():
+        raise InventoryBlocked("task_launcher_missing")
+    return root
+
+
 def main() -> int:
     try:
         expected = {
@@ -133,10 +160,14 @@ def main() -> int:
             raise InventoryBlocked("physical_host_mismatch")
         if not isinstance(os.environ.get("GITHUB_SHA"), str) or not SHA40.fullmatch(os.environ["GITHUB_SHA"]):
             raise InventoryBlocked("github_source_sha_invalid")
-        local = os.environ.get("LOCALAPPDATA")
-        if not local:
-            raise InventoryBlocked("localappdata_missing")
-        root = Path(local) / "DesktopPC24x7" / "ControlPlaneWatchdog"
+        # Reuse the existing fixed, read-only Task Scheduler readback. Never
+        # guess the S4U installation from the LocalSystem runner profile.
+        try:
+            from lenovo_control_plane_pickup import task_runtime_readback
+            task = task_runtime_readback()
+        except Exception as exc:
+            raise InventoryBlocked("task_readback_unavailable") from exc
+        root = runtime_root_from_task(task)
         result = collect(root, host=socket.gethostname().upper(), runner=os.environ["RUNNER_NAME"])
     except (InventoryBlocked, OSError, ValueError, TypeError) as exc:
         print(json.dumps({"result": "BLOCKED", "reason": _safe_reason(exc),
