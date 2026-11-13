@@ -22,6 +22,12 @@ O Command Gateway produz um **envelope autenticado pela sessão governada**. O w
 
 **Falha real reproduzida em teste local isolado:** sete entradas negativas com recibo errado foram aceitas pela validação antiga. A correção foi feita na mesma branch, e os testes locais do trecho corrigido aprovaram o caso positivo e rejeitaram os negativos simulados. A verificação estática diretamente dos arquivos publicados confirmou **22/22 controles**. A suíte integral do workflow e a operação no Windows ainda exigem validação independente no SHA final — esses testes locais não provam sessão física ou identidade autenticada real.
 
+## Coerência do inventário inteiro durante atualização concorrente — 12/11/2026
+
+A versão anterior lia cada arquivo duas vezes em sequência, mas não revisitava o conjunto. Se um watchdog instalado fosse substituído **depois** da sua conferência e **durante** a leitura dos outros arquivos, o SHA-256 reportado poderia corresponder a uma geração anterior do conjunto, apesar de cada leitura individual estar estável. Isso é uma janela de inconsistência, não prova de que o host sofreu troca real.
+
+Correção mínima na mesma branch: depois da segunda leitura de `metadata.json`, o coletor relê os **três arquivos fixos**, calcula novamente seus SHA-256 e **bloqueia** com `file_changed_during_inventory` se qualquer um divergir. Nenhuma gravação ou atualização é adicionada ao coletor. Dois testes de regressão na suíte do repositório simulam a troca do watchdog durante leitura do UAC e a troca do UAC durante leitura do launcher. Um harness local isolado de quatro casos (incluindo negativo antes e replay sem mudanças) passou, mas **não substitui a execução da suíte exata do GitHub** nem garante atomicidade sob escrita adversarial repetida.
+
 ## Admissão e execução
 
 Arquivo: `.github/workflows/lenovo-installed-inventory-readonly.yml`.
@@ -36,7 +42,7 @@ Arquivo: `.github/workflows/lenovo-installed-inventory-readonly.yml`.
 
 ## Validação conhecida, 12/11/2026
 
-- Coletor em branch isolada: **24/24 testes unitários locais executados** na versão de código inalterada (blobs de script e teste conferidos). Workflow: **10 métodos de teste definidos**, incluindo **16 entradas negativas** sobre envelopes, sem execução integral comprovada da suíte no SHA atual.
+- Coletor em branch isolada: **24/24 testes unitários locais executados** na versão de código inalterada (blobs de script e teste conferidos). Coletor agora com **26 métodos de teste definidos** (dois novos controles de mudança entre arquivos). Workflow: **10 métodos de teste definidos**, incluindo **16 entradas negativas** sobre envelopes, sem execução integral comprovada da suíte no SHA atual.
 - Workflow: **22/22 verificações estáticas** nos blobs atuais. **CI GitHub do HEAD não comprovado pela API disponível**; a rota consultada por commit mostra apenas runs de PR, não exclui runs por push. **E2E físico não comprovado** nesta branch.
 - O workflow ainda não tem certificação operacional: `PHYSICAL_INVENTORY_PENDING` e `COST_HARD_STOP_EVIDENCE_PENDING`.
 - Issue principal de recuperação: [Runtime #147](https://github.com/ericson-j-santos/desktop-pc24x7-runtime/issues/147).
