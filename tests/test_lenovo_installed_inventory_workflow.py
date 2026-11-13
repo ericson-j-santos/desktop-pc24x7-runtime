@@ -82,6 +82,86 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
         self.assertIn("payload.get('runner_health_proven') is not False", script)
         self.assertNotIn("upgrade_desktop_free_control_plane.py", script)
 
+    @staticmethod
+    def _simulated_gateway_receipt(**changes):
+        import json
+        sha = "a" * 40
+        payload = {
+            "contract": "lenovo-installed-inventory-readonly-v1",
+            "result": "INSTALLED_INVENTORY_READ_ONLY",
+            "host": "DESKTOP-RP23OGS",
+            "runner_name": "DESKTOP-RP23OGS-runtime",
+            "double_read_verified": True,
+            "upgrade_profile_root_aligned": False,
+            "runner_health_proven": False,
+            "github_pickup_proven": False,
+            "mutation_performed": False,
+            "upgrade_authorized": False,
+            "expected_installed_sha": sha,
+            "metadata_sha256": "b" * 64,
+            "expected_watchdog_sha256": "c" * 64,
+            "expected_uac_sha256": "d" * 64,
+            "expected_launcher_sha256": "e" * 64,
+        }
+        gateway = {
+            "action": "run", "risk": 1, "result": "ok",
+            "gateway_exit_code": 0, "command_exit_code": 0,
+            "state_changed": False,
+            "session_id": "expected-session",
+            "correlation_id": "lenovo-control-plane-pickup-123-1",
+            "before": {"head": sha}, "after": {"head": sha},
+            "stdout": json.dumps(payload),
+        }
+        gateway.update(changes)
+        return gateway
+
+    def _run_receipt(self, gateway):
+        import contextlib
+        import io
+        import json
+        import os
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        variables = {
+            "GITHUB_WORKSPACE": "/isolated/repo",
+            "TARGET_PATH": "/isolated/target",
+            "ANCHOR_SHA": "a" * 40,
+            "GITHUB_SHA": "a" * 40,
+            "SESSION_ID": "expected-session",
+            "CORRELATION_ID": "lenovo-control-plane-pickup-123-1",
+        }
+        output = io.StringIO()
+        process = SimpleNamespace(returncode=0, stdout=json.dumps(gateway))
+        with patch.dict(os.environ, variables):
+            with patch("subprocess.run", return_value=process):
+                with contextlib.redirect_stdout(output):
+                    exec(self.job["steps"][-1]["run"], {"__name__": "__main__"})
+        return json.loads(output.getvalue().strip())
+
+    def test_gateway_receipt_positive_with_exact_session_and_sha(self):
+        report = self._run_receipt(self._simulated_gateway_receipt())
+        self.assertEqual(report["result"], "INSTALLED_INVENTORY_READ_ONLY")
+        self.assertFalse(report["upgrade_authorized"])
+        self.assertFalse(report["upgrade_profile_root_aligned"])
+
+    def test_gateway_receipt_negative_wrong_session_correlation_and_head(self):
+        changes = (
+            {"session_id": "different-session"},
+            {"correlation_id": "different-correlation"},
+            {"gateway_exit_code": 17},
+            {"action": "inspect"},
+            {"risk": 2},
+            {"before": {"head": "f" * 40}},
+            {"after": {"head": "f" * 40}},
+            {"before": None},
+            {"after": None},
+        )
+        for change in changes:
+            with self.subTest(change=change):
+                with self.assertRaisesRegex(
+                        RuntimeError, "LENOVO_INVENTORY_RECEIPT_REJECTED"):
+                    self._run_receipt(self._simulated_gateway_receipt(**change))
+
     def test_no_executable_dispatch_on_main_from_branch(self):
         self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
         self.assertIn("${{ github.run_id }}", self.source)
