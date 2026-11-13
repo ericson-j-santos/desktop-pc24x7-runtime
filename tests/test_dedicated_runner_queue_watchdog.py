@@ -17,7 +17,7 @@ JOB_NAME = "Pickup on dedicated Desktop runtime runner"
 
 # The 300-second queue budget is virtual; this is only a bounded Node process
 # startup/execution budget for noisy hosted Windows CI (not a runtime watchdog).
-NODE_HARNESS_WALL_TIMEOUT_SECONDS = 30 if sys.platform == 'win32' else 10
+NODE_HARNESS_WALL_TIMEOUT_SECONDS = 30
 
 NODE_HARNESS = r"""
 'use strict';
@@ -205,7 +205,7 @@ def test_node_harness_wall_timeout_still_fails_closed(monkeypatch) -> None:
 
 def test_virtual_300s_budget_is_not_extended_by_harness_wall_timeout() -> None:
     """The timeout change does not relax the canonical watchdog policy."""
-    assert NODE_HARNESS_WALL_TIMEOUT_SECONDS == (30 if sys.platform == 'win32' else 10)
+    assert NODE_HARNESS_WALL_TIMEOUT_SECONDS == 30
     assert 0 < NODE_HARNESS_WALL_TIMEOUT_SECONDS <= 30
     text = WORKFLOW.read_text(encoding="utf-8")
     assert 'STALL_AFTER_SECONDS: "300"' in text

@@ -20,6 +20,7 @@ RUNS_ON = re.compile(r"^\s*runs-on:\s*\[(?P<labels>[^]]+)\]\s*$")
 RP23OGS_WORKFLOWS = {
     "dedicated-runtime-runner-e2e.yml",
     "lenovo-control-plane-upgrade-dev.yml",
+    "lenovo-installed-inventory-readonly.yml",
 }
 
 
