@@ -122,6 +122,7 @@ jobs:
           process=subprocess.run(command,check=False,shell=False,capture_output=True,text=True,timeout=90)
           if process.returncode!=0:
               raise RuntimeError('LENOVO_INVENTORY_GATEWAY_BLOCKED')
+          expected_cwd=os.path.normcase(os.path.realpath(os.path.abspath(str(target)))).replace(os.sep,'/')
           try:
               envelope=json.loads(process.stdout.splitlines()[-1])
               if not isinstance(envelope,dict):
@@ -134,6 +135,7 @@ jobs:
                   type(envelope.get('command_exit_code')) is not int or
                   envelope['command_exit_code']!=0 or
                   envelope.get('state_changed') is not False or
+                  envelope.get('cwd')!=expected_cwd or
                   envelope.get('session_id')!=os.environ['SESSION_ID'] or
                   envelope.get('correlation_id')!=os.environ['CORRELATION_ID'] or
                   not isinstance(envelope.get('before'),dict) or
