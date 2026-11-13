@@ -124,8 +124,23 @@ jobs:
               raise RuntimeError('LENOVO_INVENTORY_GATEWAY_BLOCKED')
           try:
               envelope=json.loads(process.stdout.splitlines()[-1])
-              if envelope.get('result')!='ok' or envelope.get('command_exit_code')!=0 or envelope.get('state_changed') is not False:
-                  raise ValueError('gateway')
+              if not isinstance(envelope,dict):
+                  raise ValueError('gateway_envelope_type')
+              if (envelope.get('result')!='ok' or
+                  envelope.get('action')!='run' or
+                  type(envelope.get('risk')) is not int or envelope['risk']!=1 or
+                  type(envelope.get('gateway_exit_code')) is not int or
+                  envelope['gateway_exit_code']!=0 or
+                  type(envelope.get('command_exit_code')) is not int or
+                  envelope['command_exit_code']!=0 or
+                  envelope.get('state_changed') is not False or
+                  envelope.get('session_id')!=os.environ['SESSION_ID'] or
+                  envelope.get('correlation_id')!=os.environ['CORRELATION_ID'] or
+                  not isinstance(envelope.get('before'),dict) or
+                  not isinstance(envelope.get('after'),dict) or
+                  envelope['before'].get('head')!=sha or
+                  envelope['after'].get('head')!=sha):
+                  raise ValueError('gateway_contract_invalid')
               payload=json.loads(str(envelope['stdout']).splitlines()[-1])
               if (payload.get('contract')!='lenovo-installed-inventory-readonly-v1' or
                   payload.get('result')!='INSTALLED_INVENTORY_READ_ONLY' or
