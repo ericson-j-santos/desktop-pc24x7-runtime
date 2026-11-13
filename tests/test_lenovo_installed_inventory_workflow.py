@@ -85,6 +85,12 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
     @staticmethod
     def _simulated_gateway_receipt(**changes):
         import json
+        import os
+        # The Gateway emits its canonical CWD in native host form.
+        # A POSIX-only fixture would fail the positive test on Windows.
+        target = Path("/isolated/target")
+        canonical_cwd = os.path.normcase(
+            os.path.realpath(os.path.abspath(str(target)))).replace(os.sep, "/")
         sha = "a" * 40
         payload = {
             "contract": "lenovo-installed-inventory-readonly-v1",
@@ -105,7 +111,7 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
         }
         gateway = {
             "action": "run", "risk": 1, "result": "ok",
-            "cwd": "/isolated/target",
+            "cwd": canonical_cwd,
             "gateway_exit_code": 0, "command_exit_code": 0,
             "state_changed": False,
             "session_id": "expected-session",
@@ -138,6 +144,14 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
                 with contextlib.redirect_stdout(output):
                     exec(self.job["steps"][-1]["run"], {"__name__": "__main__"})
         return json.loads(output.getvalue().strip())
+
+    def test_simulated_receipt_uses_native_canonical_directory(self):
+        import os
+        expected = os.path.normcase(
+            os.path.realpath(os.path.abspath(str(Path("/isolated/target"))))
+        ).replace(os.sep, "/")
+        receipt = self._simulated_gateway_receipt()
+        self.assertEqual(receipt["cwd"], expected)
 
     def test_gateway_receipt_positive_with_exact_session_and_sha(self):
         report = self._run_receipt(self._simulated_gateway_receipt())
