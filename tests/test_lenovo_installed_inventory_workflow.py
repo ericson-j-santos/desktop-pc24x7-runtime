@@ -105,6 +105,7 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
         }
         gateway = {
             "action": "run", "risk": 1, "result": "ok",
+            "cwd": "/isolated/target",
             "gateway_exit_code": 0, "command_exit_code": 0,
             "state_changed": False,
             "session_id": "expected-session",
@@ -149,12 +150,19 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
             {"session_id": "different-session"},
             {"correlation_id": "different-correlation"},
             {"gateway_exit_code": 17},
+            {"gateway_exit_code": False},
+            {"command_exit_code": False},
             {"action": "inspect"},
             {"risk": 2},
+            {"risk": True},
+            {"cwd": "/isolated/other-repo"},
+            {"cwd": None},
             {"before": {"head": "f" * 40}},
             {"after": {"head": "f" * 40}},
             {"before": None},
             {"after": None},
+            {"session_id": None},
+            {"correlation_id": None},
         )
         for change in changes:
             with self.subTest(change=change):
