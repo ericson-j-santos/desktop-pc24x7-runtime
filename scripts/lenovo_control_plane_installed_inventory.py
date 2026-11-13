@@ -93,13 +93,22 @@ def collect(root: Path, *, host: str, runner: str) -> dict[str, Any]:
             or str(metadata.get("release_root") or "").casefold() != str(release).casefold()):
         raise InventoryBlocked("metadata_root_mismatch")
     results = {}
+    targets = {}
     for key, segments in FILES.items():
         target = root.joinpath(*segments)
         if segments[0] == "releases":
             target = root / "releases" / installed_sha / "scripts" / segments[-1]
+        targets[key] = target
         results[key] = hashlib.sha256(_read_stable(target, root, 2 * 1024 * 1024)).hexdigest()
     if _read_stable(metadata_path, root, 65536) != metadata_raw:
         raise InventoryBlocked("metadata_changed_during_inventory")
+    # Verify the entire observed generation once more, not just each file
+    # independently, so an earlier file cannot change while later files
+    # are being hashed and yield a mixed-version inventory receipt.
+    for key, target in targets.items():
+        observed = hashlib.sha256(_read_stable(target, root, 2 * 1024 * 1024)).hexdigest()
+        if observed != results[key]:
+            raise InventoryBlocked("file_changed_during_inventory")
     return {
         "contract": "lenovo-installed-inventory-readonly-v1",
         "result": "INSTALLED_INVENTORY_READ_ONLY",
