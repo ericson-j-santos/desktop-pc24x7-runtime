@@ -206,6 +206,22 @@ class InventoryTests(unittest.TestCase):
         with patch.object(Path, "read_bytes", fake_read):
             self.reject("file_changed_during_readback")
 
+    def test_mutation_after_first_file_hash_is_rejected(self):
+        """Prevent a mixed-generation inventory when a release changes between files."""
+        original = module._read_stable
+        changed = [False]
+
+        def interleaved(path, root, limit):
+            data = original(path, root, limit)
+            if path == self.uac_file and not changed[0]:
+                changed[0] = True
+                self.watchdog_file.write_bytes(b"new watchdog installed during scan")
+            return data
+
+        with patch.object(module, "_read_stable", side_effect=interleaved):
+            self.reject("file_changed_during_inventory")
+        self.assertTrue(changed[0])
+
     def test_context_guard_blocks_without_actions(self):
         stdout = io.StringIO()
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}, clear=True):
