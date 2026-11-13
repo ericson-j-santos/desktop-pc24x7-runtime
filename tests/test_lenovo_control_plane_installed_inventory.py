@@ -222,6 +222,21 @@ class InventoryTests(unittest.TestCase):
             self.reject("file_changed_during_inventory")
         self.assertTrue(changed[0])
 
+    def test_second_file_mutation_while_hashing_last_is_rejected(self):
+        original = module._read_stable
+        changed = [False]
+
+        def interleaved(path, root, limit):
+            data = original(path, root, limit)
+            if path == self.launcher_file and not changed[0]:
+                changed[0] = True
+                self.uac_file.write_bytes(b"replacement UAC after its first hash")
+            return data
+
+        with patch.object(module, "_read_stable", side_effect=interleaved):
+            self.reject("file_changed_during_inventory")
+        self.assertTrue(changed[0])
+
     def test_context_guard_blocks_without_actions(self):
         stdout = io.StringIO()
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "false"}, clear=True):
