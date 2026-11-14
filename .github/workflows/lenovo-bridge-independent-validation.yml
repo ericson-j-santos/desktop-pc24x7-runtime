@@ -1,0 +1,101 @@
+name: Lenovo Bridge - independent validation (no physical operation)
+on:
+  push:
+    branches:
+      - feature/lenovo-inventory-api-bridge-151
+permissions:
+  contents: read
+concurrency:
+  group: lenovo-bridge-validator-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validator:
+    name: Separate SHA-bound validator
+    if: github.repository == 'ericson-j-santos/desktop-pc24x7-runtime' && github.event_name == 'push' && github.ref == 'refs/heads/feature/lenovo-inventory-api-bridge-151'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Independent checkout of exact source revision
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify Git ancestry, CAS, source bytes and negative tamper controls
+        shell: python
+        run: |
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+
+          head = os.environ['GITHUB_SHA']
+          base = 'b038a770117e0d3d4d1297a3f4bec112ff68a744'
+          produced = '2bee41f78d2e68eed90a15251fcaf1e2ed73e9e9'
+          cas_hash = '9c7a2aa749e1db2a6df4891c47d2dcb6a093b4634a5fc8311c2379924e76d732'
+          path = Path('evidence/cas/lenovo-api-bridge-151') / (cas_hash + '.json')
+          expected = {
+              'docs/lenovo-inventory-api-bridge.md',
+              'scripts/lenovo_inventory_api_bridge.py',
+              'tests/test_lenovo_bridge_durable_concurrency.py',
+              'tests/test_lenovo_inventory_api_bridge.py',
+          }
+          if not re.fullmatch('[0-9a-f]{40}', head) or git('rev-parse', 'HEAD') != head:
+              raise RuntimeError('VALIDATOR_HEAD_MISMATCH')
+          if git('remote', 'get-url', 'origin').removesuffix('.git') != 'https://github.com/ericson-j-santos/desktop-pc24x7-runtime':
+              raise RuntimeError('VALIDATOR_ORIGIN_MISMATCH')
+          if git('status', '--porcelain'):
+              raise RuntimeError('VALIDATOR_WORKTREE_NOT_CLEAN')
+          subprocess.run(['git','merge-base','--is-ancestor',base,head],check=True)
+          subprocess.run(['git','merge-base','--is-ancestor',produced,head],check=True)
+          raw = path.read_bytes()
+          if hashlib.sha256(raw).hexdigest() != cas_hash:
+              raise RuntimeError('VALIDATOR_CAS_HASH_MISMATCH')
+          obj = json.loads(raw)
+          files = obj.get('source_files')
+          if (obj.get('issue') != 151 or obj.get('base_sha') != base or
+                  obj.get('produced_sha') != produced or not isinstance(files,list) or
+                  len(files) != 4 or {f.get('path') for f in files} != expected):
+              raise RuntimeError('VALIDATOR_CAS_CONTRACT_MISMATCH')
+          patch = '\n'.join('*** ' + f['path'] + '\n' + f['patch'] for f in files)
+          if hashlib.sha256(patch.encode('utf-8')).hexdigest() != obj.get('patch_sha256'):
+              raise RuntimeError('VALIDATOR_PATCH_HASH_MISMATCH')
+          for item in files:
+              filename = item['path']
+              actual = git('hash-object','--',filename)
+              produced_blob = git('rev-parse',produced+':'+filename)
+              if actual != produced_blob or actual != item.get('git_blob_sha1'):
+                  raise RuntimeError('VALIDATOR_FILE_INTEGRITY_MISMATCH')
+              data = Path(filename).read_bytes()+b'FORBIDDEN_CHANGE'
+              mutant = hashlib.sha1(b'blob '+str(len(data)).encode()+b'\0'+data).hexdigest()
+              if mutant == actual:
+                  raise RuntimeError('VALIDATOR_NEGATIVE_FILE_TAMPER_UNDETECTED')
+          if hashlib.sha256(raw+b'FORBIDDEN_CHANGE').hexdigest() == cas_hash:
+              raise RuntimeError('VALIDATOR_NEGATIVE_CAS_TAMPER_UNDETECTED')
+          print(json.dumps({'result':'VALIDATOR_SHA_CAS_NEGATIVE_OK',
+                            'sha':head,'cas_sha256':cas_hash,'files':len(files),
+                            'physical_execution':False},sort_keys=True))
+      - name: Set up separate Python runtime
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: "3.12"
+      - name: Install pinned dependencies
+        shell: bash
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2 cryptography==50.0.2 PyYAML==6.0.3
+      - name: Execute functional, negative, concurrency, replay and restart tests
+        shell: bash
+        run: python -m pytest -q tests/test_lenovo_inventory_api_bridge.py tests/test_lenovo_bridge_durable_concurrency.py
+      - name: Check dispatch remains disabled and owner gate preserved
+        shell: python
+        run: |
+          from pathlib import Path
+          bridge = Path('scripts/lenovo_inventory_api_bridge.py').read_text(encoding='utf-8')
+          original = Path('.github/workflows/lenovo-installed-inventory-readonly.yml').read_text(encoding='utf-8')
+          fixed = ('verify_ticket(', 'assert_ci(', 'assert_owner_and_main(',
+                   'return_run_details', 'reserve(', 'physical_receipt_proven')
+          if any(x not in bridge for x in fixed):
+              raise RuntimeError('VALIDATOR_API_GUARD_ABSENT')
+          if "github.actor == 'ericson-j-santos'" not in original or "vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha" not in original:
+              raise RuntimeError('VALIDATOR_WORKFLOW_OWNER_OR_COST_GATE_CHANGED')
+          print('VALIDATOR_PASSED_WITHOUT_DISPATCH_OR_HOST_CHANGE')
