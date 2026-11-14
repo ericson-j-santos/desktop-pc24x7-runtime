@@ -15,6 +15,7 @@ import re
 import sqlite3
 import sys
 from datetime import datetime, timedelta, timezone
+from contextlib import contextmanager
 from pathlib import Path
 from urllib import error, parse, request
 
@@ -166,13 +167,18 @@ def reserve(connection: sqlite3.Connection, key: str, sha: str, request_id: str)
     return None
 
 
-def database(path: Path) -> sqlite3.Connection:
+@contextmanager
+def database(path: Path):
+    """Fecha a conexao no Windows e POSIX mesmo quando a operacao falha."""
     if not path.is_absolute() or not path.parent.is_dir() or path.is_symlink():
         raise Blocked("durable_state_directory_invalid")
     conn = sqlite3.connect(path, timeout=1, isolation_level=None)
-    conn.execute("PRAGMA synchronous=FULL")
-    conn.execute("CREATE TABLE IF NOT EXISTS dispatches (idempotency_key TEXT PRIMARY KEY, sha TEXT NOT NULL, request_id TEXT NOT NULL, state TEXT NOT NULL, run_id INTEGER)")
-    return conn
+    try:
+        conn.execute("PRAGMA synchronous=FULL")
+        conn.execute("CREATE TABLE IF NOT EXISTS dispatches (idempotency_key TEXT PRIMARY KEY, sha TEXT NOT NULL, request_id TEXT NOT NULL, state TEXT NOT NULL, run_id INTEGER)")
+        yield conn
+    finally:
+        conn.close()
 
 
 def execute(api: Api, db: sqlite3.Connection, ticket: dict, sha: str) -> dict:
