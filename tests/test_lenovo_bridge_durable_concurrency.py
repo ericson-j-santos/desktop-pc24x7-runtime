@@ -53,3 +53,19 @@ def test_crash_reopen_fails_closed_and_never_forgets_key():
             else:
                 raise AssertionError('replay_did_not_block')
             assert db.execute('SELECT COUNT(*) FROM dispatches').fetchone()[0] == 1
+
+
+def test_connection_is_explicitly_closed_after_context():
+    """A transacao commitada nao basta: no Windows, o handle precisa fechar."""
+    with TemporaryDirectory() as tmp:
+        path = Path(tmp) / 'state.sqlite'
+        with bridge.database(path) as db:
+            bridge.reserve(db, KEY, SHA, 'approved-request')
+        try:
+            db.execute('SELECT COUNT(*) FROM dispatches')
+        except sqlite3.ProgrammingError:
+            pass
+        else:
+            raise AssertionError('sqlite_connection_was_not_closed')
+        with bridge.database(path) as db2:
+            assert db2.execute('SELECT COUNT(*) FROM dispatches').fetchone()[0] == 1
