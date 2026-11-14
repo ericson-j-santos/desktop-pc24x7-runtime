@@ -50,6 +50,21 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
         for ref in refs:
             self.assertRegex(ref, r"^actions/(github-script|checkout)@[0-9a-f]{40}$")
 
+    def test_fixed_existing_git_is_resolved_before_checkout_without_install(self):
+        steps = self.job["steps"]
+        names = [step["name"] for step in steps]
+        resolver = steps[names.index("Resolve fixed existing Git client")]
+        self.assertLess(names.index("Resolve fixed existing Git client"),
+                        names.index("Checkout exact source without credentials"))
+        script = resolver["run"]
+        for required in ("ProgramFiles", "ProgramW6432", "LOCALAPPDATA",
+                         "ProgramData", "Git", "MinGit", "git.exe",
+                         "GITHUB_PATH", "LENOVO_GIT_CLIENT_UNAVAILABLE",
+                         "--version", "shell=False"):
+            self.assertIn(required, script)
+        for forbidden in ("Invoke-WebRequest", "curl", "wget", "rglob(",
+                          "os.walk", "where.exe", "choco", "winget"):
+            self.assertNotIn(forbidden, script)
     def test_gateway_risk1_and_no_mutating_commands(self):
         scripts = [step["run"] for step in self.job["steps"] if "run" in step]
         joined = "\n".join(scripts)
