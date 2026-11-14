@@ -37,8 +37,21 @@ def http_json(path: str, *, payload: dict[str, Any] | None = None, timeout: int 
     try:
         with opener.open(req, timeout=timeout) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)
-    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError):
-        raise PilotBlocked("ollama_unreachable") from None
+    except urllib.error.HTTPError as exc:
+        # Return only the local HTTP status, never a server message or body.
+        if type(exc.code) is int and 400 <= exc.code <= 599:
+            raise PilotBlocked(f"ollama_http_{exc.code}") from None
+        raise PilotBlocked("ollama_http_error") from None
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise PilotBlocked("ollama_timeout") from None
+        raise PilotBlocked("ollama_connection_error") from None
+    except TimeoutError:
+        raise PilotBlocked("ollama_timeout") from None
+    except ConnectionError:
+        raise PilotBlocked("ollama_connection_error") from None
+    except OSError:
+        raise PilotBlocked("ollama_os_error") from None
     if len(raw) > MAX_RESPONSE_BYTES:
         raise PilotBlocked("response_too_large")
     try:

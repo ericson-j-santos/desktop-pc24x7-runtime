@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import sys
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -173,6 +174,39 @@ def test_wrong_loaded_digest_is_blocked(monkeypatch, capsys):
     code, evidence = run(mod, capsys, "smoke")
     assert code == 3
     assert evidence["state"] == "local_loaded_model_not_verified"
+
+
+@pytest.mark.parametrize(
+    "failure, expected",
+    [
+        (urllib.error.HTTPError("http://127.0.0.1:11434/api/generate", 400,
+                                "PRIVATE_DETAIL", {}, None), "ollama_http_400"),
+        (urllib.error.HTTPError("http://127.0.0.1:11434/api/generate", 404,
+                                "PRIVATE_DETAIL", {}, None), "ollama_http_404"),
+        (urllib.error.HTTPError("http://127.0.0.1:11434/api/generate", 503,
+                                "PRIVATE_DETAIL", {}, None), "ollama_http_503"),
+        (urllib.error.HTTPError("http://127.0.0.1:11434/api/generate", 301,
+                                "PRIVATE_DETAIL", {}, None), "ollama_http_error"),
+        (urllib.error.URLError(TimeoutError("PRIVATE_DETAIL")), "ollama_timeout"),
+        (urllib.error.URLError(ConnectionRefusedError("PRIVATE_DETAIL")), "ollama_connection_error"),
+        (urllib.error.URLError("PRIVATE_DETAIL"), "ollama_connection_error"),
+        (TimeoutError("PRIVATE_DETAIL"), "ollama_timeout"),
+        (ConnectionResetError("PRIVATE_DETAIL"), "ollama_connection_error"),
+        (OSError("PRIVATE_DETAIL"), "ollama_os_error"),
+    ],
+)
+def test_local_transport_failures_are_distinguished_and_sanitized(monkeypatch, failure, expected):
+    mod = module()
+
+    class FailingOpener:
+        def open(self, request, timeout=10):
+            raise failure
+
+    monkeypatch.setattr(mod.urllib.request, "build_opener", lambda *a, **k: FailingOpener())
+    with pytest.raises(mod.PilotBlocked) as exc:
+        mod.http_json("/api/generate", payload={"model": mod.MODEL})
+    assert str(exc.value) == expected
+    assert "PRIVATE_DETAIL" not in str(exc.value)
 
 
 def test_unreachable_does_not_leak_provider_error(monkeypatch, capsys):
