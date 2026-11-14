@@ -48,7 +48,7 @@ Credenciais somente por variáveis de ambiente carregadas de um cofre seguro, se
 
 ## Pendências antes da operação
 
-- Os componentes nativos de Device Flow e emissão condicionada de ticket Ed25519 agora possuem código e testes isolados, mas NÃO estão instalados ou habilitados. A fonte autenticada de decisão do proprietário, a atestação independente de custo, o cofre do assinador e o OAuth real ainda não foram qualificados. Configuração de App, credenciais, armazenamento e deploy exigem autorização específica e preflight próprio.
+- O autorizador OAuth e emissor do ticket Ed25519 ainda não foram implementados nem instalados. Configuração de App, credenciais, armazenamento e deploy exigem autorização específica e preflight próprio.
 - Custo incremental máximo R$ 0,00. Repositórios públicos têm runners padrão gratuitos conforme documentação GitHub, mas a prova de custo zero aplicável ao DISPATCH, incluindo Billing/Budgets/hard stop quando exigido, é responsabilidade do autorizador independente; não assumir autorização pelo simples fato de o SHA estar no input.
 - O TODO Global não pode ser gravado por esta App sem permissão adicional: resultado deve ser passado ao consumidor governado já autorizado; confirmar readback do TODO, não inferir pela aceitação de evento. Até integração, sincronização pendente.
 - SQLite de um único host não oferece failover físico entre máquinas; não ativar dois executores até existir reserva central atômica e controle de posse.
@@ -63,14 +63,3 @@ Fontes oficiais:
 - https://docs.github.com/en/rest/actions/variables
 - https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
 - https://docs.github.com/en/actions/concepts/billing-and-usage
-
-## Etapa opcional preparada — Device Flow e ticket condicional (não operacional)
-
-- `scripts/lenovo_bridge_device_oauth.py`: autenticação nativa por Device Flow para GitHub App autorizada, exige terminal interativo e consentimento oficial em `https://github.com/login/device`. Mantém o token `ghu_` somente em memória durante a chamada da ponte; verifica usuário, `app_id`, instalação única, `repository_selection=selected`, permissões exatas e apenas este repositório. Não cria App, não gera token sozinho e não altera direitos. Token de renovação descartado; a automação contínua exigirá um cofre externo autorizado e rotação separada. Não inserir códigos/tokens em chat ou logs.
-- `scripts/lenovo_bridge_ticket_issuer.py`: função pura `issue_ticket` recebe **duas** evidências assinadas e válidas, de emissores independentes (autorização do proprietário e custo incremental R$ 0,00). Exige vínculo idempotente ao mesmo SHA, tarefa e pedido; recusa assinaturas falsas, divergência e vencimento. A chave privada é fornecida por serviço seguro EXTERNO e não fica no host da ponte. Esta função não implementa nem finge a existência dos dois emissores externos.
-- Sem App instalada com consentimento, sem atestadores/autoridades externas reais, sem cofre protegido e sem confirmação de custo e runner, o fluxo real continua **BLOQUEADO**.
-- Apenas após autorização: uso interativo de preflight somente leitura via `python scripts/lenovo_bridge_device_oauth.py preflight --sha <SHA-atual> --client-id <client-id-da-App> --app-id <app-id-da-App>`. Os argumentos são identificadores não secretos; nunca passar token em linha de comando.
-- Um ticket real não pode ser produzido por parâmetro `--approved=true`, issue, chat ou referência de custo desacompanhada das assinaturas e comprovação independente.
-- A ponte segue com SQLite de um único escritor. Failover entre PCs depende do Worker Pool com autoridade central, lease e checkpoint; os componentes aqui não implementam a operação física.
-
-**Validação desta etapa:** testes isolados positivos e negativos em Python; não é OAuth real nem E2E físico.
