@@ -1,0 +1,28 @@
+{
+  "environment": "isolated-chatgpt-sandbox",
+  "files": {
+    "scripts/lenovo_bridge_device_oauth.py": {
+      "bytes": 8995,
+      "sha256": "d632431975aa8903a6eff4455d7069f05d2b275e62919c22c270e943673f6473"
+    },
+    "scripts/lenovo_bridge_ticket_issuer.py": {
+      "bytes": 5998,
+      "sha256": "a8c42968a54e9fb3020c27703f863bb359d9107f3a0862486c91d3bc317c9499"
+    },
+    "tests/test_lenovo_bridge_device_oauth.py": {
+      "bytes": 5989,
+      "sha256": "51d4fe4315780fab73c5451c2eed1be551faf53159385894d34e37a0da4c13f5"
+    },
+    "tests/test_lenovo_bridge_ticket_issuer.py": {
+      "bytes": 5046,
+      "sha256": "544fdcd69cf1473d80f46dbccf1c1e6fdb0024509782c923994cc1ccb67e4452"
+    }
+  },
+  "kind": "lenovo-bridge-auth-preparation",
+  "model_calls": 0,
+  "parent": "604fa4edaf1ac18d49301471f56b296f2ce86c82",
+  "physical_e2e_tested": false,
+  "real_oauth_tested": false,
+  "rules_sha": "58dcd4200f412a866278027ba9e433439a03f3b3",
+  "source": "assisted"
+}
