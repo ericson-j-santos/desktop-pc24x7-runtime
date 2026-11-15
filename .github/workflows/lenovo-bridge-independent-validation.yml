@@ -76,6 +76,46 @@ jobs:
           print(json.dumps({'result':'VALIDATOR_SHA_CAS_NEGATIVE_OK',
                             'sha':head,'cas_sha256':cas_hash,'files':len(files),
                             'physical_execution':False},sort_keys=True))
+      - name: Independently validate signed-auth preparation CAS and negative controls
+        shell: python
+        run: |
+          import hashlib, json, re
+          from pathlib import Path
+
+          manifest_path = Path('evidence/cas/lenovo-api-bridge-151/8d4309a9a2c921aaea09a9c08f5c57605bb0bdd4d4afbfb525b287aba61693f6.json')
+          raw = manifest_path.read_bytes()
+          if hashlib.sha256(raw).hexdigest() != manifest_path.stem:
+              raise RuntimeError('AUTH_CAS_MANIFEST_DIGEST_INVALID')
+          manifest = json.loads(raw)
+          expected = {
+              'scripts/lenovo_bridge_device_oauth.py',
+              'scripts/lenovo_bridge_ticket_issuer.py',
+              'tests/test_lenovo_bridge_device_oauth.py',
+              'tests/test_lenovo_bridge_ticket_issuer.py',
+          }
+          if (manifest.get('kind') != 'lenovo-bridge-auth-preparation' or
+                  manifest.get('source') != 'assisted' or
+                  manifest.get('model_calls') != 0 or
+                  manifest.get('rules_sha') != '58dcd4200f412a866278027ba9e433439a03f3b3' or
+                  manifest.get('parent') != '604fa4edaf1ac18d49301471f56b296f2ce86c82' or
+                  manifest.get('physical_e2e_tested') is not False or
+                  manifest.get('real_oauth_tested') is not False or
+                  set(manifest.get('files', {})) != expected):
+              raise RuntimeError('AUTH_CAS_SCOPE_INVALID')
+          for name in sorted(expected):
+              entry = manifest['files'][name]
+              source = Path(name).read_bytes()
+              digest = entry.get('sha256')
+              if (type(entry.get('bytes')) is not int or
+                      not isinstance(digest, str) or
+                      not re.fullmatch('[0-9a-f]{64}', digest) or
+                      entry['bytes'] != len(source) or
+                      hashlib.sha256(source).hexdigest() != digest):
+                  raise RuntimeError('AUTH_CAS_SOURCE_MISMATCH')
+              if hashlib.sha256(source + b'FORBIDDEN_CHANGE').hexdigest() == digest:
+                  raise RuntimeError('AUTH_CAS_NEGATIVE_TAMPER_UNDETECTED')
+          print('AUTH_CAS_4_FILES_AND_NEGATIVE_CONTROLS_VALIDATED_NO_REAL_OAUTH')
+
       - name: Set up separate Python runtime
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
         with:
@@ -85,7 +125,7 @@ jobs:
         run: python -m pip install --disable-pip-version-check pytest==8.4.2 cryptography==50.0.2 PyYAML==6.0.3
       - name: Execute functional, negative, concurrency, replay and restart tests
         shell: bash
-        run: python -m pytest -q tests/test_lenovo_inventory_api_bridge.py tests/test_lenovo_bridge_durable_concurrency.py
+        run: python -m pytest -q tests/test_lenovo_inventory_api_bridge.py tests/test_lenovo_bridge_durable_concurrency.py tests/test_lenovo_bridge_device_oauth.py tests/test_lenovo_bridge_ticket_issuer.py
       - name: Check dispatch remains disabled and owner gate preserved
         shell: python
         run: |
