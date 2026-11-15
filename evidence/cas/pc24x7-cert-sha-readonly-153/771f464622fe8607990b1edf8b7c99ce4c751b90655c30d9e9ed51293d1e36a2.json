@@ -1,0 +1,45 @@
+{
+  "base_sha": "b19db847b63d8f0fcd5fd160bdeee54d3f57b913",
+  "change_type": "feature",
+  "correlation_id": "pc24x7-certified-sha-readonly-20261115",
+  "idempotency_key": "desktop-pc24x7-runtime:pc24x7-certified-sha-readonly:v1",
+  "issue": 153,
+  "local_validation": {
+    "environment": "isolated_assistant_sandbox",
+    "failed": 0,
+    "passed": 8,
+    "physical_e2e": false
+  },
+  "model_calls": 0,
+  "patch_sha256": "a8968c04fe5f63a8c0a4acc842d3ef81745dba5e213dbb5c90c98719af081cf3",
+  "request_id": "pc24x7-certified-sha-readonly-20261115",
+  "risk_boundary": {
+    "git_mutation": "new_unprotected_branch_only",
+    "physical_operation": false,
+    "variable_updated": false,
+    "workflow_dispatched": false
+  },
+  "rules_sha": "58dcd4200f412a866278027ba9e433439a03f3b3",
+  "schema_version": "pc24x7-readonly-automation-cas-v1",
+  "source_files": [
+    {
+      "git_blob_sha1": "7c669f1e66f7b4a3e7a00d8b45aaace0c157141d",
+      "path": ".github/workflows/pc24x7-certified-sha-readonly.yml",
+      "sha256": "06fb8d49ab9c534baba18251e3be6acc0fc2cd2abe1237bf43a21898249af903",
+      "size_bytes": 3139
+    },
+    {
+      "git_blob_sha1": "4e69ef432273ec743e3d655691bbcc34903e0ff2",
+      "path": "docs/pc24x7-certified-sha-readonly.md",
+      "sha256": "a5111bbee02ef1216e3066d666d3fd3974b45fd81f3889e304ef6cbfb9b53ac4",
+      "size_bytes": 3172
+    },
+    {
+      "git_blob_sha1": "9c5592b7cc2dc9417c61e5b57bee571071690386",
+      "path": "tests/test_pc24x7_certified_sha_readonly.py",
+      "sha256": "2af09f78343cd56596e2c75250fbe62ad460c3634dd8b0dcea8789fe70875391",
+      "size_bytes": 4343
+    }
+  ],
+  "source_mode": "assisted"
+}
