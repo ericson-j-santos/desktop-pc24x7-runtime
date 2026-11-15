@@ -1,0 +1,103 @@
+name: PC24x7 certified SHA - independent review of read-only guard
+
+on:
+  push:
+    branches:
+      - feature/pc24x7-certified-sha-readonly-153
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pc24x7-certified-sha-independent-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Independent SHA-bound validator (no physical dispatch)
+    if: github.repository == 'ericson-j-santos/desktop-pc24x7-runtime' && github.ref == 'refs/heads/feature/pc24x7-certified-sha-readonly-153'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - name: Independent checkout at exact pushed SHA
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Independently verify immutable CAS, source files and tamper detection
+        shell: python
+        run: |
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+
+          def git(*args):
+              return subprocess.check_output(["git", *args], text=True).strip()
+
+          root = Path(".")
+          head = os.environ["GITHUB_SHA"]
+          base = "b19db847b63d8f0fcd5fd160bdeee54d3f57b913"
+          name = "771f464622fe8607990b1edf8b7c99ce4c751b90655c30d9e9ed51293d1e36a2"
+          path = root / "evidence/cas/pc24x7-cert-sha-readonly-153" / (name + ".json")
+          repo = "https://github.com/ericson-j-santos/desktop-pc24x7-runtime"
+          if not re.fullmatch("[0-9a-f]{40}", head) or git("rev-parse", "HEAD") != head:
+              raise RuntimeError("VALIDATOR_HEAD_MISMATCH")
+          if git("remote", "get-url", "origin").removesuffix(".git") != repo:
+              raise RuntimeError("VALIDATOR_ORIGIN_MISMATCH")
+          if git("status", "--porcelain"):
+              raise RuntimeError("VALIDATOR_WORKTREE_NOT_CLEAN")
+          subprocess.run(["git", "merge-base", "--is-ancestor", base, head], check=True)
+          raw = path.read_bytes()
+          if hashlib.sha256(raw).hexdigest() != name:
+              raise RuntimeError("VALIDATOR_CAS_HASH_MISMATCH")
+          data = json.loads(raw)
+          if data.get("issue") != 153 or data.get("base_sha") != base:
+              raise RuntimeError("VALIDATOR_CAS_IDENTITY_MISMATCH")
+          expected = {
+              ".github/workflows/pc24x7-certified-sha-readonly.yml",
+              "docs/pc24x7-certified-sha-readonly.md",
+              "tests/test_pc24x7_certified_sha_readonly.py"
+          }
+          entries = data.get("source_files")
+          if not isinstance(entries, list) or len(entries) != 3 or {x.get("path") for x in entries} != expected:
+              raise RuntimeError("VALIDATOR_CAS_FILES_MISMATCH")
+          for entry in entries:
+              content = (root / entry["path"]).read_bytes()
+              if len(content) != entry["size_bytes"] or hashlib.sha256(content).hexdigest() != entry["sha256"]:
+                  raise RuntimeError("VALIDATOR_SOURCE_INTEGRITY_MISMATCH")
+              if git("hash-object", "--", entry["path"]) != entry["git_blob_sha1"]:
+                  raise RuntimeError("VALIDATOR_GIT_BLOB_MISMATCH")
+              if hashlib.sha256(content + b"tamper-control").hexdigest() == entry["sha256"]:
+                  raise RuntimeError("VALIDATOR_SOURCE_NEGATIVE_FAILED")
+          if hashlib.sha256(raw + b"tamper-control").hexdigest() == name:
+              raise RuntimeError("VALIDATOR_CAS_NEGATIVE_FAILED")
+          monitor = (root / ".github/workflows/pc24x7-certified-sha-readonly.yml").read_text(encoding="utf-8")
+          for required in (
+              "permissions:\n  contents: read",
+              "vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA",
+              "github.rest.repos.getBranch",
+              "core.setFailed",
+              "CERTIFIED_SHA_READONLY_",
+          ):
+              if required not in monitor:
+                  raise RuntimeError("VALIDATOR_READONLY_GUARD_REMOVED")
+          for forbidden in ("github.rest.actions.", "github.rest.repos.update", "github.rest.actions.createWorkflowDispatch", "github.rest.actions.updateRepoVariable"):
+              if forbidden in monitor:
+                  raise RuntimeError("VALIDATOR_MUTATION_DETECTED")
+          print(json.dumps({"result":"SHA_CAS_INDEPENDENT_VALIDATOR_OK",
+                            "head_sha":head,"cas_sha256":name,
+                            "source_files":len(entries),
+                            "physical_operation":False,
+                            "variable_updated":False}, sort_keys=True))
+
+      - name: Set up separate Python runtime
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned test-only requirements
+        run: python -m pip install --disable-pip-version-check pytest==8.4.2 PyYAML==6.0.3
+
+      - name: Execute guard's real JavaScript positive and negative tests
+        run: python -m pytest -q tests/test_pc24x7_certified_sha_readonly.py
