@@ -1,0 +1,72 @@
+name: PC24x7 certified SHA - read-only drift check
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '23 11 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pc24x7-certified-sha-readonly-main
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify certified SHA without changes
+    if: github.repository == 'ericson-j-santos/desktop-pc24x7-runtime' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    env:
+      EXPECTED_SOURCE_SHA: ${{ github.sha }}
+      CERTIFIED_SHA: ${{ vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA }}
+    steps:
+      - name: Read GitHub main and compare effective repository variable
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const expectedRepo = 'ericson-j-santos/desktop-pc24x7-runtime';
+            const fullRepo = `${context.repo.owner}/${context.repo.repo}`;
+            const regex = /^[0-9a-f]{40}$/;
+            const eventSha = process.env.EXPECTED_SOURCE_SHA || '';
+            const certifiedSha = process.env.CERTIFIED_SHA || '';
+            let currentSha = '';
+            let result = 'MATCH';
+            if (fullRepo !== expectedRepo || context.ref !== 'refs/heads/main') {
+              result = 'SCOPE_MISMATCH';
+            } else if (context.eventName === 'workflow_dispatch' && context.actor !== 'ericson-j-santos') {
+              result = 'OWNER_REQUIRED';
+            } else {
+              const response = await github.rest.repos.getBranch({
+                owner: context.repo.owner, repo: context.repo.repo, branch: 'main'
+              });
+              currentSha = response.data?.commit?.sha || '';
+              if (!regex.test(currentSha) || !regex.test(eventSha)) {
+                result = 'SHA_INVALID';
+              } else if (currentSha !== eventSha) {
+                result = 'STALE_RUN';
+              } else if (!certifiedSha) {
+                result = 'VARIABLE_MISSING';
+              } else if (!regex.test(certifiedSha)) {
+                result = 'VARIABLE_INVALID';
+              } else if (certifiedSha !== currentSha) {
+                result = 'VARIABLE_MISMATCH';
+              }
+            }
+            const visibleSha = sha => regex.test(sha) ? sha : '(ausente/inválido)';
+            await core.summary.addHeading('PC24x7 — conferência somente leitura')
+              .addTable([
+                [{data:'Campo',header:true},{data:'Valor',header:true}],
+                ['Estado', result],
+                ['main atual (API)', visibleSha(currentSha)],
+                ['SHA do evento', visibleSha(eventSha)],
+                ['SHA certificado (vars)', visibleSha(certifiedSha)],
+                ['Alteração de variável', 'NÃO'],
+                ['Disparo de inventário', 'NÃO'],
+                ['Prova de custo físico', 'NÃO — esta conferência não certifica custo']
+              ]).write();
+            core.info(`CERTIFIED_SHA_READONLY_CHECK result=${result} run_id=${context.runId}`);
+            if (result !== 'MATCH') core.setFailed(`CERTIFIED_SHA_READONLY_${result}`);
