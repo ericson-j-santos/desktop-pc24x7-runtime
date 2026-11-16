@@ -21,7 +21,7 @@ jobs:
           persist-credentials: false
       - name: Install pinned YAML parser
         shell: bash
-        run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.3
+        run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.3 pytest==8.4.2
       - name: Independently verify SHA, isolated runner, discovery cases and replay
         shell: python
         env:
@@ -68,81 +68,42 @@ jobs:
           if job['runs-on']!=['self-hosted','Windows','X64','pc24x7',
                               'desktop-runtime','runtime-dev','desktop-rp23ogs']:
               raise RuntimeError('LENOVO_VALIDATOR_HOST_SELECTOR')
-          if job['environment']!='DEV' or len(job['steps'])!=2:
-              raise RuntimeError('LENOVO_VALIDATOR_UNEXPECTED_STEPS')
+          if job['environment']!='DEV' or len(job['steps'])!=1:
+              raise RuntimeError('LENOVO_VALIDATOR_UNGOVERNED_LOCAL_STEP')
+          if any('run' in step or 'shell' in step for step in job['steps']):
+              raise RuntimeError('LENOVO_VALIDATOR_UNGOVERNED_LOCAL_STEP')
           condition=job['if']
           for guard in ("github.actor == 'ericson-j-santos'",
                         "github.triggering_actor == 'ericson-j-santos'",
                         "github.ref == 'refs/heads/main'",
-                        'vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha'):
+                        "vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha"):
               if guard not in condition:
                   raise RuntimeError('LENOVO_VALIDATOR_JOB_GUARD_MISSING')
           admission=job['steps'][0]['with']['script']
-          for guard in ("context.sha!==sha", "GITHUB_RUN_ATTEMPT!=='1'",
-                        "main.commit.sha!==sha", "event:'push'",
-                        "head_sha:sha", "LENOVO_GIT_DISCOVERY_CI_GATES_REQUIRED"):
+          for guard in ("context.sha!==sha","GITHUB_RUN_ATTEMPT!=='1'",
+                        "main.commit.sha!==sha","event:'push'",
+                        "head_sha:sha","LENOVO_GIT_DISCOVERY_CI_GATES_REQUIRED",
+                        "LENOVO_BOOTSTRAP_HOST_REJECTED"):
               if guard not in admission:
                   raise RuntimeError('LENOVO_VALIDATOR_ADMISSION_GUARD_MISSING')
           if job['steps'][0]['uses']!='actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea':
               raise RuntimeError('LENOVO_VALIDATOR_ACTION_UNPINNED')
-          scan=job['steps'][1]['run']
-          tree=ast.parse(scan)
-          imports={alias.name.split('.')[0] for node in ast.walk(tree)
-                   if isinstance(node,(ast.Import,ast.ImportFrom))
-                   for alias in (node.names if isinstance(node,ast.Import) else [type('Alias',(),{'name':node.module or ''})()])}
-          if not imports.issubset({'json','os','shutil','pathlib'}):
-              raise RuntimeError('LENOVO_VALIDATOR_UNAUTHORIZED_IMPORT')
-          forbidden=('subprocess','os.system','os.popen','exec(','eval(',
-                     'write_text(','write_bytes(','open(','rglob(','os.walk')
-          if any(word in scan for word in forbidden):
-              raise RuntimeError('LENOVO_VALIDATOR_MUTATION_OR_EXECUTION')
-          if "sorted(desktop.glob('app-*'))[:12]" not in scan:
-              raise RuntimeError('LENOVO_VALIDATOR_UNBOUNDED_SEARCH')
-          if scan.index("LENOVO_GIT_DISCOVERY_HOST_REJECTED")>scan.index('candidates = {}'):
+          for item in ("require('node:fs')","fs.lstatSync(",
+                       "git_verified:false","session_launch_ok:false",
+                       "state_validated:false","execution_authorized:false"):
+              if item not in admission:
+                  raise RuntimeError('LENOVO_VALIDATOR_READONLY_CONTRACT_MISSING')
+          if admission.index('LENOVO_BOOTSTRAP_HOST_REJECTED')>admission.index("require('node:fs')"):
               raise RuntimeError('LENOVO_VALIDATOR_HOST_CHECK_LATE')
-
-          def probe(root,computer='DESKTOP-RP23OGS'):
-              environ={'COMPUTERNAME':computer,'RUNNER_NAME':'DESKTOP-RP23OGS-runtime',
-                       'ProgramFiles':str(root),'ProgramW6432':str(root),
-                       'ProgramFiles(x86)':str(root),'LOCALAPPDATA':str(root),
-                       'ProgramData':str(root)}
-              output=io.StringIO()
-              with patch.dict(os.environ,environ),patch('shutil.which',return_value=None):
-                  with patch('subprocess.run',side_effect=AssertionError('unexpected executable run')):
-                      with contextlib.redirect_stdout(output):
-                          exec(scan,{'__name__':'__main__'})
-              return json.loads(output.getvalue())
-          with tempfile.TemporaryDirectory() as d:
-              root=Path(d)
-              absent=probe(root)
-              byname=lambda value: {item['candidate']:item['state']
-                                    for item in value['candidates']}
-              if (absent['mutation_performed'] is not False or
-                  absent['host'] is not True or absent['runner'] is not True or
-                  byname(absent)['system']!='missing'):
-                  raise RuntimeError('LENOVO_VALIDATOR_ABSENT_CASE')
-              binary=root/'Git'/'cmd'/'git.exe'
-              binary.parent.mkdir(parents=True,exist_ok=True)
-              binary.write_bytes(b'not-real-Git-and-must-not-execute')
-              positive=probe(root)
-              if byname(positive)['system']!='file_present_unverified':
-                  raise RuntimeError('LENOVO_VALIDATOR_PRESENT_CASE')
-              if probe(root)!=positive:
-                  raise RuntimeError('LENOVO_VALIDATOR_REPLAY_NOT_IDEMPOTENT')
-              binary.unlink()
-              target=root/'sample'
-              target.write_bytes(b'not-git')
-              binary.symlink_to(target)
-              if byname(probe(root))['system']!='link_rejected':
-                  raise RuntimeError('LENOVO_VALIDATOR_SYMLINK_ACCEPTED')
-              with patch('pathlib.Path.is_file',side_effect=AssertionError('read-before-host-guard')):
-                  try:
-                      probe(root,computer='UNAUTHORIZED')
-                  except RuntimeError as exc:
-                      if str(exc)!='LENOVO_GIT_DISCOVERY_HOST_REJECTED':
-                          raise
-                  else:
-                      raise RuntimeError('LENOVO_VALIDATOR_NEGATIVE_HOST_ACCEPTED')
+          for forbidden in ('child_process','execFile(','execSync(','spawn(',
+                            'writeFile(','rmSync('):
+              if forbidden in admission:
+                  raise RuntimeError('LENOVO_VALIDATOR_UNSAFE_BOOTSTRAP')
+          tests=subprocess.run(('python3','-m','pytest','-q',
+                   'tests/test_lenovo_git_discovery_readonly_workflow.py'),
+                   check=False,capture_output=True,text=True,timeout=90)
+          if tests.returncode!=0:
+              raise RuntimeError('LENOVO_VALIDATOR_NEGATIVE_OR_REPLAY_FAILED: '+tests.stdout[-1200:])
           # A separate current-branch repair also hardened the original inventory preflight.
           # Check those newly present files instead of silently excluding them from source integrity.
           inventory=yaml.load(Path('.github/workflows/lenovo-installed-inventory-readonly.yml')

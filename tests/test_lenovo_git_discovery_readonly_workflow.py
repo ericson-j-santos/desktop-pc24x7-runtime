@@ -1,91 +1,99 @@
 from __future__ import annotations
-
-import contextlib
-import io
 import json
 import os
-import tempfile
+import subprocess
 from pathlib import Path
-from unittest.mock import patch
-
 import pytest
 import yaml
 
-WORKFLOW = Path(__file__).resolve().parents[1] / ".github/workflows/lenovo-git-discovery-readonly.yml"
-SOURCE = WORKFLOW.read_text(encoding="utf-8")
-SPEC = yaml.load(SOURCE, Loader=yaml.BaseLoader)
-JOB = SPEC["jobs"]["discover"]
+SOURCE=(Path(__file__).resolve().parents[1]/".github/workflows/lenovo-git-discovery-readonly.yml").read_text(encoding="utf-8")
+SPEC=yaml.load(SOURCE,Loader=yaml.BaseLoader)
+JOB=SPEC["jobs"]["discover"]
+SCRIPT=JOB["steps"][0]["with"]["script"]
+HARNESS=r"""
+const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+const sha='a'.repeat(40);
+const github={rest:{
+  repos:{getBranch:async()=>({data:{commit:{sha}}})},
+  actions:{
+    listWorkflowRuns:async()=>({data:{workflow_runs:[{
+      head_sha:sha,head_branch:'main',event:'push',conclusion:'success',
+      repository:{full_name:'ericson-j-santos/desktop-pc24x7-runtime'},id:1
+    }]}}),
+    listJobsForWorkflowRun:async()=>({data:{total_count:2,jobs:[
+      ['Python compile and tests','windows-latest'],
+      ['Portable Linux compile and tests','ubuntu-latest']
+    ].map(([name,label])=>({name,labels:[label],conclusion:'success',
+      steps:[{name:'Unit and negative-control tests',conclusion:'success'}]}))}})
+  }
+}};
+const context={eventName:'workflow_dispatch',actor:'ericson-j-santos',
+  repo:{owner:'ericson-j-santos',repo:'desktop-pc24x7-runtime'},
+  ref:'refs/heads/main',sha:process.env.TEST_SHA||sha};
+(async()=>{await new AsyncFunction('github','context','core','require',
+  process.env.TEST_SCRIPT)(github,context,{info:x=>console.log(x)},require);
+})().catch(e=>{console.error(e.message);process.exitCode=1});
+"""
 
-
-def test_manual_exact_sha_ci_cost_and_runner_guards():
-    assert set(SPEC["on"]) == {"workflow_dispatch"}
-    assert set(SPEC["on"]["workflow_dispatch"]["inputs"]) == {"expected_source_sha", "confirmation"}
-    assert SPEC["on"]["workflow_dispatch"]["inputs"]["confirmation"]["options"] == ["READ_ONLY_LENOVO_GIT_DISCOVERY"]
-    assert SPEC["permissions"] == {"contents": "read", "actions": "read"}
-    assert JOB["runs-on"] == ["self-hosted", "Windows", "X64", "pc24x7",
-                               "desktop-runtime", "runtime-dev", "desktop-rp23ogs"]
-    assert JOB["environment"] == "DEV"
-    assert "vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha" in JOB["if"]
-    admit = JOB["steps"][0]["with"]["script"]
-    for token in ("context.actor", "context.ref", "context.sha",
-                  "GITHUB_RUN_ATTEMPT", "main.commit.sha", "event:'push'",
-                  "head_sha:sha", "LENOVO_GIT_DISCOVERY_CI_GATES_REQUIRED",
-                  "'windows-latest'", "'ubuntu-latest'"):
-        assert token in admit
-    assert JOB["steps"][0]["uses"] == (
-        "actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea"
-    )
-
-
-def test_no_checkout_download_install_or_unbounded_search():
-    assert len(JOB["steps"]) == 2
-    scan = JOB["steps"][1]["run"]
-    for forbidden in ("subprocess", "shell=True", "os.system", "os.walk", "rglob(",
-                      "curl", "wget", "winget", "choco", "pip install",
-                      "shutil.move", "shutil.copy", "mkdir(", "write_text(", "write_bytes("):
-        assert forbidden not in scan
-    assert "sorted(desktop.glob('app-*'))[:12]" in scan
-    assert "LENOVO_GIT_DISCOVERY_HOST_REJECTED" in scan
-    assert "file_present_unverified" in scan
-    assert "mutation_performed':False" in scan
-    assert "actions/checkout@" not in SOURCE
-
-
-def run_scan(tmp: Path, *, present=False, host="DESKTOP-RP23OGS"):
+def probe(tmp_path,present=False,host="DESKTOP-RP23OGS",
+          runner="DESKTOP-RP23OGS-runtime",sha=""):
     if present:
-        binary = tmp / "Git" / "cmd" / "git.exe"
-        binary.parent.mkdir(parents=True, exist_ok=True)
-        binary.write_bytes(b"fixture-not-executable")
-    env = {
-        "COMPUTERNAME": host, "RUNNER_NAME": "DESKTOP-RP23OGS-runtime",
-        "ProgramFiles": str(tmp), "ProgramW6432": str(tmp),
-        "LOCALAPPDATA": str(tmp), "ProgramData": str(tmp),
-        "ProgramFiles(x86)": str(tmp),
-    }
-    output = io.StringIO()
-    with patch.dict(os.environ, env), patch("shutil.which", return_value=None):
-        with contextlib.redirect_stdout(output):
-            exec(JOB["steps"][1]["run"], {"__name__": "__main__"})
-    return json.loads(output.getvalue().strip())
+        f=tmp_path/"Git"/"cmd"/"git.exe"
+        f.parent.mkdir(parents=True,exist_ok=True)
+        f.write_bytes(b"not-an-executable")
+    env=dict(os.environ)
+    env.update({"TEST_SCRIPT":SCRIPT,"TEST_SHA":sha,
+        "EXPECTED_SOURCE_SHA":"a"*40,
+        "CONFIRMATION":"READ_ONLY_LENOVO_GIT_DISCOVERY",
+        "GITHUB_RUN_ATTEMPT":"1",
+        "COMPUTERNAME":host,"RUNNER_NAME":runner,
+        "ProgramFiles":str(tmp_path),"ProgramW6432":str(tmp_path),
+        "ProgramFiles(x86)":str(tmp_path),
+        "LOCALAPPDATA":str(tmp_path),"ProgramData":str(tmp_path)})
+    return subprocess.run(["node","-e",HARNESS],env=env,capture_output=True,
+        text=True,check=False,timeout=15)
 
+def test_guards_and_no_uncontrolled_local_shell():
+    assert set(SPEC["on"])=={"workflow_dispatch"}
+    assert SPEC["permissions"]=={"contents":"read","actions":"read"}
+    assert JOB["runs-on"]==["self-hosted","Windows","X64","pc24x7",
+        "desktop-runtime","runtime-dev","desktop-rp23ogs"]
+    assert JOB["environment"]=="DEV"
+    assert "vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha" in JOB["if"]
+    assert len(JOB["steps"])==1
+    assert JOB["steps"][0]["uses"]=="actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea"
+    assert all("shell" not in step and "run" not in step for step in JOB["steps"])
+    for forbidden in ("shell: python","actions/checkout@","child_process",
+                      "execFile(","execSync(","spawn(","writeFile(","rmSync("):
+        assert forbidden not in SOURCE
+    assert SCRIPT.index("LENOVO_BOOTSTRAP_HOST_REJECTED")<SCRIPT.index("require('node:fs')")
+    for flag in ("git_verified:false","session_launch_ok:false","state_validated:false",
+                 "execution_authorized:false","mutation_performed:false"):
+        assert flag in SCRIPT
 
-@pytest.mark.parametrize("present,expected", [
-    (False, "missing"),
-    (True, "file_present_unverified"),
+@pytest.mark.parametrize("present,expected",[(False,"missing"),(True,"file_present_unverified")])
+def test_real_node_presence_and_idempotent_replay(tmp_path,present,expected):
+    result=probe(tmp_path,present=present)
+    assert result.returncode==0,result.stderr
+    marker="LENOVO_BOOTSTRAP_DEPENDENCY_CHECK "
+    assert result.stdout.count(marker)==1
+    receipt=json.loads(result.stdout.split(marker,1)[1])
+    assert {r["candidate"]:r["state"] for r in receipt["candidates"]}["system"]==expected
+    assert receipt["git_verified"] is False
+    assert receipt["session_launch_ok"] is False
+    assert receipt["state_validated"] is False
+    assert receipt["execution_authorized"] is False
+    assert receipt["mutation_performed"] is False
+    assert probe(tmp_path,present=present).stdout==result.stdout
+
+@pytest.mark.parametrize("host,runner,sha,error",[
+    ("WRONG","DESKTOP-RP23OGS-runtime","","LENOVO_BOOTSTRAP_HOST_REJECTED"),
+    ("DESKTOP-RP23OGS","WRONG","","LENOVO_BOOTSTRAP_HOST_REJECTED"),
+    ("DESKTOP-RP23OGS","DESKTOP-RP23OGS-runtime","b"*40,
+     "LENOVO_GIT_DISCOVERY_ADMISSION_REJECTED")
 ])
-def test_readonly_detection_no_execution_and_bounded_result(present, expected):
-    with tempfile.TemporaryDirectory() as d:
-        receipt = run_scan(Path(d), present=present)
-        assert receipt["contract"] == "lenovo-git-discovery-readonly-v1"
-        assert receipt["host"] is True and receipt["runner"] is True
-        assert receipt["mutation_performed"] is False
-        assert receipt["path_lookup_present"] is False
-        assert {x["candidate"]: x["state"] for x in receipt["candidates"]}["system"] == expected
-        assert run_scan(Path(d), present=present) == receipt
-
-
-def test_wrong_host_rejected_before_any_local_path_probe():
-    with tempfile.TemporaryDirectory() as d:
-        with patch("pathlib.Path.is_file", side_effect=AssertionError("read-before-host-guard")):
-            with pytest.raises(RuntimeError, match="LENOVO_GIT_DISCOVERY_HOST_REJECTED"):
-                run_scan(Path(d), host="DESKTOP-UNAUTHORIZED")
+def test_wrong_host_runner_or_sha_rejected(tmp_path,host,runner,sha,error):
+    result=probe(tmp_path,host=host,runner=runner,sha=sha)
+    assert result.returncode!=0
+    assert error in result.stderr
+    assert "LENOVO_BOOTSTRAP_DEPENDENCY_CHECK" not in result.stdout

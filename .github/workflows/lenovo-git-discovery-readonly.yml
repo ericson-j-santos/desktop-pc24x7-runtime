@@ -64,48 +64,59 @@ jobs:
                    s.conclusion==='success'))
                 throw Error('LENOVO_GIT_DISCOVERY_CI_GATES_REQUIRED');
             }
-      - name: Discover fixed Git locations without mutation
-        shell: python
-        run: |
-          import json, os, shutil
-          from pathlib import Path
-          if (os.environ.get('COMPUTERNAME')!='DESKTOP-RP23OGS' or
-              os.environ.get('RUNNER_NAME')!='DESKTOP-RP23OGS-runtime'):
-              raise RuntimeError('LENOVO_GIT_DISCOVERY_HOST_REJECTED')
-          def root(env):
-              return Path(os.environ[env]) if os.environ.get(env) else None
-          candidates = {}
-          for label,env,parts in [
-              ('system','ProgramFiles',('Git','cmd','git.exe')),
-              ('system64','ProgramW6432',('Git','cmd','git.exe')),
-              ('system32','ProgramFiles(x86)',('Git','cmd','git.exe')),
-              ('user','LOCALAPPDATA',('Programs','Git','cmd','git.exe')),
-              ('mingit','ProgramData',('ReqSys','MinGit','cmd','git.exe')),
-              ('portable','LOCALAPPDATA',('Programs','Git','bin','git.exe')),
-              ('vscode','LOCALAPPDATA',('Programs','Microsoft VS Code','resources','app','extensions','git','bin','git.exe')),
-          ]:
-              base=root(env)
-              candidates[label]=base.joinpath(*parts) if base else None
-          local=root('LOCALAPPDATA')
-          if local:
-              desktop=local/'GitHubDesktop'
-              if desktop.is_dir() and not desktop.is_symlink():
-                  for index,app in enumerate(sorted(desktop.glob('app-*'))[:12]):
-                      if app.is_dir() and not app.is_symlink():
-                          for suffix in [('resources','app','git','cmd','git.exe'),
-                                         ('resources','app','git','mingw64','bin','git.exe')]:
-                              candidates['github_desktop_'+str(index)+'_'+suffix[-2]]=app.joinpath(*suffix)
-          results=[]
-          for label,candidate in candidates.items():
-              state='missing'
-              if candidate is not None and candidate.is_symlink():
-                  state='link_rejected'
-              elif candidate is not None and candidate.is_file():
-                  state='file_present_unverified'
-              results.append({'candidate':label,'state':state})
-          detected=shutil.which('git')
-          print(json.dumps({'contract':'lenovo-git-discovery-readonly-v1',
-              'host':os.environ.get('COMPUTERNAME')=='DESKTOP-RP23OGS',
-              'runner':os.environ.get('RUNNER_NAME')=='DESKTOP-RP23OGS-runtime',
-              'path_lookup_present':bool(detected),
-              'candidates':results,'mutation_performed':False},sort_keys=True))
+            // Bootstrap dependency inspection only. Not a session or Command Gateway approval.
+            if (process.env.COMPUTERNAME!=='DESKTOP-RP23OGS' ||
+                process.env.RUNNER_NAME!=='DESKTOP-RP23OGS-runtime')
+              throw Error('LENOVO_BOOTSTRAP_HOST_REJECTED');
+            const fs=require('node:fs'), path=require('node:path');
+            function stateOf(candidate) {
+              try {
+                const item=fs.lstatSync(candidate);
+                return item.isSymbolicLink()?'link_rejected':
+                  item.isFile()?'file_present_unverified':'not_file';
+              } catch(e) {
+                return e.code==='ENOENT'?'missing':'unreadable';
+              }
+            }
+            const candidates=[];
+            for (const [label,variable,tail] of [
+              ['system','ProgramFiles',['Git','cmd','git.exe']],
+              ['system64','ProgramW6432',['Git','cmd','git.exe']],
+              ['system32','ProgramFiles(x86)',['Git','cmd','git.exe']],
+              ['user','LOCALAPPDATA',['Programs','Git','cmd','git.exe']],
+              ['mingit','ProgramData',['ReqSys','MinGit','cmd','git.exe']],
+              ['portable','LOCALAPPDATA',['Programs','Git','bin','git.exe']],
+              ['vscode','LOCALAPPDATA',['Programs','Microsoft VS Code',
+                'resources','app','extensions','git','bin','git.exe']]
+            ]) {
+              const root=process.env[variable];
+              candidates.push({candidate:label,state:!root||!path.isAbsolute(root)
+                ?'root_unavailable':stateOf(path.join(root,...tail))});
+            }
+            const local=process.env.LOCALAPPDATA;
+            if(local&&path.isAbsolute(local)) {
+              const desktop=path.join(local,'GitHubDesktop');
+              try {
+                const info=fs.lstatSync(desktop);
+                if(info.isDirectory()&&!info.isSymbolicLink()) {
+                  const versions=fs.readdirSync(desktop,{withFileTypes:true})
+                    .filter(v=>/^app-[0-9]/.test(v.name)&&v.isDirectory())
+                    .map(v=>v.name).sort().slice(0,12);
+                  for(const [index,version] of versions.entries()) {
+                    for(const [kind,tail] of [
+                      ['cmd',['resources','app','git','cmd','git.exe']],
+                      ['mingw64',['resources','app','git','mingw64','bin','git.exe']]
+                    ]) candidates.push({candidate:'desktop_'+index+'_'+kind,
+                      state:stateOf(path.join(desktop,version,...tail))});
+                  }
+                }
+              } catch(e) {
+                if(e.code!=='ENOENT') candidates.push({candidate:'github_desktop',state:'unreadable'});
+              }
+            }
+            core.info('LENOVO_BOOTSTRAP_DEPENDENCY_CHECK '+JSON.stringify({
+              contract:'lenovo-git-bootstrap-dependency-v1',host_verified:true,
+              runner_verified:true,candidates,git_verified:false,
+              session_launch_ok:false,state_validated:false,
+              execution_authorized:false,mutation_performed:false
+            }));
