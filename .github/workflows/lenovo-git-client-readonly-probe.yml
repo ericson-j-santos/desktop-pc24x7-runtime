@@ -1,0 +1,106 @@
+name: Lenovo Git client bounded read-only probe
+
+on:
+  push:
+    branches:
+      - repair/lenovo-git-client-probe-151
+    paths:
+      - .github/workflows/lenovo-git-client-readonly-probe.yml
+      - tests/test_lenovo_git_client_readonly_probe.py
+
+permissions:
+  contents: read
+
+concurrency:
+  group: lenovo-git-client-readonly-probe-151
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: github.actor == 'ericson-j-santos' && github.triggering_actor == 'ericson-j-santos' && github.ref == 'refs/heads/repair/lenovo-git-client-probe-151'
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
+    timeout-minutes: 3
+    steps:
+      - name: Admit exact Lenovo runner and first attempt
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const os = require('os');
+            if (context.eventName !== 'push' ||
+                context.actor !== 'ericson-j-santos' ||
+                context.repo.owner !== 'ericson-j-santos' ||
+                context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                context.ref !== 'refs/heads/repair/lenovo-git-client-probe-151' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                process.env.RUNNER_NAME !== 'DESKTOP-RP23OGS-runtime' ||
+                os.hostname().toUpperCase() !== 'DESKTOP-RP23OGS') {
+              throw new Error('LENOVO_GIT_PROBE_ADMISSION_REJECTED');
+            }
+
+      - name: Probe bounded existing Git locations without mutation
+        shell: python
+        run: |
+          import json, os, re, subprocess
+          from pathlib import Path
+
+          candidates = []
+          def add(candidate_id, path):
+              if path is not None:
+                  candidates.append((candidate_id, Path(path)))
+
+          def fixed(root_name, *parts):
+              root = str(os.environ.get(root_name) or '').strip()
+              return Path(root).joinpath(*parts) if root else None
+
+          add('PROGRAM_FILES_GIT_CMD', fixed('ProgramFiles', 'Git', 'cmd', 'git.exe'))
+          add('PROGRAM_W6432_GIT_CMD', fixed('ProgramW6432', 'Git', 'cmd', 'git.exe'))
+          add('LOCAL_PROGRAMS_GIT_CMD', fixed('LOCALAPPDATA', 'Programs', 'Git', 'cmd', 'git.exe'))
+          add('REQSYS_MINGIT_CMD', fixed('ProgramData', 'ReqSys', 'MinGit', 'cmd', 'git.exe'))
+
+          local = str(os.environ.get('LOCALAPPDATA') or '').strip()
+          if local:
+              desktop_root = Path(local) / 'GitHubDesktop'
+              for app_root in sorted(desktop_root.glob('app-*'), reverse=True)[:8]:
+                  add('GITHUB_DESKTOP_GIT_CMD', app_root / 'resources' / 'app' / 'git' / 'cmd' / 'git.exe')
+                  add('GITHUB_DESKTOP_GIT_BIN', app_root / 'resources' / 'app' / 'git' / 'bin' / 'git.exe')
+
+          for edition in ('Community', 'Professional', 'Enterprise', 'BuildTools'):
+              add('VISUAL_STUDIO_2022_' + edition.upper(), fixed(
+                  'ProgramFiles', 'Microsoft Visual Studio', '2022', edition,
+                  'Common7', 'IDE', 'CommonExtensions', 'Microsoft',
+                  'TeamFoundation', 'Team Explorer', 'Git', 'cmd', 'git.exe'))
+
+          runner_temp = str(os.environ.get('RUNNER_TEMP') or '').strip()
+          if runner_temp:
+              temp = Path(runner_temp)
+              if temp.name.lower() == '_temp' and temp.parent.name.lower() == '_work':
+                  runner_root = temp.parent.parent
+                  add('RUNNER_EXTERNALS_GIT_CMD', runner_root / 'externals' / 'git' / 'cmd' / 'git.exe')
+                  add('RUNNER_EXTERNALS_GIT_BIN', runner_root / 'externals' / 'git' / 'bin' / 'git.exe')
+
+          found = []
+          seen = set()
+          for candidate_id, candidate in candidates:
+              normalized = os.path.normcase(os.path.abspath(str(candidate)))
+              if normalized in seen:
+                  continue
+              seen.add(normalized)
+              if not candidate.is_file() or candidate.is_symlink():
+                  continue
+              probe = subprocess.run(
+                  [str(candidate), '--version'], check=False, shell=False,
+                  capture_output=True, text=True, timeout=10)
+              version = probe.stdout.strip()
+              if (probe.returncode == 0 and
+                      re.fullmatch(r'git version 2\.[0-9]+\.[0-9]+(?:\.windows\.[0-9]+)?', version)):
+                  found.append({'candidate_id': candidate_id, 'version': version})
+
+          print(json.dumps({
+              'contract': 'lenovo-git-client-bounded-readonly-probe-v1',
+              'host': os.environ.get('RUNNER_NAME'),
+              'mutation_performed': False,
+              'candidate_count': len(found),
+              'candidates': found,
+          }, sort_keys=True))
+          if not found:
+              raise RuntimeError('LENOVO_GIT_CLIENT_NOT_FOUND_IN_BOUNDED_PATHS')
