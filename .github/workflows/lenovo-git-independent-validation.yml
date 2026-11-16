@@ -41,7 +41,9 @@ jobs:
           expected={
               '.github/workflows/lenovo-git-discovery-readonly.yml',
               '.github/workflows/lenovo-git-independent-validation.yml',
+              '.github/workflows/lenovo-installed-inventory-readonly.yml',
               'tests/test_lenovo_git_discovery_readonly_workflow.py',
+              'tests/test_lenovo_git_inventory_preflight.py',
               'tests/test_runner_selection_isolation.py',
           }
           if not re.fullmatch(r'[0-9a-f]{40}',head) or git('rev-parse','HEAD')!=head:
@@ -141,6 +143,24 @@ jobs:
                           raise
                   else:
                       raise RuntimeError('LENOVO_VALIDATOR_NEGATIVE_HOST_ACCEPTED')
+          # A separate current-branch repair also hardened the original inventory preflight.
+          # Check those newly present files instead of silently excluding them from source integrity.
+          inventory=yaml.load(Path('.github/workflows/lenovo-installed-inventory-readonly.yml')
+                              .read_text(encoding='utf-8'), Loader=yaml.BaseLoader)
+          inv_steps=inventory['jobs']['inventory']['steps']
+          inv_resolver=next(x['run'] for x in inv_steps
+                            if x['name']=='Resolve fixed existing Git client')
+          if not (inv_resolver.index('LENOVO_GIT_PREFLIGHT_HOST_REJECTED')<
+                  inv_resolver.index('candidates=[')<
+                  inv_resolver.index('if not present:')<
+                  inv_resolver.index('probe=subprocess.run')):
+              raise RuntimeError('LENOVO_VALIDATOR_INVENTORY_PREFLIGHT_ORDER')
+          if any(x in inv_resolver for x in ('curl','wget','winget','choco','os.walk','rglob(')):
+              raise RuntimeError('LENOVO_VALIDATOR_INVENTORY_UNBOUNDED_CHANGE')
+          if 'LENOVO_GIT_PREFLIGHT_MISSING' not in inv_resolver:
+              raise RuntimeError('LENOVO_VALIDATOR_INVENTORY_MISSING_GUARD')
+          if not Path('tests/test_lenovo_git_inventory_preflight.py').is_file():
+              raise RuntimeError('LENOVO_VALIDATOR_INVENTORY_REGRESSION_ABSENT')
           print(json.dumps({'result':'LENOVO_INDEPENDENT_VALIDATOR_OK',
                             'head_sha':head,'base_sha':base,
                             'checked_files':len(expected),'positive':True,
