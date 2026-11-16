@@ -1,0 +1,127 @@
+name: Lenovo Git discovery independent hosted validator
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+concurrency:
+  group: lenovo-git-independent-validator-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  independently_validate:
+    if: github.repository == 'ericson-j-santos/desktop-pc24x7-runtime' && github.event.pull_request.number == 155 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'repair/lenovo-git-discovery-readonly-43793281463'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Checkout PR head in a separate GitHub-hosted executor
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned validators
+        shell: bash
+        run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.3 pytest==8.4.2
+      - name: Verify independent source integrity and session-first safety
+        shell: python
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          import ast, copy, json, os, re, subprocess
+          from pathlib import Path
+          import yaml
+          BASE='e1774a78d93ae586717c47a972312cff37107a21'
+          FILES={
+              '.github/workflows/lenovo-git-discovery-readonly.yml',
+              '.github/workflows/lenovo-git-independent-validation.yml',
+              '.github/workflows/lenovo-installed-inventory-readonly.yml',
+              'scripts/lenovo_git_discovery_readonly.py',
+              'tests/test_lenovo_git_discovery_readonly_workflow.py',
+              'tests/test_lenovo_git_inventory_preflight.py',
+              'tests/test_lenovo_installed_inventory_workflow.py',
+              'tests/test_runner_selection_isolation.py',
+          }
+          def git(*args):
+              return subprocess.check_output(('git',*args),text=True).strip()
+          head=os.environ['EXPECTED_HEAD']
+          if not re.fullmatch('[0-9a-f]{40}',head) or git('rev-parse','HEAD')!=head:
+              raise RuntimeError('LENOVO_VALIDATOR_HEAD_REJECTED')
+          if os.environ['EXPECTED_BASE']!=BASE:
+              raise RuntimeError('LENOVO_VALIDATOR_BASE_MOVED')
+          if git('remote','get-url','origin').removesuffix('.git')!='https://github.com/ericson-j-santos/desktop-pc24x7-runtime':
+              raise RuntimeError('LENOVO_VALIDATOR_ORIGIN_REJECTED')
+          if git('status','--porcelain'):
+              raise RuntimeError('LENOVO_VALIDATOR_DIRTY_CHECKOUT')
+          subprocess.run(('git','merge-base','--is-ancestor',BASE,head),check=True)
+          changed=set(git('diff','--name-only',BASE,head).splitlines())
+          if changed!=FILES:
+              raise RuntimeError('LENOVO_VALIDATOR_UNEXPECTED_FILES: '+str(sorted(changed^FILES)))
+          def load(name):
+              return yaml.load(Path(name).read_text('utf-8'),Loader=yaml.BaseLoader)
+          inventory=load('.github/workflows/lenovo-installed-inventory-readonly.yml')
+          discovery=load('.github/workflows/lenovo-git-discovery-readonly.yml')
+          def check_contract(wf, physical):
+              jobs=wf['jobs']
+              hosted=jobs.get('admit',{})
+              job=jobs.get(physical,{})
+              if hosted.get('runs-on')!='ubuntu-latest' or (
+                  'vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha'
+                  not in hosted.get('if','')):
+                  raise RuntimeError('LENOVO_VALIDATOR_HOSTED_ADMISSION_MISSING')
+              script=hosted['steps'][0]['with']['script']
+              if any(token in script for token in ('node:fs','fs.lstatSync(','child_process','execFile(','spawn(')):
+                  raise RuntimeError('LENOVO_VALIDATOR_HOSTED_ADMISSION_LOCAL_CODE')
+              if hosted['steps'][0]['uses']!='actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea':
+                  raise RuntimeError('LENOVO_VALIDATOR_ACTION_UNPINNED')
+              if job.get('needs')!='admit' or job.get('if')!="needs.admit.result == 'success'":
+                  raise RuntimeError('LENOVO_VALIDATOR_UNGATED_PHYSICAL_JOB')
+              if job.get('runs-on')!=['self-hosted','Windows','X64','pc24x7',
+                                     'desktop-runtime','runtime-dev','desktop-rp23ogs']:
+                  raise RuntimeError('LENOVO_VALIDATOR_RUNNER_SELECTOR')
+              steps=job['steps']
+              if len(steps)!=4:
+                  raise RuntimeError('LENOVO_VALIDATOR_PHYSICAL_STEP_COUNT')
+              for stage in steps[:2]:
+                  if 'run' in stage or 'shell' in stage or not stage['uses'].startswith('actions/checkout@'):
+                      raise RuntimeError('LENOVO_VALIDATOR_PREBOOTSTRAP_CODE')
+                  if stage['with']['persist-credentials']!='false':
+                      raise RuntimeError('LENOVO_VALIDATOR_CHECKOUT_CREDENTIALS')
+              if ('lenovo_control_plane_workflow.py' not in steps[2].get('run','')
+                  or "['bootstrap']()" not in steps[2].get('run','')
+                  or steps[2].get('id')!='session'):
+                  raise RuntimeError('LENOVO_VALIDATOR_SESSION_MISSING')
+              execute=steps[3].get('run','')
+              for required in ("'--risk','1'","'--expected-head',sha",
+                               'state_changed', 'SESSION_ID','correlation_id'):
+                  if required not in execute:
+                      raise RuntimeError('LENOVO_VALIDATOR_GATEWAY_MISSING')
+              return True
+          check_contract(inventory,'inventory')
+          check_contract(discovery,'discover')
+          # Test the validator itself against a deliberately unsafe reordering.
+          altered=copy.deepcopy(discovery)
+          altered['jobs']['discover']['steps'][2],altered['jobs']['discover']['steps'][3]=(
+              altered['jobs']['discover']['steps'][3],altered['jobs']['discover']['steps'][2])
+          try:
+              check_contract(altered,'discover')
+          except RuntimeError:
+              pass
+          else:
+              raise RuntimeError('LENOVO_VALIDATOR_NEGATIVE_REORDER_UNDETECTED')
+          scan=Path('scripts/lenovo_git_discovery_readonly.py').read_text('utf-8')
+          ast.parse(scan)
+          for forbidden in ('subprocess','os.system','os.popen','Popen(', 'os.walk',
+                            'rglob(', 'write_text(', 'write_bytes(', 'unlink(', 'shutil.move'):
+              if forbidden in scan:
+                  raise RuntimeError('LENOVO_VALIDATOR_UNSAFE_SCANNER')
+          if 'mutation_performed' not in scan or 'git_verified' not in scan:
+              raise RuntimeError('LENOVO_VALIDATOR_SCAN_CONTRACT_MISSING')
+          print(json.dumps({'result':'LENOVO_SESSION_FIRST_INDEPENDENT_VALIDATOR_OK',
+                            'head_sha':head,'base_sha':BASE,'files':len(FILES),
+                            'physical_execution':False,'session_gate_enforced':True},
+                           sort_keys=True))
+      - name: Independent functional, negative and replay regression
+        shell: bash
+        run: |
+          python3 -m pytest -q tests/test_lenovo_git_discovery_readonly_workflow.py tests/test_lenovo_git_inventory_preflight.py tests/test_lenovo_installed_inventory_workflow.py tests/test_runner_selection_isolation.py

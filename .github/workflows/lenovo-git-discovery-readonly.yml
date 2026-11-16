@@ -1,0 +1,167 @@
+name: Lenovo Git discovery DEV (read-only)
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact certified main SHA
+        required: true
+        type: string
+      confirmation:
+        description: Read-only discovery
+        required: true
+        type: choice
+        options: [READ_ONLY_LENOVO_GIT_DISCOVERY]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: lenovo-git-discovery-readonly-dev
+  cancel-in-progress: false
+jobs:
+  admit:
+    if: github.actor == 'ericson-j-santos' && github.triggering_actor == 'ericson-j-santos' && github.ref == 'refs/heads/main' && vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    outputs:
+      rules_sha: ${{ steps.admit.outputs.rules_sha }}
+    steps:
+      - name: Admit owner, exact main, SHA and CI
+        id: admit
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        with:
+          script: |
+            const repo='ericson-j-santos/desktop-pc24x7-runtime';
+            const sha=process.env.EXPECTED_SOURCE_SHA || '';
+            if(context.eventName!=='workflow_dispatch' ||
+               context.actor!=='ericson-j-santos' ||
+               context.repo.owner+'/'+context.repo.repo!==repo ||
+               context.ref!=='refs/heads/main' ||
+               process.env.GITHUB_RUN_ATTEMPT!=='1' ||
+               process.env.CONFIRMATION!=='READ_ONLY_LENOVO_GIT_DISCOVERY' ||
+               !/^[a-f0-9]{40}$/.test(sha) || context.sha!==sha)
+              throw Error('LENOVO_GIT_DISCOVERY_ADMISSION_REJECTED');
+            const {data:main}=await github.rest.repos.getBranch({...context.repo,branch:'main'});
+            if(main.commit.sha!==sha) throw Error('LENOVO_GIT_DISCOVERY_MAIN_MOVED');
+            const {data:runs}=await github.rest.actions.listWorkflowRuns({
+              ...context.repo,workflow_id:'ci.yml',head_sha:sha,
+              branch:'main',event:'push',status:'completed',per_page:100
+            });
+            const passed=runs.workflow_runs.filter(x=>x.head_sha===sha &&
+              x.head_branch==='main' && x.event==='push' &&
+              x.conclusion==='success' && x.repository?.full_name===repo);
+            if(passed.length!==1) throw Error('LENOVO_GIT_DISCOVERY_CI_REQUIRED');
+            const {data:jobs}=await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo,run_id:passed[0].id,filter:'latest',per_page:100
+            });
+            if(jobs.total_count!==jobs.jobs.length) throw Error('LENOVO_GIT_DISCOVERY_CI_INCOMPLETE');
+            for(const [name,label] of [['Python compile and tests','windows-latest'],
+                                       ['Portable Linux compile and tests','ubuntu-latest']]){
+              const found=jobs.jobs.filter(j=>j.name===name);
+              if(found.length!==1 || found[0].conclusion!=='success' ||
+                 !found[0].labels?.includes(label) ||
+                 !found[0].steps?.some(s=>s.name==='Unit and negative-control tests' &&
+                   s.conclusion==='success'))
+                throw Error('LENOVO_GIT_DISCOVERY_CI_GATES_REQUIRED');
+            }
+            const {data:rules}=await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'
+            });
+            core.setOutput('rules_sha',rules.commit.sha);
+  discover:
+    needs: admit
+    if: needs.admit.result == 'success'
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
+    environment: DEV
+    timeout-minutes: 5
+    env:
+      DEPLOYMENT_ENV: DEV
+      CORRELATION_ID: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout exact source without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ inputs.expected_source_sha }}
+          persist-credentials: false
+      - name: Checkout canonical rules without credentials
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          repository: ericson-j-santos/chatgpt-operational-rules
+          ref: ${{ needs.admit.outputs.rules_sha }}
+          path: _rules
+          persist-credentials: false
+      - name: Bootstrap governed physical session
+        id: session
+        shell: python
+        run: |
+          import os,runpy
+          source=os.path.join(os.environ['GITHUB_WORKSPACE'],'scripts','lenovo_control_plane_workflow.py')
+          runpy.run_path(source)['bootstrap']()
+      - name: Inspect Git candidates only through Command Gateway Risk 1
+        shell: python
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          ANCHOR_SHA: ${{ steps.session.outputs.anchor_sha }}
+        run: |
+          import json,os,re,subprocess,sys
+          from pathlib import Path
+          workspace=Path(os.environ['GITHUB_WORKSPACE'])
+          target=Path(os.environ['TARGET_PATH'])
+          rules=workspace/'_rules'
+          sha=os.environ['ANCHOR_SHA']
+          if not re.fullmatch('[0-9a-f]{40}',sha) or sha!=os.environ['GITHUB_SHA']:
+              raise RuntimeError('LENOVO_GIT_GATEWAY_SHA_REJECTED')
+          cmd=[
+              sys.executable,str(rules/'scripts'/'command_gateway.py'),
+              '--policy',str(rules/'config'/'command-gateway.policy.json'),
+              '--correlation-id',os.environ['CORRELATION_ID'],
+              'run','--cwd',str(target),'--session-id',os.environ['SESSION_ID'],
+              '--risk','1','--timeout','60','--expected-head',sha,
+              '--',sys.executable,'-B',str(target/'scripts'/'lenovo_git_discovery_readonly.py')
+          ]
+          process=subprocess.run(cmd,shell=False,check=False,capture_output=True,text=True,timeout=90)
+          if process.returncode!=0:
+              raise RuntimeError('LENOVO_GIT_DISCOVERY_GATEWAY_BLOCKED')
+          expected_cwd=os.path.normcase(os.path.realpath(os.path.abspath(str(target)))).replace(os.sep,'/')
+          try:
+              envelope=json.loads(process.stdout.splitlines()[-1])
+              if (not isinstance(envelope,dict) or
+                  envelope.get('action')!='run' or envelope.get('result')!='ok' or
+                  type(envelope.get('risk')) is not int or envelope['risk']!=1 or
+                  type(envelope.get('gateway_exit_code')) is not int or envelope['gateway_exit_code']!=0 or
+                  type(envelope.get('command_exit_code')) is not int or envelope['command_exit_code']!=0 or
+                  envelope.get('state_changed') is not False or
+                  envelope.get('cwd')!=expected_cwd or
+                  envelope.get('session_id')!=os.environ['SESSION_ID'] or
+                  envelope.get('correlation_id')!=os.environ['CORRELATION_ID'] or
+                  not isinstance(envelope.get('before'),dict) or
+                  not isinstance(envelope.get('after'),dict) or
+                  envelope['before'].get('head')!=sha or envelope['after'].get('head')!=sha):
+                  raise ValueError('gateway_envelope')
+              report=json.loads(str(envelope['stdout']).splitlines()[-1])
+              candidates=report.get('candidates')
+              allowed={'missing','root_unavailable','link_rejected','file_present_unverified','unreadable'}
+              if (report.get('contract')!='lenovo-git-discovery-readonly-v2' or
+                  report.get('result')!='LENOVO_GIT_CANDIDATES_ONLY' or
+                  report.get('host')!='DESKTOP-RP23OGS' or
+                  report.get('runner_name')!='DESKTOP-RP23OGS-runtime' or
+                  report.get('git_verified') is not False or
+                  report.get('execution_authorized') is not False or
+                  report.get('mutation_performed') is not False or
+                  type(report.get('path_lookup_present')) is not bool or
+                  not isinstance(candidates,list) or not 7<=len(candidates)<=31):
+                  raise ValueError('report')
+              names=set()
+              for item in candidates:
+                  if (not isinstance(item,dict) or set(item)!={'candidate','state'} or
+                      not isinstance(item['candidate'],str) or
+                      not re.fullmatch('[a-z0-9_]{1,36}',item['candidate']) or
+                      item['candidate'] in names or item['state'] not in allowed):
+                      raise ValueError('candidate')
+                  names.add(item['candidate'])
+          except (ValueError,KeyError,TypeError,IndexError):
+              raise RuntimeError('LENOVO_GIT_DISCOVERY_RECEIPT_REJECTED') from None
+          print(json.dumps(report,sort_keys=True))

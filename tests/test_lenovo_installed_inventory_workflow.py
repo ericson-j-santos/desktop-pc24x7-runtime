@@ -23,13 +23,13 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
         self.assertEqual(inputs["confirmation"]["options"], ["READ_ONLY_LENOVO_INVENTORY"])
 
     def test_owner_main_first_attempt_exact_sha_guard(self):
-        guard = self.job["if"]
+        guard = self.workflow["jobs"]["admit"]["if"]
         for required in ("github.actor == 'ericson-j-santos'",
                          "github.triggering_actor == 'ericson-j-santos'",
                          "github.ref == 'refs/heads/main'",
                          "vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha"):
             self.assertIn(required, guard)
-        admit = self.job["steps"][0]["with"]["script"]
+        admit = self.workflow["jobs"]["admit"]["steps"][0]["with"]["script"]
         for required in ("GITHUB_RUN_ATTEMPT", "context.sha", "main.commit.sha",
                          "LENOVO_INVENTORY_EXACT_CI_REQUIRED",
                          "LENOVO_INVENTORY_CI_GATES_REQUIRED"):
@@ -45,26 +45,35 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
         self.assertEqual(set(self.job["env"]), {"DEPLOYMENT_ENV", "CORRELATION_ID"})
 
     def test_only_immutable_actions(self):
-        refs = [step["uses"] for step in self.job["steps"] if "uses" in step]
+        refs = [step["uses"] for step in (self.workflow["jobs"]["admit"]["steps"] + self.job["steps"]) if "uses" in step]
         self.assertEqual(len(refs), 3)
         for ref in refs:
             self.assertRegex(ref, r"^actions/(github-script|checkout)@[0-9a-f]{40}$")
 
-    def test_fixed_existing_git_is_resolved_before_checkout_without_install(self):
-        steps = self.job["steps"]
-        names = [step["name"] for step in steps]
-        resolver = steps[names.index("Resolve fixed existing Git client")]
-        self.assertLess(names.index("Resolve fixed existing Git client"),
-                        names.index("Checkout exact source without credentials"))
-        script = resolver["run"]
-        for required in ("ProgramFiles", "ProgramW6432", "LOCALAPPDATA",
-                         "ProgramData", "Git", "MinGit", "git.exe",
-                         "GITHUB_PATH", "LENOVO_GIT_CLIENT_UNAVAILABLE",
-                         "--version", "shell=False"):
-            self.assertIn(required, script)
-        for forbidden in ("Invoke-WebRequest", "curl", "wget", "rglob(",
-                          "os.walk", "where.exe", "choco", "winget"):
-            self.assertNotIn(forbidden, script)
+    def test_hosted_admission_then_checkout_then_session_no_prebootstrap_git(self):
+        hosted = self.workflow["jobs"]["admit"]
+        self.assertEqual(hosted["runs-on"], "ubuntu-latest")
+        self.assertEqual(self.job["needs"], "admit")
+        self.assertEqual(self.job["if"], "needs.admit.result == 'success'")
+        names = [step["name"] for step in self.job["steps"]]
+        self.assertEqual(names, [
+            "Checkout exact source without credentials",
+            "Checkout canonical rules without credentials",
+            "Bootstrap governed physical session",
+            "Read installed SHA and digests through Command Gateway Risk 1",
+        ])
+        self.assertIn("needs.admit.outputs.rules_sha", self.job["steps"][1]["with"]["ref"])
+        for step in self.job["steps"][:2]:
+            self.assertIn("actions/checkout@", step["uses"])
+            self.assertNotIn("run", step)
+            self.assertNotIn("shell", step)
+        self.assertIn("lenovo_control_plane_workflow.py", self.job["steps"][2]["run"])
+        self.assertIn("['bootstrap']()", self.job["steps"][2]["run"])
+        self.assertNotIn("git.exe", self.source)
+        self.assertNotIn("LENOVO_GIT_PREFLIGHT_HOST_REJECTED", self.source)
+        self.assertNotIn("Resolve fixed existing Git client", self.source)
+        self.assertNotIn("GITHUB_PATH", self.source)
+
     def test_gateway_risk1_and_no_mutating_commands(self):
         scripts = [step["run"] for step in self.job["steps"] if "run" in step]
         joined = "\n".join(scripts)
@@ -202,7 +211,7 @@ class LenovoInventoryWorkflowContractTests(unittest.TestCase):
     def test_no_executable_dispatch_on_main_from_branch(self):
         self.assertEqual(self.workflow["concurrency"]["cancel-in-progress"], "false")
         self.assertIn("${{ github.run_id }}", self.source)
-        self.assertIn("${{ steps.admit.outputs.rules_sha }}", self.source)
+        self.assertIn("${{ needs.admit.outputs.rules_sha }}", self.source)
 
 
 if __name__ == "__main__":

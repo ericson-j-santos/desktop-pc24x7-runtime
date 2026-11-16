@@ -21,14 +21,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  inventory:
+  admit:
     if: github.actor == 'ericson-j-santos' && github.triggering_actor == 'ericson-j-santos' && github.ref == 'refs/heads/main' && vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha
-    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
-    environment: DEV
-    timeout-minutes: 6
-    env:
-      DEPLOYMENT_ENV: DEV
-      CORRELATION_ID: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 4
+    outputs:
+      rules_sha: ${{ steps.admit.outputs.rules_sha }}
     steps:
       - name: Admit owner, exact current main and CI
         id: admit
@@ -77,46 +75,17 @@ jobs:
               owner:'ericson-j-santos',repo:'chatgpt-operational-rules',branch:'main'
             });
             core.setOutput('rules_sha', rules.data.commit.sha);
-      - name: Resolve fixed existing Git client
-        shell: python
-        run: |
-          import os,re,subprocess
-          from pathlib import Path
-          def fixed(root_name,*parts):
-              root=str(os.environ.get(root_name) or '').strip()
-              return Path(root).joinpath(*parts) if root else None
-          candidates=[
-              fixed('ProgramFiles','Git','cmd','git.exe'),
-              fixed('ProgramW6432','Git','cmd','git.exe'),
-              fixed('LOCALAPPDATA','Programs','Git','cmd','git.exe'),
-              fixed('ProgramData','ReqSys','MinGit','cmd','git.exe'),
-          ]
-          selected=None
-          seen=set()
-          for candidate in candidates:
-              if candidate is None:
-                  continue
-              normalized=os.path.normcase(os.path.abspath(str(candidate)))
-              if normalized in seen:
-                  continue
-              seen.add(normalized)
-              if not candidate.is_file() or candidate.is_symlink():
-                  continue
-              probe=subprocess.run([str(candidate),'--version'],check=False,shell=False,
-                                   capture_output=True,text=True,timeout=10)
-              if (probe.returncode==0 and
-                  re.fullmatch(r'git version 2\.[0-9]+\.[0-9]+(?:\.windows\.[0-9]+)?',
-                               probe.stdout.strip())):
-                  selected=candidate
-                  break
-          if selected is None:
-              raise RuntimeError('LENOVO_GIT_CLIENT_UNAVAILABLE')
-          github_path=Path(str(os.environ.get('GITHUB_PATH') or ''))
-          if not github_path.is_absolute():
-              raise RuntimeError('LENOVO_GITHUB_PATH_INVALID')
-          with github_path.open('a',encoding='utf-8',newline='\n') as stream:
-              stream.write(str(selected.parent)+'\n')
-          print('LENOVO_GIT_CLIENT_READY')
+
+  inventory:
+    needs: admit
+    if: needs.admit.result == 'success'
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
+    environment: DEV
+    timeout-minutes: 6
+    env:
+      DEPLOYMENT_ENV: DEV
+      CORRELATION_ID: lenovo-control-plane-pickup-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
       - name: Checkout exact source without credentials
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
@@ -126,7 +95,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: ${{ steps.admit.outputs.rules_sha }}
+          ref: ${{ needs.admit.outputs.rules_sha }}
           path: _rules
           persist-credentials: false
       - name: Bootstrap governed physical session
