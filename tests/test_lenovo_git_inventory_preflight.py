@@ -20,7 +20,8 @@ RESOLVE = next(step["run"] for step in STEPS if step["name"] == "Resolve fixed e
 
 
 def execute_resolver(tmp: Path, *, host="DESKTOP-RP23OGS", runner="DESKTOP-RP23OGS-runtime",
-                     git_present=False, fake_version="git version 2.49.0.windows.1"):
+                     git_present=False, fake_version="git version 2.49.0.windows.1",
+                     recorded_calls=None):
     system = tmp / "system"
     candidate = system / "Git" / "cmd" / "git.exe"
     if git_present:
@@ -38,7 +39,7 @@ def execute_resolver(tmp: Path, *, host="DESKTOP-RP23OGS", runner="DESKTOP-RP23O
         "ProgramData": str(tmp / "programdata"),
         "GITHUB_PATH": str(output_path),
     }
-    calls = []
+    calls = recorded_calls if recorded_calls is not None else []
     def safe_probe(cmd, **kwargs):
         calls.append(cmd)
         return SimpleNamespace(returncode=0, stdout=fake_version, stderr="")
@@ -64,9 +65,10 @@ def test_permanent_gate_precedes_checkout_and_preserves_git_resolver():
 def test_missing_git_blocks_before_any_executable_or_path_change():
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
-        with patch("subprocess.run", side_effect=AssertionError("must not execute absent Git")):
-            with pytest.raises(RuntimeError, match="LENOVO_GIT_PREFLIGHT_MISSING"):
-                execute_resolver(tmp, git_present=False)
+        calls = []
+        with pytest.raises(RuntimeError, match="LENOVO_GIT_PREFLIGHT_MISSING"):
+            execute_resolver(tmp, git_present=False, recorded_calls=calls)
+        assert calls == [], "Absent Git must not be executed"
         assert (tmp / "runner-path-file").read_text(encoding="utf-8") == ""
 
 
@@ -102,6 +104,8 @@ def test_replay_missing_git_does_not_change_state_or_invoke_processes():
     with tempfile.TemporaryDirectory() as t:
         tmp = Path(t)
         for _ in range(2):
+            calls = []
             with pytest.raises(RuntimeError, match="LENOVO_GIT_PREFLIGHT_MISSING"):
-                execute_resolver(tmp)
+                execute_resolver(tmp, recorded_calls=calls)
+            assert calls == [], "Replay must not execute a program"
             assert (tmp / "runner-path-file").read_text(encoding="utf-8") == ""
