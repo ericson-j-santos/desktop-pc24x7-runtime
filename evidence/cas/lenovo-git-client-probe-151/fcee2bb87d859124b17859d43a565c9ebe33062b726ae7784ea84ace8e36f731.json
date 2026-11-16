@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "kind": "repair",
+  "issue": 151,
+  "source_mode": "model_builder",
+  "model_id": "gpt-5.6-sol",
+  "model_calls": 1,
+  "base_sha": "e1774a78d93ae586717c47a972312cff37107a21",
+  "produced_sha": "bc8b7d7421a735adf1868875a06d64d9a4f8f71c",
+  "rules_sha": "58dcd4200f412a866278027ba9e433439a03f3b3",
+  "request_id": "lenovo-git-client-probe-20261115",
+  "idempotency_key": "desktop-pc24x7-runtime:lenovo-git-client-probe:151:e1774a78",
+  "correlation_id": "lenovo-git-client-probe-151-20261115",
+  "baseline_run_id": 43793281463,
+  "baseline_error": "LENOVO_GIT_CLIENT_UNAVAILABLE",
+  "patch_sha256": "f006b2ebee697aa8a7a03d759b39cd2c30327c4b534f120a0c9d1692db64b56c",
+  "physical_execution": false,
+  "mutation_authorized": false,
+  "files": {
+    ".github/workflows/lenovo-git-client-readonly-probe.yml": {
+      "bytes": 4910,
+      "sha256": "9bb0f641fa411cc43008326eb00633315a57a959961c87d42aefd5132537a13f",
+      "git_blob_sha1": "dbe161fddaba6a55c8c7c1ded5feb91e48bc092a"
+    },
+    "tests/test_lenovo_git_client_readonly_probe.py": {
+      "bytes": 3772,
+      "sha256": "4d7dbe9fd79bdd5872eed53ede2323bf6b8d3be2857ff9281c65a199a1398ea6",
+      "git_blob_sha1": "8a4bd3714f5261039ab9dbe2aff6cb7d9529db66"
+    }
+  }
+}
