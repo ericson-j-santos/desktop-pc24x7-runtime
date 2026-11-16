@@ -67,8 +67,11 @@ jobs:
       - name: Discover fixed Git locations without mutation
         shell: python
         run: |
-          import json, os, re, shutil, subprocess
+          import json, os, shutil
           from pathlib import Path
+          if (os.environ.get('COMPUTERNAME')!='DESKTOP-RP23OGS' or
+              os.environ.get('RUNNER_NAME')!='DESKTOP-RP23OGS-runtime'):
+              raise RuntimeError('LENOVO_GIT_DISCOVERY_HOST_REJECTED')
           def root(env):
               return Path(os.environ[env]) if os.environ.get(env) else None
           candidates = {}
@@ -87,27 +90,18 @@ jobs:
           if local:
               desktop=local/'GitHubDesktop'
               if desktop.is_dir() and not desktop.is_symlink():
-                  for app in sorted(desktop.glob('app-*'))[:12]:
+                  for index,app in enumerate(sorted(desktop.glob('app-*'))[:12]):
                       if app.is_dir() and not app.is_symlink():
                           for suffix in [('resources','app','git','cmd','git.exe'),
                                          ('resources','app','git','mingw64','bin','git.exe')]:
-                              candidates['github_desktop_'+app.name+'_'+suffix[-2]]=app.joinpath(*suffix)
+                              candidates['github_desktop_'+str(index)+'_'+suffix[-2]]=app.joinpath(*suffix)
           results=[]
           for label,candidate in candidates.items():
               state='missing'
-              if candidate is not None and candidate.is_file() and not candidate.is_symlink():
-                  state='file_present'
-                  try:
-                      probe=subprocess.run([str(candidate),'--version'],shell=False,
-                          check=False,capture_output=True,text=True,timeout=8)
-                      if probe.returncode==0 and re.fullmatch(
-                          r'git version 2\.[0-9]+\.[0-9]+(?:\.windows\.[0-9]+)?',
-                          probe.stdout.strip()):
-                          state='valid_git'
-                      else:
-                          state='invalid_version'
-                  except (OSError,subprocess.TimeoutExpired):
-                      state='not_executable'
+              if candidate is not None and candidate.is_symlink():
+                  state='link_rejected'
+              elif candidate is not None and candidate.is_file():
+                  state='file_present_unverified'
               results.append({'candidate':label,'state':state})
           detected=shutil.which('git')
           print(json.dumps({'contract':'lenovo-git-discovery-readonly-v1',
@@ -115,5 +109,3 @@ jobs:
               'runner':os.environ.get('RUNNER_NAME')=='DESKTOP-RP23OGS-runtime',
               'path_lookup_present':bool(detected),
               'candidates':results,'mutation_performed':False},sort_keys=True))
-          if os.environ.get('COMPUTERNAME')!='DESKTOP-RP23OGS' or os.environ.get('RUNNER_NAME')!='DESKTOP-RP23OGS-runtime':
-              raise RuntimeError('LENOVO_GIT_DISCOVERY_HOST_REJECTED')
