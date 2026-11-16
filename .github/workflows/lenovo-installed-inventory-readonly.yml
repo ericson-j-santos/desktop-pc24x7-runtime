@@ -82,6 +82,10 @@ jobs:
         run: |
           import os,re,subprocess
           from pathlib import Path
+          if (os.environ.get('COMPUTERNAME')!='DESKTOP-RP23OGS' or
+              os.environ.get('RUNNER_NAME')!='DESKTOP-RP23OGS-runtime' or
+              os.environ.get('DEPLOYMENT_ENV')!='DEV'):
+              raise RuntimeError('LENOVO_GIT_PREFLIGHT_HOST_REJECTED')
           def fixed(root_name,*parts):
               root=str(os.environ.get(root_name) or '').strip()
               return Path(root).joinpath(*parts) if root else None
@@ -91,7 +95,7 @@ jobs:
               fixed('LOCALAPPDATA','Programs','Git','cmd','git.exe'),
               fixed('ProgramData','ReqSys','MinGit','cmd','git.exe'),
           ]
-          selected=None
+          present=[]
           seen=set()
           for candidate in candidates:
               if candidate is None:
@@ -100,8 +104,13 @@ jobs:
               if normalized in seen:
                   continue
               seen.add(normalized)
-              if not candidate.is_file() or candidate.is_symlink():
+              if candidate.is_symlink() or not candidate.is_file():
                   continue
+              present.append(candidate)
+          if not present:
+              raise RuntimeError('LENOVO_GIT_PREFLIGHT_MISSING')
+          selected=None
+          for candidate in present:
               probe=subprocess.run([str(candidate),'--version'],check=False,shell=False,
                                    capture_output=True,text=True,timeout=10)
               if (probe.returncode==0 and
