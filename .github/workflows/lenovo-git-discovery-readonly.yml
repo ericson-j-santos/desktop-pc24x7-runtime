@@ -1,0 +1,119 @@
+name: Lenovo Git discovery DEV (read-only)
+on:
+  workflow_dispatch:
+    inputs:
+      expected_source_sha:
+        description: Exact certified main SHA
+        required: true
+        type: string
+      confirmation:
+        description: Read-only discovery
+        required: true
+        type: choice
+        options: [READ_ONLY_LENOVO_GIT_DISCOVERY]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: lenovo-git-discovery-readonly-dev
+  cancel-in-progress: false
+jobs:
+  discover:
+    if: github.actor == 'ericson-j-santos' && github.triggering_actor == 'ericson-j-santos' && github.ref == 'refs/heads/main' && vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha
+    runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-rp23ogs]
+    environment: DEV
+    timeout-minutes: 4
+    steps:
+      - name: Admit owner, exact main, SHA and CI
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          EXPECTED_SOURCE_SHA: ${{ inputs.expected_source_sha }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        with:
+          script: |
+            const repo='ericson-j-santos/desktop-pc24x7-runtime';
+            const sha=process.env.EXPECTED_SOURCE_SHA || '';
+            if(context.eventName!=='workflow_dispatch' ||
+               context.actor!=='ericson-j-santos' ||
+               context.repo.owner+'/'+context.repo.repo!==repo ||
+               context.ref!=='refs/heads/main' ||
+               process.env.GITHUB_RUN_ATTEMPT!=='1' ||
+               process.env.CONFIRMATION!=='READ_ONLY_LENOVO_GIT_DISCOVERY' ||
+               !/^[a-f0-9]{40}$/.test(sha) || context.sha!==sha)
+              throw Error('LENOVO_GIT_DISCOVERY_ADMISSION_REJECTED');
+            const {data:main}=await github.rest.repos.getBranch({...context.repo,branch:'main'});
+            if(main.commit.sha!==sha) throw Error('LENOVO_GIT_DISCOVERY_MAIN_MOVED');
+            const {data:runs}=await github.rest.actions.listWorkflowRuns({
+              ...context.repo,workflow_id:'ci.yml',head_sha:sha,
+              branch:'main',event:'push',status:'completed',per_page:100
+            });
+            const passed=runs.workflow_runs.filter(x=>x.head_sha===sha &&
+              x.head_branch==='main' && x.event==='push' &&
+              x.conclusion==='success' && x.repository?.full_name===repo);
+            if(passed.length!==1) throw Error('LENOVO_GIT_DISCOVERY_CI_REQUIRED');
+            const {data:jobs}=await github.rest.actions.listJobsForWorkflowRun({
+              ...context.repo,run_id:passed[0].id,filter:'latest',per_page:100
+            });
+            if(jobs.total_count!==jobs.jobs.length) throw Error('LENOVO_GIT_DISCOVERY_CI_INCOMPLETE');
+            for(const [name,label] of [['Python compile and tests','windows-latest'],
+                                       ['Portable Linux compile and tests','ubuntu-latest']]){
+              const found=jobs.jobs.filter(j=>j.name===name);
+              if(found.length!==1 || found[0].conclusion!=='success' ||
+                 !found[0].labels?.includes(label) ||
+                 !found[0].steps?.some(s=>s.name==='Unit and negative-control tests' &&
+                   s.conclusion==='success'))
+                throw Error('LENOVO_GIT_DISCOVERY_CI_GATES_REQUIRED');
+            }
+      - name: Discover fixed Git locations without mutation
+        shell: python
+        run: |
+          import json, os, re, shutil, subprocess
+          from pathlib import Path
+          def root(env):
+              return Path(os.environ[env]) if os.environ.get(env) else None
+          candidates = {}
+          for label,env,parts in [
+              ('system','ProgramFiles',('Git','cmd','git.exe')),
+              ('system64','ProgramW6432',('Git','cmd','git.exe')),
+              ('system32','ProgramFiles(x86)',('Git','cmd','git.exe')),
+              ('user','LOCALAPPDATA',('Programs','Git','cmd','git.exe')),
+              ('mingit','ProgramData',('ReqSys','MinGit','cmd','git.exe')),
+              ('portable','LOCALAPPDATA',('Programs','Git','bin','git.exe')),
+              ('vscode','LOCALAPPDATA',('Programs','Microsoft VS Code','resources','app','extensions','git','bin','git.exe')),
+          ]:
+              base=root(env)
+              candidates[label]=base.joinpath(*parts) if base else None
+          local=root('LOCALAPPDATA')
+          if local:
+              desktop=local/'GitHubDesktop'
+              if desktop.is_dir() and not desktop.is_symlink():
+                  for app in sorted(desktop.glob('app-*'))[:12]:
+                      if app.is_dir() and not app.is_symlink():
+                          for suffix in [('resources','app','git','cmd','git.exe'),
+                                         ('resources','app','git','mingw64','bin','git.exe')]:
+                              candidates['github_desktop_'+app.name+'_'+suffix[-2]]=app.joinpath(*suffix)
+          results=[]
+          for label,candidate in candidates.items():
+              state='missing'
+              if candidate is not None and candidate.is_file() and not candidate.is_symlink():
+                  state='file_present'
+                  try:
+                      probe=subprocess.run([str(candidate),'--version'],shell=False,
+                          check=False,capture_output=True,text=True,timeout=8)
+                      if probe.returncode==0 and re.fullmatch(
+                          r'git version 2\.[0-9]+\.[0-9]+(?:\.windows\.[0-9]+)?',
+                          probe.stdout.strip()):
+                          state='valid_git'
+                      else:
+                          state='invalid_version'
+                  except (OSError,subprocess.TimeoutExpired):
+                      state='not_executable'
+              results.append({'candidate':label,'state':state})
+          detected=shutil.which('git')
+          print(json.dumps({'contract':'lenovo-git-discovery-readonly-v1',
+              'host':os.environ.get('COMPUTERNAME')=='DESKTOP-RP23OGS',
+              'runner':os.environ.get('RUNNER_NAME')=='DESKTOP-RP23OGS-runtime',
+              'path_lookup_present':bool(detected),
+              'candidates':results,'mutation_performed':False},sort_keys=True))
+          if os.environ.get('COMPUTERNAME')!='DESKTOP-RP23OGS' or os.environ.get('RUNNER_NAME')!='DESKTOP-RP23OGS-runtime':
+              raise RuntimeError('LENOVO_GIT_DISCOVERY_HOST_REJECTED')
