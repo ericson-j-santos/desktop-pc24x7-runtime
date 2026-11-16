@@ -1,0 +1,149 @@
+name: Lenovo Git discovery independent hosted validator
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+permissions:
+  contents: read
+concurrency:
+  group: lenovo-git-independent-validator-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+jobs:
+  independently_validate:
+    if: github.repository == 'ericson-j-santos/desktop-pc24x7-runtime' && github.event.pull_request.number == 155 && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'repair/lenovo-git-discovery-readonly-43793281463'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout PR head in a separate GitHub-hosted executor
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install pinned YAML parser
+        shell: bash
+        run: python3 -m pip install --disable-pip-version-check PyYAML==6.0.3
+      - name: Independently verify SHA, isolated runner, discovery cases and replay
+        shell: python
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          import ast, contextlib, io, json, os, re, shutil, subprocess, tempfile
+          from pathlib import Path
+          from unittest.mock import patch
+          import yaml
+
+          def git(*args):
+              return subprocess.check_output(('git', *args), text=True).strip()
+
+          head=os.environ['PR_HEAD_SHA']
+          base='e1774a78d93ae586717c47a972312cff37107a21'
+          expected={
+              '.github/workflows/lenovo-git-discovery-readonly.yml',
+              '.github/workflows/lenovo-git-independent-validation.yml',
+              'tests/test_lenovo_git_discovery_readonly_workflow.py',
+              'tests/test_runner_selection_isolation.py',
+          }
+          if not re.fullmatch(r'[0-9a-f]{40}',head) or git('rev-parse','HEAD')!=head:
+              raise RuntimeError('LENOVO_VALIDATOR_SHA_MISMATCH')
+          if os.environ['PR_BASE_SHA']!=base:
+              raise RuntimeError('LENOVO_VALIDATOR_BASE_MOVED')
+          remote=git('remote','get-url','origin')
+          if remote.removesuffix('.git')!='https://github.com/ericson-j-santos/desktop-pc24x7-runtime':
+              raise RuntimeError('LENOVO_VALIDATOR_ORIGIN_REJECTED')
+          if git('status','--porcelain'):
+              raise RuntimeError('LENOVO_VALIDATOR_DIRTY_CHECKOUT')
+          subprocess.run(('git','merge-base','--is-ancestor',base,head),check=True)
+          changed=set(git('diff','--name-only',base,head).splitlines())
+          if changed!=expected:
+              raise RuntimeError('LENOVO_VALIDATOR_UNEXPECTED_DIFF')
+          path=Path('.github/workflows/lenovo-git-discovery-readonly.yml')
+          source=path.read_text(encoding='utf-8')
+          wf=yaml.load(source,Loader=yaml.BaseLoader)
+          job=wf['jobs']['discover']
+          if set(wf['on'])!={'workflow_dispatch'} or set(wf['permissions'])!={'contents','actions'}:
+              raise RuntimeError('LENOVO_VALIDATOR_MANUAL_OR_PERMISSIONS')
+          if job['runs-on']!=['self-hosted','Windows','X64','pc24x7',
+                              'desktop-runtime','runtime-dev','desktop-rp23ogs']:
+              raise RuntimeError('LENOVO_VALIDATOR_HOST_SELECTOR')
+          if job['environment']!='DEV' or len(job['steps'])!=2:
+              raise RuntimeError('LENOVO_VALIDATOR_UNEXPECTED_STEPS')
+          condition=job['if']
+          for guard in ("github.actor == 'ericson-j-santos'",
+                        "github.triggering_actor == 'ericson-j-santos'",
+                        "github.ref == 'refs/heads/main'",
+                        'vars.REQSYS_PC24X7_COST_ZERO_CERTIFIED_SHA == github.sha'):
+              if guard not in condition:
+                  raise RuntimeError('LENOVO_VALIDATOR_JOB_GUARD_MISSING')
+          admission=job['steps'][0]['with']['script']
+          for guard in ("context.sha!==sha", "GITHUB_RUN_ATTEMPT!=='1'",
+                        "main.commit.sha!==sha", "event:'push'",
+                        "head_sha:sha", "LENOVO_GIT_DISCOVERY_CI_GATES_REQUIRED"):
+              if guard not in admission:
+                  raise RuntimeError('LENOVO_VALIDATOR_ADMISSION_GUARD_MISSING')
+          if job['steps'][0]['uses']!='actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea':
+              raise RuntimeError('LENOVO_VALIDATOR_ACTION_UNPINNED')
+          scan=job['steps'][1]['run']
+          tree=ast.parse(scan)
+          imports={alias.name.split('.')[0] for node in ast.walk(tree)
+                   if isinstance(node,(ast.Import,ast.ImportFrom))
+                   for alias in (node.names if isinstance(node,ast.Import) else [type('Alias',(),{'name':node.module or ''})()])}
+          if not imports.issubset({'json','os','shutil','pathlib'}):
+              raise RuntimeError('LENOVO_VALIDATOR_UNAUTHORIZED_IMPORT')
+          forbidden=('subprocess','os.system','os.popen','exec(','eval(',
+                     'write_text(','write_bytes(','open(','rglob(','os.walk')
+          if any(word in scan for word in forbidden):
+              raise RuntimeError('LENOVO_VALIDATOR_MUTATION_OR_EXECUTION')
+          if "sorted(desktop.glob('app-*'))[:12]" not in scan:
+              raise RuntimeError('LENOVO_VALIDATOR_UNBOUNDED_SEARCH')
+          if scan.index("LENOVO_GIT_DISCOVERY_HOST_REJECTED")>scan.index('candidates = {}'):
+              raise RuntimeError('LENOVO_VALIDATOR_HOST_CHECK_LATE')
+
+          def probe(root,computer='DESKTOP-RP23OGS'):
+              environ={'COMPUTERNAME':computer,'RUNNER_NAME':'DESKTOP-RP23OGS-runtime',
+                       'ProgramFiles':str(root),'ProgramW6432':str(root),
+                       'ProgramFiles(x86)':str(root),'LOCALAPPDATA':str(root),
+                       'ProgramData':str(root)}
+              output=io.StringIO()
+              with patch.dict(os.environ,environ),patch('shutil.which',return_value=None):
+                  with patch('subprocess.run',side_effect=AssertionError('unexpected executable run')):
+                      with contextlib.redirect_stdout(output):
+                          exec(scan,{'__name__':'__main__'})
+              return json.loads(output.getvalue())
+          with tempfile.TemporaryDirectory() as d:
+              root=Path(d)
+              absent=probe(root)
+              byname=lambda value: {item['candidate']:item['state']
+                                    for item in value['candidates']}
+              if (absent['mutation_performed'] is not False or
+                  absent['host'] is not True or absent['runner'] is not True or
+                  byname(absent)['system']!='missing'):
+                  raise RuntimeError('LENOVO_VALIDATOR_ABSENT_CASE')
+              binary=root/'Git'/'cmd'/'git.exe'
+              binary.parent.mkdir(parents=True,exist_ok=True)
+              binary.write_bytes(b'not-real-Git-and-must-not-execute')
+              positive=probe(root)
+              if byname(positive)['system']!='file_present_unverified':
+                  raise RuntimeError('LENOVO_VALIDATOR_PRESENT_CASE')
+              if probe(root)!=positive:
+                  raise RuntimeError('LENOVO_VALIDATOR_REPLAY_NOT_IDEMPOTENT')
+              binary.unlink()
+              target=root/'sample'
+              target.write_bytes(b'not-git')
+              binary.symlink_to(target)
+              if byname(probe(root))['system']!='link_rejected':
+                  raise RuntimeError('LENOVO_VALIDATOR_SYMLINK_ACCEPTED')
+              with patch('pathlib.Path.is_file',side_effect=AssertionError('read-before-host-guard')):
+                  try:
+                      probe(root,computer='UNAUTHORIZED')
+                  except RuntimeError as exc:
+                      if str(exc)!='LENOVO_GIT_DISCOVERY_HOST_REJECTED':
+                          raise
+                  else:
+                      raise RuntimeError('LENOVO_VALIDATOR_NEGATIVE_HOST_ACCEPTED')
+          print(json.dumps({'result':'LENOVO_INDEPENDENT_VALIDATOR_OK',
+                            'head_sha':head,'base_sha':base,
+                            'checked_files':len(expected),'positive':True,
+                            'negative':True,'symlink_rejected':True,
+                            'replay_idempotent':True,'physical_execution':False,
+                            'git_executed_on_host':False},sort_keys=True))
