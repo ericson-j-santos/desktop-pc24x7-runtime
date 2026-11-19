@@ -189,7 +189,7 @@ class CurrentRunCodeSnapshotBindingTests(unittest.TestCase):
         current = m.code_snapshot_name(
             "42927770513", "1", workflow=m.SEQUENTIAL_WORKFLOW,
         )
-        self.assertEqual(current, "verified-code-33f312d0ac4c-42927770513-1")
+        self.assertEqual(current, f"verified-code-{m.EXPECTED_INSTALLED_SHA[:12]}-42927770513-1")
         self.assertEqual(
             m.code_snapshot_name("42927770513", "1", workflow=m.LEGACY_WORKFLOW),
             m.SOURCE_CODE_BACKUP,

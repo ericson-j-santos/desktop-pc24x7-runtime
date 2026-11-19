@@ -131,7 +131,7 @@ class ShadowCodeLineageTests(unittest.TestCase):
                         )
                     start.assert_not_called()
             self.assertEqual(
-                accepted, ["verified-code-33f312d0ac4c-42927770513-1"],
+                accepted, [f"verified-code-{shadow.EXPECTED_INSTALLED_SHA[:12]}-42927770513-1"],
             )
 
 
