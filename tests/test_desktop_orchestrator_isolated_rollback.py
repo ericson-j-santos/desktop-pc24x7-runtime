@@ -13,6 +13,9 @@ import desktop_orchestrator_isolated_rollback as m
 
 
 class RollbackContractTests(unittest.TestCase):
+    def test_pinned_installed_sha_matches_independent_physical_readback(self):
+        self.assertEqual(m.EXPECTED_INSTALLED_SHA, "ad3a3d315791afb618e6d61ecb33f214c0465925")
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)

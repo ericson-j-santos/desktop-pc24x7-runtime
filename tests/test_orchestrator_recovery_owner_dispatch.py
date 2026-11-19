@@ -55,9 +55,13 @@ const github = { rest: { repos: {
       : (p.main_head ?? p.main)
   } } })
 } } };
+const core = {setOutput: (key, value) => {
+  if (key !== 'canonical_rules_sha' || value !== (p.rules_head ?? p.rules))
+    throw new Error('UNEXPECTED_GATE_OUTPUT');
+}};
 (async () => {
   try {
-    await new AsyncFunction('context', 'github', p.script)(context, github);
+    await new AsyncFunction('context', 'github', 'core', p.script)(context, github, core);
     process.stdout.write('ADMITTED');
   } catch (error) {
     process.stdout.write(String(error.message || error));
@@ -100,7 +104,14 @@ def test_manual_dispatch_is_fixed_to_public_owner_and_readback(path, scope, lega
     assert "command_gateway.py" in serialized
     assert "'--risk', '2'" in serialized
     assert "origin/main" in serialized
-    assert "ref: " + RULES in (ROOT / path).read_text(encoding="utf-8")
+    text = (ROOT / path).read_text(encoding="utf-8")
+    if "isolated" in path:
+        assert physical["if"] == "github.event_name == 'workflow_dispatch'"
+        assert "ref: ${{ needs.contract.outputs.canonical_rules_sha }}" in text
+        assert jobs["contract"]["outputs"]["canonical_rules_sha"] == "${{ steps.admit.outputs.canonical_rules_sha }}"
+        assert jobs["contract"]["steps"][0]["id"] == "admit"
+    else:
+        assert "ref: " + RULES in text
     uploads = [x for x in physical["steps"] if "upload-artifact" in x.get("uses", "")]
     assert len(uploads) == 1
     assert "github.event_name != 'workflow_dispatch'" in uploads[0]["if"]

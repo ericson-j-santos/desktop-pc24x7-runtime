@@ -37,8 +37,11 @@ jobs:
     name: Windows isolated restore positive, negative and replay
     runs-on: windows-latest
     timeout-minutes: 6
+    outputs:
+      canonical_rules_sha: ${{ steps.admit.outputs.canonical_rules_sha }}
     steps:
       - name: Admit owner, current main, rules and free public compute
+        id: admit
         uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
         with:
           script: |
@@ -72,10 +75,10 @@ jobs:
             const { data: currentRules } = await github.rest.repos.getBranch({
               owner: 'ericson-j-santos', repo: 'chatgpt-operational-rules', branch: 'main',
             });
-            if (currentRules.commit.sha !== '86abe65b22781c2f608a7d7286ce3a28cd48aaaf' ||
-                inp.expected_rules_sha !== currentRules.commit.sha) {
+            if (inp.expected_rules_sha !== currentRules.commit.sha) {
               throw new Error('RECOVERY_RULES_SHA_MOVED');
             }
+            core.setOutput('canonical_rules_sha', currentRules.commit.sha);
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
@@ -91,6 +94,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   physical_backup:
+    if: github.event_name == 'workflow_dispatch'
     name: Copy fixed code backup and verify isolated restore on Desktop
     needs: contract
     runs-on: [self-hosted, Windows, X64, pc24x7, desktop-runtime, runtime-dev, desktop-pdqk954]
@@ -104,7 +108,7 @@ jobs:
         uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           repository: ericson-j-santos/chatgpt-operational-rules
-          ref: 86abe65b22781c2f608a7d7286ce3a28cd48aaaf
+          ref: ${{ needs.contract.outputs.canonical_rules_sha }}
           path: _rules
           persist-credentials: false
       - name: Bootstrap exclusive worktree and validated runtime identity

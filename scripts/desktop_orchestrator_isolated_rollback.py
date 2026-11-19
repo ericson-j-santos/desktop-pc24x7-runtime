@@ -20,7 +20,9 @@ from typing import Any, Callable
 HOST = "DESKTOP-PDQK954"
 REPO = "ericson-j-santos/desktop-pc24x7-runtime"
 RUNNER = "DESKTOP-PDQK954-runtime"
-EXPECTED_INSTALLED_SHA = "33f312d0ac4c25d8420d4589fa0e8bc21d943ebd"
+# Pinned to independent readback: Desktop supervisor workflow run #44597629401.
+# A physical change in the installed SHA must fail closed until this pin is revalidated.
+EXPECTED_INSTALLED_SHA = "ad3a3d315791afb618e6d61ecb33f214c0465925"
 RUNTIME_ROOT = Path(r"C:\dev\chatgpt-workers\reqsys-orchestrator-24x7-runtime")
 CONFIRM = "VERIFY-DESKTOP-ORCHESTRATOR-ISOLATED-ROLLBACK-DEV"
 MANIFEST = "code-snapshot-manifest.json"
