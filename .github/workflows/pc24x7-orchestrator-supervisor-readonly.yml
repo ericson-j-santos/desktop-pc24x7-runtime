@@ -93,7 +93,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_orchestrator_supervisor_*.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Native publisher inventory: positive, negative, replay and privacy tests
+      - name: Native publisher inventory positive, negative, replay and privacy tests
         if: inputs.probe_mode == 'reqsys_locator'
         shell: powershell
         run: |
