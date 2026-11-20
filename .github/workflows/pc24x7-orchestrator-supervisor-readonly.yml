@@ -3,6 +3,13 @@ name: Desktop Orchestrator Supervisor Read-only Preflight
 on:
   # Explicit owner action only; code changes and schedule never probe a physical host.
   workflow_dispatch:
+    inputs:
+      probe_mode:
+        description: 'Leitura Risk1 fixa: supervisor ou publicador ReqSys DEV'
+        required: true
+        type: choice
+        default: supervisor
+        options: [supervisor, reqsys_locator]
 
 permissions:
   contents: read
@@ -18,6 +25,8 @@ jobs:
     timeout-minutes: 6
     outputs:
       canonical_rules_sha: ${{ steps.admit.outputs.canonical_rules_sha }}
+      reqsys_sha: ${{ steps.reqsys.outputs.reqsys_sha }}
+      publisher_sha256: ${{ steps.reqsys.outputs.publisher_sha256 }}
     steps:
       - name: Admit owner, main and live immutable rules
         id: admit
@@ -28,8 +37,14 @@ jobs:
                 context.ref !== 'refs/heads/main' ||
                 context.actor !== context.repo.owner ||
                 context.repo.owner !== 'ericson-j-santos' ||
-                context.repo.repo !== 'desktop-pc24x7-runtime') {
+                context.repo.repo !== 'desktop-pc24x7-runtime' ||
+                process.env.GITHUB_RUN_ATTEMPT !== '1' ||
+                process.env.GITHUB_TRIGGERING_ACTOR !== 'ericson-j-santos') {
               throw new Error('READONLY_MANUAL_SCOPE_DENIED');
+            }
+            const mode = context.payload.inputs?.probe_mode || 'supervisor';
+            if (!['supervisor', 'reqsys_locator'].includes(mode)) {
+              throw new Error('READONLY_MODE_NOT_ALLOWED');
             }
             const { data: main } = await github.rest.repos.getBranch({
               owner: context.repo.owner, repo: context.repo.repo, branch: 'main',
@@ -41,6 +56,30 @@ jobs:
             const sha = String(rules.commit.sha || '').toLowerCase();
             if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error('READONLY_RULES_SHA_INVALID');
             core.setOutput('canonical_rules_sha', sha);
+      - name: Bind current ReqSys source and public publisher SHA-256 for locator mode
+        if: inputs.probe_mode == 'reqsys_locator'
+        id: reqsys
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        with:
+          script: |
+            const crypto = require('crypto');
+            const owner='ericson-j-santos', repo='reqsys-v2-enterprise-real';
+            const {data: main} = await github.rest.repos.getBranch({owner,repo,branch:'main'});
+            const sha = String(main.commit.sha || '');
+            if (!/^[0-9a-f]{40}$/.test(sha)) throw Error('REQSYS_MAIN_SHA_INVALID');
+            const {data: publisher} = await github.rest.repos.getContent({
+              owner, repo, path:'scripts/pc24x7_dev_locator_publisher.py', ref:sha
+            });
+            if (publisher.type !== 'file' || publisher.encoding !== 'base64' ||
+                typeof publisher.content !== 'string') {
+              throw Error('REQSYS_PUBLISHER_SOURCE_UNAVAILABLE');
+            }
+            const raw = Buffer.from(publisher.content.replace(/\s/g,''), 'base64');
+            if (raw.length < 1024 || raw.length > 65536) {
+              throw Error('REQSYS_PUBLISHER_SOURCE_SIZE_INVALID');
+            }
+            core.setOutput('reqsys_sha', sha);
+            core.setOutput('publisher_sha256', crypto.createHash('sha256').update(raw).digest('hex'));
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09
         with:
           persist-credentials: false
@@ -53,6 +92,12 @@ jobs:
           python -m py_compile scripts/orchestrator_supervisor_readonly_probe.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m unittest discover -s tests -p test_orchestrator_supervisor_*.py -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Native publisher inventory: positive, negative, replay and privacy tests
+        if: inputs.probe_mode == 'reqsys_locator'
+        shell: powershell
+        run: |
+          python -B -m unittest discover -s tests -p test_reqsys_dev_locator_risk1_inventory.py -v
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
   physical_readback:
@@ -72,6 +117,23 @@ jobs:
           ref: ${{ needs.contract.outputs.canonical_rules_sha }}
           path: _rules
           persist-credentials: false
+      - name: Recheck ReqSys main SHA before physical locator inventory
+        if: inputs.probe_mode == 'reqsys_locator'
+        uses: actions/github-script@60a0d83039c74a4aee543508d2ffcb1c3799cdea
+        env:
+          EXPECTED_REQSYS_SHA: ${{ needs.contract.outputs.reqsys_sha }}
+          EXPECTED_PUBLISHER_SHA256: ${{ needs.contract.outputs.publisher_sha256 }}
+        with:
+          script: |
+            const sha = process.env.EXPECTED_REQSYS_SHA || '';
+            if (!/^[0-9a-f]{40}$/.test(sha) ||
+                !/^[0-9a-f]{64}$/.test(process.env.EXPECTED_PUBLISHER_SHA256 || '')) {
+              throw Error('REQSYS_LOCATOR_SOURCE_BINDING_MISSING');
+            }
+            const {data: main} = await github.rest.repos.getBranch({
+              owner:'ericson-j-santos',repo:'reqsys-v2-enterprise-real',branch:'main'
+            });
+            if (main.commit.sha !== sha) throw Error('REQSYS_MAIN_SHA_DRIFT');
       - name: Bootstrap fixed identity, head, and session
         id: session
         shell: powershell
@@ -101,6 +163,7 @@ jobs:
           "target_path=$($session.target_path)" | Add-Content -Path $env:GITHUB_OUTPUT
           "session_id=$($session.session_id)" | Add-Content -Path $env:GITHUB_OUTPUT
       - name: Read only fixed version, status, pending marker and local worker
+        if: inputs.probe_mode == 'supervisor'
         shell: powershell
         env:
           TARGET_PATH: ${{ steps.session.outputs.target_path }}
@@ -161,8 +224,71 @@ jobs:
             $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $file -Encoding utf8
           }
           if ($result.result -ne 'SUPERVISOR_READBACK_OBSERVED') { throw 'SUPERVISOR_READBACK_BLOCKED' }
+      - name: Read fixed ReqSys DEV locator publisher, task and ingress via Gateway Risk1
+        if: inputs.probe_mode == 'reqsys_locator'
+        shell: powershell
+        env:
+          TARGET_PATH: ${{ steps.session.outputs.target_path }}
+          SESSION_ID: ${{ steps.session.outputs.session_id }}
+          REQSYS_SHA: ${{ needs.contract.outputs.reqsys_sha }}
+          PUBLISHER_SHA256: ${{ needs.contract.outputs.publisher_sha256 }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $python = Join-Path $env:USERPROFILE '.cache\codex-runtimes\codex-primary-runtime\dependencies\python\python.exe'
+          if (-not (Test-Path -LiteralPath $python -PathType Leaf)) { throw 'PINNED_PYTHON_MISSING' }
+          $gateway = Join-Path $env:GITHUB_WORKSPACE '_rules\scripts\command_gateway.py'
+          $policy = Join-Path $env:GITHUB_WORKSPACE '_rules\config\command-gateway.policy.json'
+          $cid = "reqsys1596-locator-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          $args = @('--policy', $policy, '--correlation-id', $cid,
+            'run', '--cwd', $env:TARGET_PATH, '--session-id', $env:SESSION_ID,
+            '--risk', '1', '--timeout', '60', '--expected-head', $env:GITHUB_SHA,
+            '--', 'python', '-B', 'scripts/reqsys_dev_locator_risk1_inventory.py',
+            '--expected-head', $env:GITHUB_SHA,
+            '--expected-reqsys-sha', $env:REQSYS_SHA,
+            '--expected-publisher-sha256', $env:PUBLISHER_SHA256,
+            '--correlation-id', $cid)
+          $raw = @(& $python $gateway @args)
+          if ($LASTEXITCODE -ne 0 -or -not $raw) { throw 'LOCATOR_RISK1_GATEWAY_BLOCKED' }
+          $event = @($raw)[-1] | ConvertFrom-Json
+          if ($event.result -ne 'ok' -or $event.gateway_exit_code -ne 0 -or
+              $event.state_changed -ne $false -or -not $event.stdout) {
+            throw 'LOCATOR_RISK1_GATEWAY_RECEIPT_INVALID'
+          }
+          $report = ([string]$event.stdout) | ConvertFrom-Json
+          $receiptFile = Join-Path $env:TARGET_PATH 'artifacts\reqsys-dev-locator-readonly\evidence.json'
+          if (-not (Test-Path -LiteralPath $receiptFile -PathType Leaf)) {
+            throw 'LOCATOR_RISK1_EVIDENCE_MISSING'
+          }
+          $readback = Get-Content -LiteralPath $receiptFile -Raw -Encoding UTF8 | ConvertFrom-Json
+          foreach ($r in @($report, $readback)) {
+            if ($r.result -ne 'LOCATOR_RISK1_INVENTORY_OBSERVED' -or
+                $r.host -ne 'DESKTOP-PDQK954' -or
+                $r.repository -ne 'ericson-j-santos/desktop-pc24x7-runtime' -or
+                $r.expected_source_sha -ne $env:GITHUB_SHA -or
+                $r.expected_reqsys_main_sha -ne $env:REQSYS_SHA -or
+                $r.correlation_id -ne $cid -or
+                $r.read_only -ne $true -or $r.ready_for_dev -ne $false -or
+                $r.runtime_deployed_or_modified -ne $false -or
+                $r.secrets_read_or_emitted -ne $false -or
+                $r.locator_signature_independently_verified -ne $false) {
+              throw 'LOCATOR_RISK1_EVIDENCE_IDENTITY_INVALID'
+            }
+          }
+          if ($report.observation_epoch -ne $readback.observation_epoch -or
+              $report.files.publisher_script.sha256 -ne $readback.files.publisher_script.sha256) {
+            throw 'LOCATOR_RISK1_READBACK_CHANGED'
+          }
+          Write-Host 'LOCATOR_RISK1_INVENTORY_OBSERVED_NO_OPERATIONAL_ACCEPTANCE'
+      - name: Upload only sanitized ReqSys DEV locator inventory receipt
+        if: always() && inputs.probe_mode == 'reqsys_locator' && steps.session.outputs.target_path != ''
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: reqsys-dev-locator-risk1-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.session.outputs.target_path }}/artifacts/reqsys-dev-locator-readonly/evidence.json
+          if-no-files-found: error
+          retention-days: 7
       - name: Preserve only sanitized read-only evidence
-        if: always() && steps.session.outputs.target_path != ''
+        if: always() && inputs.probe_mode == 'supervisor' && steps.session.outputs.target_path != ''
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: desktop-orchestrator-supervisor-readonly
