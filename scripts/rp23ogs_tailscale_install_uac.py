@@ -21,6 +21,7 @@ import stat
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 try:
@@ -45,6 +46,112 @@ INSTALLER = Path(r"C:\Windows\System32\msiexec.exe")
 
 class InstallBlocked(RuntimeError):
     pass
+
+
+# Diagnostic only. A user-writable receipt is never authority for installing,
+# declaring UAC approval, package integrity, or successful rollback.
+UAC_RECEIPT_SCHEMA = "pass001-rp23ogs-uac-diagnostic-v1"
+UAC_RECEIPT_NAME = "uac-attempt-diagnostic.json"
+UAC_PHASES = frozenset({
+    "launch_requested", "launch_rejected", "elevated_process_handle_received",
+    "wait_started", "wait_timeout_process_may_continue", "wait_failed",
+    "process_exited", "postcondition_verified", "postcondition_failed",
+})
+
+
+def uac_receipt_path() -> Path:
+    return fixed_cache() / UAC_RECEIPT_NAME
+
+
+def _receipt_payload(operation: str, attempt_id: str, phase: str,
+                     *, detail: str = "") -> dict[str, object]:
+    if operation not in {"install", "rollback"} or phase not in UAC_PHASES:
+        raise InstallBlocked("UAC_DIAGNOSTIC_PHASE_INVALID")
+    if len(attempt_id) != 32 or any(c not in "0123456789abcdef" for c in attempt_id):
+        raise InstallBlocked("UAC_DIAGNOSTIC_ID_INVALID")
+    # All detail strings originate from a closed, non-sensitive allowlist.
+    if detail not in {"", "cancelled", "launch_error", "no_process_handle",
+                      "wait_timeout", "wait_failed", "wait_unexpected",
+                      "msi_nonzero", "reboot_required", "readback_missing",
+                      "exit_code_unavailable", "exit_zero"}:
+        raise InstallBlocked("UAC_DIAGNOSTIC_DETAIL_INVALID")
+    return {"schema": UAC_RECEIPT_SCHEMA, "host": adm.HOST, "environment": "DEV",
+            "operation": operation, "attempt_id": attempt_id, "phase": phase,
+            "detail": detail, "observed_at_utc": datetime.now(timezone.utc).isoformat(),
+            "diagnostic_only": True, "uac_approved": "NOT_ATTESTED",
+            "installation_comproved": False, "rollback_tested": False}
+
+
+def write_uac_diagnostic(operation: str, attempt_id: str, phase: str,
+                         *, detail: str = "") -> None:
+    """Atomic local receipt, never used for admission or independent validation."""
+    target = uac_receipt_path()
+    no_reparse(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists() and (not target.is_file() or target.is_symlink()):
+        raise InstallBlocked("UAC_DIAGNOSTIC_TARGET_INVALID")
+    payload = _receipt_payload(operation, attempt_id, phase, detail=detail)
+    tmp = target.parent / (".uac-receipt-" + uuid.uuid4().hex + ".tmp")
+    no_reparse(tmp)
+    try:
+        with tmp.open("x", encoding="utf-8", newline="\n") as f:
+            json.dump(payload, f, sort_keys=True)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+        no_reparse(target)
+        if target.exists() and (not target.is_file() or target.is_symlink()):
+            raise InstallBlocked("UAC_DIAGNOSTIC_TARGET_INVALID")
+        os.replace(tmp, target)
+    finally:
+        if tmp.exists():
+            tmp.unlink()
+
+
+def read_uac_diagnostic() -> dict[str, object]:
+    """Read only trusted shape, not trusted outcome. Cannot trigger an installer."""
+    path = uac_receipt_path()
+    no_reparse(path)
+    if not path.exists():
+        return {"schema": UAC_RECEIPT_SCHEMA, "result": "NO_DIAGNOSTIC_RECEIPT",
+                "installation_comproved": False, "uac_approved": "NOT_ATTESTED"}
+    if not path.is_file() or path.stat().st_size > 2048 or path.stat().st_size < 40:
+        raise InstallBlocked("UAC_DIAGNOSTIC_READ_BLOCKED")
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeError, ValueError, OSError):
+        raise InstallBlocked("UAC_DIAGNOSTIC_READ_BLOCKED") from None
+    if (not isinstance(record, dict) or record.get("schema") != UAC_RECEIPT_SCHEMA
+        or record.get("host") != adm.HOST or record.get("environment") != "DEV"
+        or record.get("diagnostic_only") is not True
+        or record.get("phase") not in UAC_PHASES
+        or record.get("operation") not in {"install", "rollback"}
+        or record.get("uac_approved") != "NOT_ATTESTED"
+        or record.get("installation_comproved") is not False
+        or record.get("rollback_tested") is not False
+        or record.get("detail") not in {"", "cancelled", "launch_error",
+                                        "no_process_handle", "wait_timeout", "wait_failed",
+                                        "wait_unexpected", "msi_nonzero", "reboot_required",
+                                        "readback_missing", "exit_code_unavailable", "exit_zero"}
+        or not isinstance(record.get("attempt_id"), str)
+        or len(record["attempt_id"]) != 32
+        or any(c not in "0123456789abcdef" for c in record["attempt_id"])
+        or not isinstance(record.get("observed_at_utc"), str)
+        or len(record["observed_at_utc"]) > 42):
+        raise InstallBlocked("UAC_DIAGNOSTIC_READ_BLOCKED")
+    # Expose only the typed, innocuous fields; do not echo arbitrary file data.
+    return {"schema": UAC_RECEIPT_SCHEMA, "result": "DIAGNOSTIC_ONLY",
+            "attempt_id": record["attempt_id"],
+            "phase": record["phase"], "detail": str(record.get("detail") or "")[:30],
+            "operation": record["operation"],
+            "observed_at_utc": str(record.get("observed_at_utc") or "")[:42],
+            "installation_comproved": False, "uac_approved": "NOT_ATTESTED",
+            "rollback_tested": False}
+
+
+def classify_wait_status(status: int) -> str:
+    """Use documented Win32 wait codes; unknown codes must fail closed."""
+    return {0: "completed", 258: "timeout", 0xffffffff: "failed"}.get(status, "unexpected")
 
 
 def require_host() -> None:
@@ -341,6 +448,21 @@ def request_uac(operation: str, confirm: str) -> dict:
         raise InstallBlocked("SYSTEM_MSIEC_UNAVAILABLE")
     if is_admin():
         raise InstallBlocked("ALREADY_ELEVATED_REQUIRES_SEPARATE_SESSION_GATE")
+    previous = read_uac_diagnostic()
+    if previous["result"] == "DIAGNOSTIC_ONLY" and previous["phase"] != "postcondition_verified":
+        raise InstallBlocked("PREVIOUS_UAC_ATTEMPT_UNRESOLVED")
+    attempt_id = uuid.uuid4().hex
+    diagnostic_update_failed = False
+
+    def checkpoint(phase: str, detail: str = "") -> None:
+        nonlocal diagnostic_update_failed
+        # Once UAC may have started, NEVER abandon the process handle just
+        # because diagnostic metadata could not be written to LOCALAPPDATA.
+        try:
+            write_uac_diagnostic(operation, attempt_id, phase, detail=detail)
+        except (OSError, InstallBlocked):
+            diagnostic_update_failed = True
+
     # Keep a Windows file handle with no WRITE/DELETE sharing through launch.
     # The user-owned MSI cannot be replaced during the UAC confirmation window.
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -370,24 +492,43 @@ def request_uac(operation: str, confirm: str) -> dict:
         exe.lpFile = str(INSTALLER)
         exe.lpParameters = build_msiexec_args(operation, fixed_msi())
         exe.lpDirectory = str(Path.cwd())
-        exe.nShow = 0
+        exe.nShow = 1  # SW_SHOWNORMAL; never automate UAC interaction
         shell = ctypes.WinDLL("shell32", use_last_error=True)
         shell.ShellExecuteExW.argtypes = [ctypes.POINTER(EXEC)]
         shell.ShellExecuteExW.restype = wintypes.BOOL
+        # This MUST be durable before asking Windows to start elevated MSI.
+        write_uac_diagnostic(operation, attempt_id, "launch_requested")
         if not shell.ShellExecuteExW(ctypes.byref(exe)):
             err = ctypes.get_last_error()
+            checkpoint("launch_rejected",
+                                 detail="cancelled" if err == 1223 else "launch_error")
             raise InstallBlocked("UAC_REJECTED_OR_UNAVAILABLE" if err == 1223 else "UAC_LAUNCH_FAILED")
         if not exe.hProcess:
+            checkpoint("launch_rejected", detail="no_process_handle")
             raise InstallBlocked("ELEVATED_PROCESS_HANDLE_MISSING")
+        checkpoint("elevated_process_handle_received")
         try:
             kernel.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
             kernel.WaitForSingleObject.restype = wintypes.DWORD
-            if kernel.WaitForSingleObject(exe.hProcess, 120000) != 0:
+            checkpoint("wait_started")
+            wait_result = classify_wait_status(int(kernel.WaitForSingleObject(exe.hProcess, 120000)))
+            if wait_result != "completed":
+                # DO NOT terminate an elevated process: it may still be mutating
+                # system state. Do not retry until independent physical readback.
+                checkpoint(
+                    "wait_timeout_process_may_continue" if wait_result == "timeout" else "wait_failed",
+                    detail={"timeout": "wait_timeout", "failed": "wait_failed",
+                            "unexpected": "wait_unexpected"}[wait_result],
+                )
                 raise InstallBlocked("UAC_MSI_PROCESS_NOT_COMPLETED")
             code = wintypes.DWORD()
             kernel.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
             if not kernel.GetExitCodeProcess(exe.hProcess, ctypes.byref(code)):
+                checkpoint("wait_failed", detail="exit_code_unavailable")
                 raise InstallBlocked("UAC_EXIT_CODE_UNAVAILABLE")
+            checkpoint("process_exited",
+                                 detail="exit_zero" if code.value == 0 else
+                                        "reboot_required" if code.value == 3010 else "msi_nonzero")
             if code.value not in (0, 3010):
                 raise InstallBlocked("MSI_OPERATION_FAILED")
             if code.value == 3010:
@@ -399,20 +540,28 @@ def request_uac(operation: str, confirm: str) -> dict:
     after = preinstall_state()
     if operation == "install":
         if not (after["service"] and after["uninstall"] and after["program_files"]):
+            checkpoint("postcondition_failed", detail="readback_missing")
             raise InstallBlocked("INSTALL_POSTCONDITION_NOT_PROVEN")
+        checkpoint("postcondition_verified")
+        if diagnostic_update_failed:
+            raise InstallBlocked("UAC_DIAGNOSTIC_UPDATE_FAILED")
         return {"result": "INSTALLED_NOT_LOGGED_IN", "msi_sha256": SOURCE_SHA,
                 "service_present": True, "login_attempted": False, "tailnet_activated": False,
                 "rollback_tested": False}
     if any(after.values()):
         # The MSI uninstall can preserve ProgramData; do not erase data or claim rollback.
+        checkpoint("postcondition_failed", detail="readback_missing")
         raise InstallBlocked("ROLLBACK_POSTCONDITION_INCOMPLETE")
+    checkpoint("postcondition_verified")
+    if diagnostic_update_failed:
+        raise InstallBlocked("UAC_DIAGNOSTIC_UPDATE_FAILED")
     return {"result": "ROLLBACK_BASELINE_RESTORED", "rollback_tested": True}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     mx = parser.add_mutually_exclusive_group(required=True)
-    for flag in ("prepare", "preflight", "install", "rollback", "verify"):
+    for flag in ("prepare", "preflight", "install", "rollback", "verify", "diagnose"):
         mx.add_argument("--" + flag, action="store_true")
     parser.add_argument("--confirm", default="")
     ns = parser.parse_args(argv)
@@ -427,6 +576,10 @@ def main(argv: list[str] | None = None) -> int:
             result = request_uac("install", ns.confirm)
         elif ns.rollback:
             result = request_uac("rollback", ns.confirm)
+        elif ns.diagnose:
+            if ns.confirm:
+                raise InstallBlocked("EXTRA_CONFIRMATION_DENIED")
+            result = read_uac_diagnostic()
         else:
             if ns.confirm:
                 raise InstallBlocked("EXTRA_CONFIRMATION_DENIED")
@@ -443,7 +596,9 @@ def main(argv: list[str] | None = None) -> int:
                         "INSTALL_CONFIRMATION_INVALID", "ROLLBACK_CONFIRMATION_INVALID", "NO_INSTALLED_SERVICE_FOR_ROLLBACK",
                         "BASELINE_CHANGED", "MSI_OPERATION_FAILED", "MSI_REBOOT_REQUIRED_NOT_AUTHORIZED",
                         "UAC_REJECTED_OR_UNAVAILABLE", "UAC_LAUNCH_FAILED", "UAC_MSI_PROCESS_NOT_COMPLETED",
-                        "ROLLBACK_POSTCONDITION_INCOMPLETE"}:
+                        "ROLLBACK_POSTCONDITION_INCOMPLETE", "UAC_DIAGNOSTIC_READ_BLOCKED",
+                        "UAC_DIAGNOSTIC_TARGET_INVALID",
+                        "PREVIOUS_UAC_ATTEMPT_UNRESOLVED", "UAC_DIAGNOSTIC_UPDATE_FAILED"}:
             safe = "PRECONDITION_OR_VERIFICATION_FAILED"
         print(json.dumps({"contract": CONTRACT, "result": "BLOCKED", "reason": safe,
                           "installation_comproved": False}, sort_keys=True))

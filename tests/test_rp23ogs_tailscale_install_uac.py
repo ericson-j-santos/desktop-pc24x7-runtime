@@ -136,5 +136,85 @@ class InstallUacContractTests(unittest.TestCase):
         self.assertNotIn('tailscale funnel', src.lower())
 
 
-if __name__ == '__main__':
+class UacDiagnosticReceiptTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.cache = Path(self.tmp.name) / "PASS001" / "TailscaleInstallerV1"
+        self.cache.mkdir(parents=True)
+        patcher = patch.object(t, 'fixed_cache', return_value=self.cache)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.id = "e" * 32
+
+    def test_receipt_absent_is_not_installation_evidence(self):
+        record = t.read_uac_diagnostic()
+        self.assertEqual(record['result'], 'NO_DIAGNOSTIC_RECEIPT')
+        self.assertFalse(record['installation_comproved'])
+
+    def test_journal_checkpoint_roundtrip_is_only_diagnostic(self):
+        t.write_uac_diagnostic('install', self.id, 'launch_requested')
+        data = t.read_uac_diagnostic()
+        self.assertEqual(data['phase'], 'launch_requested')
+        self.assertEqual(data['uac_approved'], 'NOT_ATTESTED')
+        self.assertFalse(data['installation_comproved'])
+
+    def test_timeout_checkpoint_is_not_installation_success(self):
+        t.write_uac_diagnostic('install', self.id, 'wait_started')
+        t.write_uac_diagnostic('install', self.id,
+                               'wait_timeout_process_may_continue', detail='wait_timeout')
+        info = t.read_uac_diagnostic()
+        self.assertEqual(info['phase'], 'wait_timeout_process_may_continue')
+        self.assertEqual(info['detail'], 'wait_timeout')
+        self.assertFalse(info['installation_comproved'])
+        self.assertEqual(list(self.cache.iterdir())[0].name, t.UAC_RECEIPT_NAME)
+
+    def test_unknown_stage_fails_without_file(self):
+        with self.assertRaisesRegex(t.InstallBlocked, 'PHASE_INVALID'):
+            t.write_uac_diagnostic('install', self.id, 'tailnet_activated')
+        self.assertFalse(t.uac_receipt_path().exists())
+
+    def test_unknown_detail_fails_without_file(self):
+        with self.assertRaisesRegex(t.InstallBlocked, 'DETAIL_INVALID'):
+            t.write_uac_diagnostic('install', self.id, 'wait_started', detail='secret=abc')
+        self.assertFalse(t.uac_receipt_path().exists())
+
+    def test_corrupt_journal_fail_closed(self):
+        t.uac_receipt_path().write_text('not-json', encoding='utf-8')
+        with self.assertRaisesRegex(t.InstallBlocked, 'READ_BLOCKED'):
+            t.read_uac_diagnostic()
+
+    def test_tampered_detail_is_not_echoed(self):
+        import json
+        t.write_uac_diagnostic('install', self.id, 'wait_started')
+        path = t.uac_receipt_path()
+        data = json.loads(path.read_text(encoding='utf-8'))
+        data['detail'] = 'token=private_do_not_print'
+        path.write_text(json.dumps(data), encoding='utf-8')
+        with self.assertRaisesRegex(t.InstallBlocked, 'READ_BLOCKED'):
+            t.read_uac_diagnostic()
+
+    def test_diagnose_cli_read_only(self):
+        with patch.object(t, 'request_uac', side_effect=AssertionError('UAC should never run')):
+            with contextlib.redirect_stdout(io.StringIO()) as buf:
+                rc = t.main(['--diagnose'])
+        self.assertEqual(rc, 0)
+        self.assertIn('NO_DIAGNOSTIC_RECEIPT', buf.getvalue())
+        self.assertFalse(t.uac_receipt_path().exists())
+
+    def test_diagnose_rejects_confirmation(self):
+        with contextlib.redirect_stdout(io.StringIO()) as buf:
+            rc = t.main(['--diagnose', '--confirm', 'BAD'])
+        self.assertEqual(rc, 20)
+        self.assertFalse(t.uac_receipt_path().exists())
+
+    def test_wait_status_classification(self):
+        self.assertEqual(t.classify_wait_status(0), 'completed')
+        self.assertEqual(t.classify_wait_status(258), 'timeout')
+        self.assertEqual(t.classify_wait_status(0xffffffff), 'failed')
+        self.assertEqual(t.classify_wait_status(128), 'unexpected')
+
+
+if __name__ == "__main__":
     unittest.main()
